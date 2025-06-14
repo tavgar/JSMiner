@@ -15,14 +15,15 @@ import (
 
 // Match represents a single regex hit
 type Match struct {
-	Source  string `json:"source"`
-	Pattern string `json:"pattern"`
-	Value   string `json:"value"`
+	Source   string `json:"source"`
+	Pattern  string `json:"pattern"`
+	Value    string `json:"value"`
+	Severity string `json:"severity"`
 }
 
 // Extractor holds compiled regex patterns
 type Extractor struct {
-	patterns  map[string]*regexp.Regexp
+	rules     []Rule
 	safeMode  bool
 	allowlist []string
 }
@@ -45,10 +46,11 @@ var defaultPatterns = map[string]string{
 
 // NewExtractor creates an Extractor
 func NewExtractor(safe bool) *Extractor {
-	e := &Extractor{patterns: make(map[string]*regexp.Regexp), safeMode: safe}
+	e := &Extractor{safeMode: safe}
 	for name, pat := range defaultPatterns {
-		e.patterns[name] = regexp.MustCompile(pat)
+		e.rules = append(e.rules, RegexRule{Name: name, RE: regexp.MustCompile(pat), Severity: "info"})
 	}
+	e.rules = append(e.rules, getRegisteredRules()...)
 	return e
 }
 
@@ -69,7 +71,7 @@ func (e *Extractor) LoadRulesFile(path string) error {
 		if err != nil {
 			return err
 		}
-		e.patterns[strings.TrimSpace(name)] = r
+		e.rules = append(e.rules, RegexRule{Name: strings.TrimSpace(name), RE: r, Severity: "info"})
 	}
 	return nil
 }
@@ -129,13 +131,14 @@ func (e *Extractor) ScanReader(source string, r io.Reader) ([]Match, error) {
 	buf := bufio.NewScanner(r)
 	buf.Buffer(make([]byte, 0, 1024), 1024*1024)
 	for buf.Scan() {
-		line := buf.Text()
-		for name, re := range e.patterns {
-			if e.safeMode && !isJSRule(name) {
+		line := []byte(buf.Text())
+		for _, rule := range e.rules {
+			if e.safeMode && !isJSRule(rule.MatchName()) {
 				continue
 			}
-			for _, v := range re.FindAllString(line, -1) {
-				matches = append(matches, Match{Source: source, Pattern: name, Value: v})
+			for _, m := range rule.Find(line) {
+				m.Source = source
+				matches = append(matches, m)
 			}
 		}
 	}
@@ -158,7 +161,7 @@ func (e *Extractor) ScanReaderWithEndpoints(source string, r io.Reader) ([]Match
 
 	if source == "stdin" || isJSFile(source) {
 		for _, ep := range parseJSEndpoints(data) {
-			matches = append(matches, Match{Source: source, Pattern: "endpoint", Value: ep})
+			matches = append(matches, Match{Source: source, Pattern: "endpoint", Value: ep, Severity: "info"})
 		}
 	}
 	return matches, nil
@@ -178,12 +181,14 @@ func (e *Extractor) ScanReaderAST(source string, r io.Reader) ([]Match, error) {
 	}
 	var matches []Match
 	for _, val := range jsast.ExtractValues(data) {
-		for name, re := range e.patterns {
-			if e.safeMode && !isJSRule(name) {
+		b := []byte(val)
+		for _, rule := range e.rules {
+			if e.safeMode && !isJSRule(rule.MatchName()) {
 				continue
 			}
-			for _, v := range re.FindAllString(val, -1) {
-				matches = append(matches, Match{Source: source, Pattern: name, Value: v})
+			for _, m := range rule.Find(b) {
+				m.Source = source
+				matches = append(matches, m)
 			}
 		}
 	}

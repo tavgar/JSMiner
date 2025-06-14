@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"plugin"
 	"strings"
 
 	"jsminer/internal/output"
@@ -22,6 +23,7 @@ func main() {
 	outFile := flag.String("output", "", "output file (stdout default)")
 	quiet := flag.Bool("quiet", false, "suppress banner")
 	targetsFile := flag.String("targets", "", "file with list of targets")
+	pluginsFlag := flag.String("plugins", "", "comma-separated plugin files")
 	flag.Parse()
 
 	if flag.NArg() < 1 && *targetsFile == "" {
@@ -50,6 +52,18 @@ func main() {
 	}
 	if flag.NArg() >= 1 {
 		targets = append(targets, flag.Arg(0))
+	}
+
+	if *pluginsFlag != "" {
+		for _, pl := range strings.Split(*pluginsFlag, ",") {
+			pl = strings.TrimSpace(pl)
+			if pl == "" {
+				continue
+			}
+			if _, err := plugin.Open(pl); err != nil {
+				log.Fatal(err)
+			}
+		}
 	}
 
 	extractor := scan.NewExtractor(*safe)
