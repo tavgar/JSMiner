@@ -25,6 +25,18 @@ Flags:
 - `-output` write output to file instead of stdout.
 - `-quiet` suppress startup banner.
 
+### Rule file format
+
+The file supplied via `-rules` must be a YAML mapping where each key is the
+pattern name and the value is a Go regular expression. The file is parsed using
+[`gopkg.in/yaml.v3`](https://pkg.go.dev/gopkg.in/yaml.v3). Example:
+
+```yaml
+phone: "\\d{3}-\\d{3}-\\d{4}"
+ipv6: "[0-9a-fA-F:]+"
+```
+See `rules-example.yaml` for a sample file.
+
 A URL, filesystem path or `-` for stdin must be provided. The program exits with status `1` when matches are found.
 
 ### Endpoint scanning

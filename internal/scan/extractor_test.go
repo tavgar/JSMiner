@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -120,5 +121,47 @@ func TestScanLongLineSafeMode(t *testing.T) {
 	}
 	if len(matches) != 1 || matches[0].Pattern != "jwt" {
 		t.Fatalf("expected jwt match only, got %+v", matches)
+	}
+}
+
+func TestLoadRulesFile(t *testing.T) {
+	e := NewExtractor(false)
+	f, err := os.CreateTemp("", "rules*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(f.Name())
+	yaml := "number: \"\\d+\""
+	if _, err := f.WriteString(yaml); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	if err := e.LoadRulesFile(f.Name()); err != nil {
+		t.Fatal(err)
+	}
+
+	matches, err := e.ScanReader("file.txt", strings.NewReader("abc 123"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 || matches[0].Pattern != "number" {
+		t.Fatalf("expected number match, got %+v", matches)
+	}
+}
+
+func TestLoadRulesFileInvalid(t *testing.T) {
+	e := NewExtractor(false)
+	f, err := os.CreateTemp("", "rulesbad*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.WriteString("::::"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if err := e.LoadRulesFile(f.Name()); err == nil {
+		t.Fatal("expected error for invalid YAML")
 	}
 }
