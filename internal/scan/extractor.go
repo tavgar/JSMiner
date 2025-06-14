@@ -145,3 +145,25 @@ func (e *Extractor) ScanReader(source string, r io.Reader) ([]Match, error) {
 	}
 	return matches, buf.Err()
 }
+
+// ScanReaderWithEndpoints scans r like ScanReader and also extracts HTTP
+// endpoints from JavaScript sources. Endpoint matches use the pattern name
+// "endpoint".
+func (e *Extractor) ScanReaderWithEndpoints(source string, r io.Reader) ([]Match, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+
+	matches, err := e.ScanReader(source, bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+
+	if source == "stdin" || isJSFile(source) {
+		for _, ep := range parseJSEndpoints(data) {
+			matches = append(matches, Match{Source: source, Pattern: "endpoint", Value: ep})
+		}
+	}
+	return matches, nil
+}

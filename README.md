@@ -27,6 +27,12 @@ Flags:
 
 A URL, filesystem path or `-` for stdin must be provided. The program exits with status `1` when matches are found.
 
+### Endpoint scanning
+
+Package `scan` also exposes `Extractor.ScanReaderWithEndpoints` to collect
+HTTP endpoint strings inside JavaScript sources. Endpoint matches are returned
+with the pattern name `endpoint`.
+
 ## Testing
 
 ```
