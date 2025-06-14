@@ -2,3 +2,4 @@
 # Map pattern names to Go regular expressions
 phone: "\\d{3}-\\d{3}-\\d{4}"
 ipv6: "[0-9a-fA-F:]+"
+path: "(?:/[A-Za-z0-9._-]+)+|[A-Za-z]:\\(?:[^\\\s]+\\)*[^\\\s]+"

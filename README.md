@@ -27,6 +27,10 @@ Flags:
 - `-targets` file with additional URLs/paths to scan, one per line.
 - `-plugins` comma-separated list of Go plugins providing custom rules.
 
+The binary includes a small set of **power rules** enabled by default. These
+rules detect common items such as phone numbers, IPv6 addresses and generic
+file paths. Supplying a file with `-rules` adds to this default set.
+
 ### Rule file format
 
 The file supplied via `-rules` must be a YAML mapping where each key is the
@@ -36,6 +40,7 @@ pattern name and the value is a Go regular expression. The file is parsed using
 ```yaml
 phone: "\\d{3}-\\d{3}-\\d{4}"
 ipv6: "[0-9a-fA-F:]+"
+path: "(?:/[A-Za-z0-9._-]+)+|[A-Za-z]:\\(?:[^\\\s]+\\)*[^\\\s]+"
 ```
 See `examples/rules.yaml` for a sample file.
 
