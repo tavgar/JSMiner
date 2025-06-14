@@ -25,6 +25,7 @@ Flags:
 - `-output` write output to file instead of stdout.
 - `-quiet` suppress startup banner.
 - `-targets` file with additional URLs/paths to scan, one per line.
+- `-plugins` comma-separated list of Go plugins providing custom rules.
 
 ### Rule file format
 
@@ -39,12 +40,29 @@ ipv6: "[0-9a-fA-F:]+"
 See `examples/rules.yaml` for a sample file.
 
 A URL, filesystem path or `-` for stdin must be provided, or use `-targets` to supply multiple inputs. The program exits with status `1` when matches are found.
+Each match also includes a `severity` level.
 
 ### Endpoint scanning
 
 Package `scan` also exposes `Extractor.ScanReaderWithEndpoints` to collect
 HTTP endpoint strings inside JavaScript sources. Endpoint matches are returned
 with the pattern name `endpoint`.
+
+### Plugins
+
+Additional rules can be compiled as Go plugins. Build the plugin with
+
+```
+go build -buildmode=plugin -o entropy.so ./examples/entropy
+```
+
+Load it at runtime with the `-plugins` flag:
+
+```
+jsminer -plugins entropy.so file.js
+```
+
+See `examples/entropy` for a simple entropy based rule.
 
 ## Testing
 

@@ -23,7 +23,7 @@ func NewPrinter(format string, banner bool) *Printer {
 func (p *Printer) Print(w io.Writer, matches []scan.Match) error {
 	if p.format == "pretty" {
 		for _, m := range matches {
-			fmt.Fprintf(w, "%s: [%s] %s\n", m.Source, m.Pattern, m.Value)
+			fmt.Fprintf(w, "%s: [%s] (%s) %s\n", m.Source, m.Pattern, m.Severity, m.Value)
 		}
 		return nil
 	}
