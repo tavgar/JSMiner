@@ -3,12 +3,13 @@ package scan
 import (
 	"bufio"
 	"bytes"
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Match represents a single regex hit
@@ -52,30 +53,24 @@ func NewExtractor(safe bool) *Extractor {
 
 // LoadRulesFile loads additional regex patterns from a YAML file
 func (e *Extractor) LoadRulesFile(path string) error {
-	// simple YAML key:value
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	lines := bufio.NewScanner(bytes.NewReader(data))
-	for lines.Scan() {
-		line := lines.Text()
-		if line == "" || line[0] == '#' {
-			continue
-		}
-		parts := strings.SplitN(line, ":", 2)
-		if len(parts) != 2 {
-			return errors.New("invalid rules line")
-		}
-		name := strings.TrimSpace(parts[0])
-		pat := strings.TrimSpace(parts[1])
+
+	var rules map[string]string
+	if err := yaml.Unmarshal(data, &rules); err != nil {
+		return err
+	}
+
+	for name, pat := range rules {
 		r, err := regexp.Compile(pat)
 		if err != nil {
 			return err
 		}
-		e.patterns[name] = r
+		e.patterns[strings.TrimSpace(name)] = r
 	}
-	return lines.Err()
+	return nil
 }
 
 // LoadAllowlist loads allowed domain suffixes

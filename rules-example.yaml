@@ -1,0 +1,4 @@
+# Example rules file for JSMiner
+# Map pattern names to Go regular expressions
+phone: "\\d{3}-\\d{3}-\\d{4}"
+ipv6: "[0-9a-fA-F:]+"
