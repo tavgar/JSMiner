@@ -55,9 +55,9 @@ When scanning a single input, the JSON output omits the `source` field.
 
 Package `scan` also exposes `Extractor.ScanReaderWithEndpoints` to collect
 HTTP endpoint strings inside JavaScript sources. Endpoint matches are returned
-with the pattern name `endpoint`. In addition to absolute URLs, the extractor
-recognizes protocol-relative references and relative paths beginning with
-`./` or `../`.
+with the pattern name `endpoint_url` for absolute URLs and `endpoint_path` for
+relative paths. The extractor recognizes protocol-relative references and
+relative paths beginning with `./` or `../`.
 
 ### Plugins
 

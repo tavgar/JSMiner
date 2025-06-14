@@ -17,15 +17,23 @@ func TestParseJSEndpoints(t *testing.T) {
 	}
 	expected := map[string]bool{
 		"https://api.example.com/v1": true,
-		"/v1/test":                   true,
-		"./local/api":                true,
-		"../parent/api":              true,
+		"/v1/test":                   false,
+		"./local/api":                false,
+		"../parent/api":              false,
 		"//cdn.example.com/lib.js":   true,
 	}
 	for _, e := range eps {
-		if !expected[e] {
-			t.Fatalf("unexpected endpoint %s", e)
+		v, ok := expected[e.Value]
+		if !ok {
+			t.Fatalf("unexpected endpoint %s", e.Value)
 		}
+		if v != e.IsURL {
+			t.Fatalf("endpoint %s classification mismatch", e.Value)
+		}
+		delete(expected, e.Value)
+	}
+	if len(expected) != 0 {
+		t.Fatalf("missing endpoints: %v", expected)
 	}
 }
 
@@ -36,14 +44,17 @@ func TestScanReaderWithEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var endpoints []string
+	var urls, paths []string
 	for _, m := range matches {
-		if m.Pattern == "endpoint" {
-			endpoints = append(endpoints, m.Value)
+		switch m.Pattern {
+		case "endpoint_url":
+			urls = append(urls, m.Value)
+		case "endpoint_path":
+			paths = append(paths, m.Value)
 		}
 	}
-	if len(endpoints) != 2 {
-		t.Fatalf("expected 2 endpoints, got %d", len(endpoints))
+	if len(urls) != 1 || len(paths) != 1 {
+		t.Fatalf("expected 1 url and 1 path, got %d and %d", len(urls), len(paths))
 	}
 }
 
@@ -55,7 +66,7 @@ func TestScanReaderWithEndpointsNonJS(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, m := range matches {
-		if m.Pattern == "endpoint" {
+		if strings.HasPrefix(m.Pattern, "endpoint_") {
 			t.Fatalf("did not expect endpoint match for non-js file")
 		}
 	}

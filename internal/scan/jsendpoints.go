@@ -1,18 +1,30 @@
 package scan
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 // endpointRe matches endpoint-like strings inside quotes or backticks. It
 // captures absolute URLs, protocol-relative URLs and relative paths beginning
 // with `/`, `./` or `../`.
 var endpointRe = regexp.MustCompile("(?i)[\"'`](((?:https?:)?//[^\"'`\\s]+|\\.?\\.?/[^\"'`\\s]+))[\"'`]")
 
-// parseJSEndpoints extracts endpoints from JavaScript source data.
-func parseJSEndpoints(data []byte) []string {
+// jsEndpoint holds an endpoint string and whether it is an absolute URL.
+type jsEndpoint struct {
+	Value string
+	IsURL bool
+}
+
+// parseJSEndpoints extracts endpoints from JavaScript source data and
+// indicates whether each endpoint is an absolute URL or a relative path.
+func parseJSEndpoints(data []byte) []jsEndpoint {
 	ms := endpointRe.FindAllSubmatch(data, -1)
-	out := make([]string, 0, len(ms))
+	out := make([]jsEndpoint, 0, len(ms))
 	for _, m := range ms {
-		out = append(out, string(m[1]))
+		val := string(m[1])
+		isURL := strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") || strings.HasPrefix(val, "//")
+		out = append(out, jsEndpoint{Value: val, IsURL: isURL})
 	}
 	return out
 }
