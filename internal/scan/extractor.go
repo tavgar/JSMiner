@@ -33,9 +33,12 @@ var jsRules = map[string]bool{
 
 // default patterns (simplified)
 var defaultPatterns = map[string]string{
-	"email": `[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}`,
-	"ipv4":  `\b(?:\d{1,3}\.){3}\d{1,3}\b`,
-	"jwt":   `eyJ[a-zA-Z0-9_-]+?\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+`,
+	"email":      `[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}`,
+	"ipv4":       `\b(?:\d{1,3}\.){3}\d{1,3}\b`,
+	"jwt":        `eyJ[a-zA-Z0-9_-]+?\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+`,
+	"aws_secret": `(?i)aws_secret_access_key\s*[:=]\s*[A-Za-z0-9/+=]{40}`,
+	"google_api": `AIza[0-9A-Za-z-_]{35}`,
+	"bearer":     `(?i)bearer\s+[A-Za-z0-9._-]{10,}`,
 }
 
 // NewExtractor creates an Extractor
