@@ -22,6 +22,7 @@ Flags:
 - `-safe` safe mode - ignore non-JS files and patterns that aren't JavaScript specific (default `true`).
 - `-allow` allowlist file. Sources whose names end with any suffix listed in this file are ignored.
 - `-rules` extra regex rules YAML file.
+- `-endpoints` also extract HTTP endpoints from JavaScript
 - `-output` write output to file instead of stdout.
 - `-quiet` suppress startup banner.
 - `-targets` file with additional URLs/paths to scan, one per line.
