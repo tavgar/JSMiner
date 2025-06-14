@@ -89,12 +89,37 @@ func (e *Extractor) LoadAllowlist(path string) error {
 // ScanReader scans an io.Reader and returns matches
 func (e *Extractor) ScanReader(source string, r io.Reader) ([]Match, error) {
 	var matches []Match
-	buf := bufio.NewScanner(r)
+	seen := make(map[string]struct{})
+
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+
+	// First scan string and template literals extracted from the source
+	for _, str := range extractJSStrings(data) {
+		for name, re := range e.patterns {
+			for _, v := range re.FindAllString(str, -1) {
+				key := name + ":" + v
+				if _, ok := seen[key]; !ok {
+					matches = append(matches, Match{Source: source, Pattern: name, Value: v})
+					seen[key] = struct{}{}
+				}
+			}
+		}
+	}
+
+	// Fallback to line by line scanning of the raw source
+	buf := bufio.NewScanner(bytes.NewReader(data))
 	for buf.Scan() {
 		line := buf.Text()
 		for name, re := range e.patterns {
 			for _, v := range re.FindAllString(line, -1) {
-				matches = append(matches, Match{Source: source, Pattern: name, Value: v})
+				key := name + ":" + v
+				if _, ok := seen[key]; !ok {
+					matches = append(matches, Match{Source: source, Pattern: name, Value: v})
+					seen[key] = struct{}{}
+				}
 			}
 		}
 	}
