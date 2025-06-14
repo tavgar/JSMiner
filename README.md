@@ -20,7 +20,8 @@ Flags:
 
 - `-format` output format, `pretty` or `json` (default `json`).
 - `-safe` safe mode - only scan JavaScript (default `true`).
-- `-allow` allowlist file.
+- `-allow` allowlist file. Entries are domain strings; matches from a source or
+  value containing any of these domains are ignored.
 - `-rules` extra regex rules YAML file.
 - `-output` write output to file instead of stdout.
 - `-quiet` suppress startup banner.

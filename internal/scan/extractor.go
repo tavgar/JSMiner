@@ -86,6 +86,16 @@ func (e *Extractor) LoadAllowlist(path string) error {
 	return sc.Err()
 }
 
+func (e *Extractor) isAllowed(s string) bool {
+	s = strings.ToLower(s)
+	for _, d := range e.allowlist {
+		if strings.Contains(s, strings.ToLower(d)) {
+			return true
+		}
+	}
+	return false
+}
+
 // ScanReader scans an io.Reader and returns matches
 func (e *Extractor) ScanReader(source string, r io.Reader) ([]Match, error) {
 	var matches []Match
@@ -98,5 +108,16 @@ func (e *Extractor) ScanReader(source string, r io.Reader) ([]Match, error) {
 			}
 		}
 	}
-	return matches, buf.Err()
+	if err := buf.Err(); err != nil {
+		return nil, err
+	}
+
+	filtered := matches[:0]
+	for _, m := range matches {
+		if e.isAllowed(m.Source) || e.isAllowed(m.Value) {
+			continue
+		}
+		filtered = append(filtered, m)
+	}
+	return filtered, nil
 }
