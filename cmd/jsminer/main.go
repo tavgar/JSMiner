@@ -20,6 +20,7 @@ func main() {
 	safe := flag.Bool("safe", true, "safe mode - only scan JS")
 	allowFile := flag.String("allow", "", "allowlist file")
 	rulesFile := flag.String("rules", "", "extra regex rules YAML")
+	endpoints := flag.Bool("endpoints", false, "extract HTTP endpoints from JavaScript")
 	outFile := flag.String("output", "", "output file (stdout default)")
 	quiet := flag.Bool("quiet", false, "suppress banner")
 	targetsFile := flag.String("targets", "", "file with list of targets")
@@ -103,7 +104,13 @@ func main() {
 		}
 
 		input := bufio.NewReader(reader)
-		ms, err := extractor.ScanReader(base, input)
+		var ms []scan.Match
+		var err error
+		if *endpoints {
+			ms, err = extractor.ScanReaderWithEndpoints(base, input)
+		} else {
+			ms, err = extractor.ScanReader(base, input)
+		}
 		if err != nil {
 			log.Fatal(err)
 		}
