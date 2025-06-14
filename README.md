@@ -16,7 +16,7 @@ This produces a binary named `jsminer`.
 jsminer [flags] [URL|PATH|-] 
 ```
 
-Flags must appear before the input path or URL.
+Flags may appear before or after the input path or URL.
 
 Flags:
 
@@ -54,7 +54,9 @@ Each match also includes a `severity` level.
 
 Package `scan` also exposes `Extractor.ScanReaderWithEndpoints` to collect
 HTTP endpoint strings inside JavaScript sources. Endpoint matches are returned
-with the pattern name `endpoint`.
+with the pattern name `endpoint`. In addition to absolute URLs, the extractor
+recognizes protocol-relative references and relative paths beginning with
+`./` or `../`.
 
 ### Plugins
 

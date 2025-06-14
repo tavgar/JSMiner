@@ -2,8 +2,10 @@ package scan
 
 import "regexp"
 
-// endpointRe matches HTTP endpoint strings inside quotes or backticks.
-var endpointRe = regexp.MustCompile("(?i)[\"'`](https?://[^\"'`\\s]+|/[^\"'`\\s]+)[\"'`]")
+// endpointRe matches endpoint-like strings inside quotes or backticks. It
+// captures absolute URLs, protocol-relative URLs and relative paths beginning
+// with `/`, `./` or `../`.
+var endpointRe = regexp.MustCompile("(?i)[\"'`](((?:https?:)?//[^\"'`\\s]+|\\.?\\.?/[^\"'`\\s]+))[\"'`]")
 
 // parseJSEndpoints extracts endpoints from JavaScript source data.
 func parseJSEndpoints(data []byte) []string {

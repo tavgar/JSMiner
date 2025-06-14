@@ -27,9 +27,45 @@ func main() {
 	pluginsFlag := flag.String("plugins", "", "comma-separated plugin files")
 	flag.Parse()
 
-	if flag.NArg() < 1 && *targetsFile == "" {
-		fmt.Fprintln(os.Stderr, "usage: jsminer [URL|PATH|-] [flags]")
-		os.Exit(2)
+	// handle flags placed after positional arguments
+	args := flag.Args()
+	leftover := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if !strings.HasPrefix(a, "-") {
+			leftover = append(leftover, a)
+			continue
+		}
+		name := strings.TrimLeft(a, "-")
+		switch name {
+		case "endpoints":
+			*endpoints = true
+		case "safe":
+			*safe = true
+		case "quiet":
+			*quiet = true
+		case "format", "allow", "rules", "output", "targets", "plugins":
+			if i+1 < len(args) {
+				val := args[i+1]
+				i++
+				switch name {
+				case "format":
+					*format = val
+				case "allow":
+					*allowFile = val
+				case "rules":
+					*rulesFile = val
+				case "output":
+					*outFile = val
+				case "targets":
+					*targetsFile = val
+				case "plugins":
+					*pluginsFlag = val
+				}
+			}
+		default:
+			leftover = append(leftover, a)
+		}
 	}
 
 	var targets []string
@@ -51,8 +87,10 @@ func main() {
 		}
 		f.Close()
 	}
-	if flag.NArg() >= 1 {
-		targets = append(targets, flag.Arg(0))
+	targets = append(targets, leftover...)
+	if len(targets) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: jsminer [URL|PATH|-] [flags]")
+		os.Exit(2)
 	}
 
 	if *pluginsFlag != "" {
