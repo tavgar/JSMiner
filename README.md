@@ -12,9 +12,11 @@ This produces a binary named `jsminer`.
 
 ## Usage
 
+``` 
+jsminer [flags] [URL|PATH|-] 
 ```
-jsminer [URL|PATH|-] [flags]
-```
+
+Flags must appear before the input path or URL.
 
 Flags:
 
@@ -22,6 +24,7 @@ Flags:
 - `-safe` safe mode - ignore non-JS files and patterns that aren't JavaScript specific (default `true`).
 - `-allow` allowlist file. Sources whose names end with any suffix listed in this file are ignored.
 - `-rules` extra regex rules YAML file.
+- `-endpoints` also extract HTTP endpoints from JavaScript
 - `-output` write output to file instead of stdout.
 - `-quiet` suppress startup banner.
 - `-targets` file with additional URLs/paths to scan, one per line.
@@ -52,6 +55,12 @@ Each match also includes a `severity` level.
 Package `scan` also exposes `Extractor.ScanReaderWithEndpoints` to collect
 HTTP endpoint strings inside JavaScript sources. Endpoint matches are returned
 with the pattern name `endpoint`.
+
+Example usage:
+
+```bash
+jsminer -format pretty -endpoints app.js
+```
 
 ### Plugins
 
