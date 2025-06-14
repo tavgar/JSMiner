@@ -6,12 +6,22 @@ import (
 )
 
 func TestParseJSEndpoints(t *testing.T) {
-	js := `const a = "https://api.example.com/v1"; fetch('/v1/test');`
+	js := `const a = "https://api.example.com/v1";
+    fetch('/v1/test');
+    fetch("./local/api");
+    fetch('../parent/api');
+    fetch("//cdn.example.com/lib.js");`
 	eps := parseJSEndpoints([]byte(js))
-	if len(eps) != 2 {
-		t.Fatalf("expected 2 endpoints, got %d", len(eps))
+	if len(eps) != 5 {
+		t.Fatalf("expected 5 endpoints, got %d", len(eps))
 	}
-	expected := map[string]bool{"https://api.example.com/v1": true, "/v1/test": true}
+	expected := map[string]bool{
+		"https://api.example.com/v1": true,
+		"/v1/test":                   true,
+		"./local/api":                true,
+		"../parent/api":              true,
+		"//cdn.example.com/lib.js":   true,
+	}
 	for _, e := range eps {
 		if !expected[e] {
 			t.Fatalf("unexpected endpoint %s", e)
