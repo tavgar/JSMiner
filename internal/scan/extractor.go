@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+	"jsminer/internal/scan/jsast"
 )
 
 // Match represents a single regex hit
@@ -158,6 +159,32 @@ func (e *Extractor) ScanReaderWithEndpoints(source string, r io.Reader) ([]Match
 	if source == "stdin" || isJSFile(source) {
 		for _, ep := range parseJSEndpoints(data) {
 			matches = append(matches, Match{Source: source, Pattern: "endpoint", Value: ep})
+		}
+	}
+	return matches, nil
+}
+
+// ScanReaderAST scans JavaScript source using an AST and applies regex patterns
+// to all discovered string values. Only JavaScript files are processed when
+// safe mode is enabled.
+func (e *Extractor) ScanReaderAST(source string, r io.Reader) ([]Match, error) {
+	if e.safeMode && source != "stdin" && !isJSFile(source) {
+		io.Copy(io.Discard, r)
+		return nil, nil
+	}
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	var matches []Match
+	for _, val := range jsast.ExtractValues(data) {
+		for name, re := range e.patterns {
+			if e.safeMode && !isJSRule(name) {
+				continue
+			}
+			for _, v := range re.FindAllString(val, -1) {
+				matches = append(matches, Match{Source: source, Pattern: name, Value: v})
+			}
 		}
 	}
 	return matches, nil
