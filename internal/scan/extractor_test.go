@@ -165,3 +165,21 @@ func TestLoadRulesFileInvalid(t *testing.T) {
 		t.Fatal("expected error for invalid YAML")
 	}
 }
+
+func TestPowerRulesDefault(t *testing.T) {
+	e := NewExtractor(false)
+	r := strings.NewReader("/tmp/data 2001:db8::1 123-456-7890")
+	matches, err := e.ScanReader("file.txt", r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := map[string]bool{}
+	for _, m := range matches {
+		found[m.Pattern] = true
+	}
+	for _, p := range []string{"path", "ipv6", "phone"} {
+		if !found[p] {
+			t.Fatalf("expected match for %s", p)
+		}
+	}
+}

@@ -44,10 +44,21 @@ var defaultPatterns = map[string]string{
 	"bearer":     `(?i)bearer\s+[A-Za-z0-9._-]{10,}`,
 }
 
+// powerPatterns provide additional regexes enabled by default.
+var powerPatterns = map[string]string{
+	"phone": `\d{3}-\d{3}-\d{4}`,
+	"ipv6":  `[0-9a-fA-F:]+`,
+	// crude file path detection for Unix and Windows paths
+	"path": `(?:/[A-Za-z0-9._-]+)+|[A-Za-z]:\\\\(?:[^\\\\\s]+\\\\)*[^\\\\\s]+`,
+}
+
 // NewExtractor creates an Extractor
 func NewExtractor(safe bool) *Extractor {
 	e := &Extractor{safeMode: safe}
 	for name, pat := range defaultPatterns {
+		e.rules = append(e.rules, RegexRule{Name: name, RE: regexp.MustCompile(pat), Severity: "info"})
+	}
+	for name, pat := range powerPatterns {
 		e.rules = append(e.rules, RegexRule{Name: name, RE: regexp.MustCompile(pat), Severity: "info"})
 	}
 	e.rules = append(e.rules, getRegisteredRules()...)
