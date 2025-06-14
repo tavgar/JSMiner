@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -22,6 +23,12 @@ type Extractor struct {
 	patterns  map[string]*regexp.Regexp
 	safeMode  bool
 	allowlist []string
+}
+
+var jsExts = []string{".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"}
+
+var jsRules = map[string]bool{
+	"jwt": true,
 }
 
 // default patterns (simplified)
@@ -86,13 +93,34 @@ func (e *Extractor) LoadAllowlist(path string) error {
 	return sc.Err()
 }
 
+func isJSFile(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	for _, e := range jsExts {
+		if ext == e {
+			return true
+		}
+	}
+	return false
+}
+
+func isJSRule(name string) bool {
+	return jsRules[name]
+}
+
 // ScanReader scans an io.Reader and returns matches
 func (e *Extractor) ScanReader(source string, r io.Reader) ([]Match, error) {
 	var matches []Match
+	if e.safeMode && source != "stdin" && !isJSFile(source) {
+		io.Copy(io.Discard, r)
+		return matches, nil
+	}
 	buf := bufio.NewScanner(r)
 	for buf.Scan() {
 		line := buf.Text()
 		for name, re := range e.patterns {
+			if e.safeMode && !isJSRule(name) {
+				continue
+			}
 			for _, v := range re.FindAllString(line, -1) {
 				matches = append(matches, Match{Source: source, Pattern: name, Value: v})
 			}
