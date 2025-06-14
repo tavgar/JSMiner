@@ -131,6 +131,7 @@ func (e *Extractor) ScanReader(source string, r io.Reader) ([]Match, error) {
 		return matches, nil
 	}
 	buf := bufio.NewScanner(r)
+	buf.Buffer(make([]byte, 0, 1024), 1024*1024)
 	for buf.Scan() {
 		line := buf.Text()
 		for name, re := range e.patterns {
