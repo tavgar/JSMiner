@@ -34,11 +34,12 @@ func main() {
 		input = bufio.NewReader(os.Stdin)
 		base = "stdin"
 	} else if isURL(target) {
-		data, err := scan.FetchURL(target)
+		rc, err := scan.FetchURL(target)
 		if err != nil {
 			log.Fatal(err)
 		}
-		input = bufio.NewReader(data)
+		defer rc.Close()
+		input = bufio.NewReader(rc)
 		base = target
 	} else {
 		f, err := os.Open(target)
