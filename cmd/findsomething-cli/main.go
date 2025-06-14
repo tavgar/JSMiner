@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"findsomething/internal/output"
 	"findsomething/internal/scan"
@@ -19,36 +21,35 @@ func main() {
 	rulesFile := flag.String("rules", "", "extra regex rules YAML")
 	outFile := flag.String("output", "", "output file (stdout default)")
 	quiet := flag.Bool("quiet", false, "suppress banner")
+	targetsFile := flag.String("targets", "", "file with list of targets")
 	flag.Parse()
 
-	if flag.NArg() < 1 {
+	if flag.NArg() < 1 && *targetsFile == "" {
 		fmt.Fprintln(os.Stderr, "usage: findsomething-cli [URL|PATH|-] [flags]")
 		os.Exit(2)
 	}
 
-	target := flag.Arg(0)
-	var input *bufio.Reader
-	var base string
-
-	if target == "-" {
-		input = bufio.NewReader(os.Stdin)
-		base = "stdin"
-	} else if isURL(target) {
-		rc, err := scan.FetchURL(target)
+	var targets []string
+	if *targetsFile != "" {
+		f, err := os.Open(*targetsFile)
 		if err != nil {
 			log.Fatal(err)
 		}
-		defer rc.Close()
-		input = bufio.NewReader(rc)
-		base = target
-	} else {
-		f, err := os.Open(target)
-		if err != nil {
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			t := strings.TrimSpace(sc.Text())
+			if t == "" || strings.HasPrefix(t, "#") {
+				continue
+			}
+			targets = append(targets, t)
+		}
+		if err := sc.Err(); err != nil {
 			log.Fatal(err)
 		}
-		defer f.Close()
-		input = bufio.NewReader(f)
-		base = filepath.Base(target)
+		f.Close()
+	}
+	if flag.NArg() >= 1 {
+		targets = append(targets, flag.Arg(0))
 	}
 
 	extractor := scan.NewExtractor(*safe)
@@ -63,9 +64,41 @@ func main() {
 		}
 	}
 
-	matches, err := extractor.ScanReader(base, input)
-	if err != nil {
-		log.Fatal(err)
+	var allMatches []scan.Match
+	for _, target := range targets {
+		var reader io.ReadCloser
+		var base string
+
+		if target == "-" {
+			reader = os.Stdin
+			base = "stdin"
+		} else if isURL(target) {
+			rc, err := scan.FetchURL(target)
+			if err != nil {
+				log.Fatal(err)
+			}
+			reader = rc
+			base = target
+		} else {
+			f, err := os.Open(target)
+			if err != nil {
+				log.Fatal(err)
+			}
+			reader = f
+			base = filepath.Base(target)
+		}
+
+		input := bufio.NewReader(reader)
+		ms, err := extractor.ScanReader(base, input)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if target != "-" {
+			reader.Close()
+		}
+		if len(ms) > 0 {
+			allMatches = append(allMatches, ms...)
+		}
 	}
 
 	var out *os.File = os.Stdout
@@ -79,11 +112,11 @@ func main() {
 	}
 
 	printer := output.NewPrinter(*format, !*quiet)
-	if err := printer.Print(out, matches); err != nil {
+	if err := printer.Print(out, allMatches); err != nil {
 		log.Fatal(err)
 	}
 
-	if len(matches) > 0 {
+	if len(allMatches) > 0 {
 		os.Exit(1)
 	}
 }
