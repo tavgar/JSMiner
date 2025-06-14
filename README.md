@@ -12,9 +12,11 @@ This produces a binary named `jsminer`.
 
 ## Usage
 
+``` 
+jsminer [flags] [URL|PATH|-] 
 ```
-jsminer [URL|PATH|-] [flags]
-```
+
+Flags must appear before the input path or URL.
 
 Flags:
 
