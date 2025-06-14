@@ -69,6 +69,12 @@ var defaultPatterns = map[string]string{
 	"aws_secret": `(?i)aws_secret_access_key\s*[:=]\s*[A-Za-z0-9/+=]{40}`,
 	"google_api": `AIza[0-9A-Za-z-_]{35}`,
 	"bearer":     `(?i)bearer\s+[A-Za-z0-9._-]{10,}`,
+	// generic API key style values
+	"api_key": `(?i)api[-_]?key\s*[:=]\s*["']?[A-Za-z0-9-_]{16,}`,
+	// generic access or auth token values
+	"token": `(?i)(?:access|auth)?_?token\s*[:=]\s*["']?[A-Za-z0-9-_]{10,}`,
+	// passwords with at least 4 non-space characters
+	"password": `(?i)password\s*[:=]\s*["']?\S{4,}`,
 }
 
 // powerPatterns provide additional regexes enabled by default.
