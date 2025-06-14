@@ -110,9 +110,22 @@ func isJSRule(name string) bool {
 	return jsRules[name]
 }
 
+func (e *Extractor) isAllowed(source string) bool {
+	for _, s := range e.allowlist {
+		if strings.HasSuffix(source, s) {
+			return true
+		}
+	}
+	return false
+}
+
 // ScanReader scans an io.Reader and returns matches
 func (e *Extractor) ScanReader(source string, r io.Reader) ([]Match, error) {
 	var matches []Match
+	if e.isAllowed(source) {
+		io.Copy(io.Discard, r)
+		return matches, nil
+	}
 	if e.safeMode && source != "stdin" && !isJSFile(source) {
 		io.Copy(io.Discard, r)
 		return matches, nil

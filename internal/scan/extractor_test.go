@@ -70,3 +70,29 @@ func TestScanNewPatterns(t *testing.T) {
 		}
 	}
 }
+
+func TestAllowlistIgnore(t *testing.T) {
+	e := NewExtractor(false)
+	e.allowlist = []string{"allowed.js"}
+	r := strings.NewReader("eyJabc.def.ghi")
+	matches, err := e.ScanReader("allowed.js", r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("expected 0 matches, got %d", len(matches))
+	}
+}
+
+func TestAllowlistSuffix(t *testing.T) {
+	e := NewExtractor(false)
+	e.allowlist = []string{"ignored.js"}
+	r := strings.NewReader("eyJabc.def.ghi")
+	matches, err := e.ScanReader("/path/to/ignored.js", r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("expected 0 matches, got %d", len(matches))
+	}
+}
