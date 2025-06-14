@@ -25,7 +25,7 @@ type Extractor struct {
 	allowlist []string
 }
 
-var jsExts = []string{".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"}
+var jsExts = []string{".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".wasm"}
 
 var jsRules = map[string]bool{
 	"jwt": true,
