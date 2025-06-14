@@ -24,6 +24,7 @@ Flags:
 - `-rules` extra regex rules YAML file.
 - `-output` write output to file instead of stdout.
 - `-quiet` suppress startup banner.
+- `-targets` file with additional URLs/paths to scan, one per line.
 
 ### Rule file format
 
@@ -37,7 +38,7 @@ ipv6: "[0-9a-fA-F:]+"
 ```
 See `rules-example.yaml` for a sample file.
 
-A URL, filesystem path or `-` for stdin must be provided. The program exits with status `1` when matches are found.
+A URL, filesystem path or `-` for stdin must be provided, or use `-targets` to supply multiple inputs. The program exits with status `1` when matches are found.
 
 ### Endpoint scanning
 
