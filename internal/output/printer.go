@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"findsomething/internal/scan"
+	"jsminer/internal/scan"
 )
 
 // Printer handles output rendering
