@@ -170,7 +170,8 @@ func main() {
 		out = f
 	}
 
-	printer := output.NewPrinter(*format, !*quiet)
+	showSource := len(targets) > 1
+	printer := output.NewPrinter(*format, !*quiet, showSource)
 	if err := printer.Print(out, allMatches); err != nil {
 		log.Fatal(err)
 	}

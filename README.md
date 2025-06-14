@@ -49,6 +49,7 @@ See `examples/rules.yaml` for a sample file.
 
 A URL, filesystem path or `-` for stdin must be provided, or use `-targets` to supply multiple inputs. The program exits with status `1` when matches are found.
 Each match also includes a `severity` level.
+When scanning a single input, the JSON output omits the `source` field.
 
 ### Endpoint scanning
 
