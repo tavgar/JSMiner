@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"findsomething/internal/output"
-	"findsomething/internal/scan"
+	"jsminer/internal/output"
+	"jsminer/internal/scan"
 )
 
 func main() {
@@ -25,7 +25,7 @@ func main() {
 	flag.Parse()
 
 	if flag.NArg() < 1 && *targetsFile == "" {
-		fmt.Fprintln(os.Stderr, "usage: findsomething-cli [URL|PATH|-] [flags]")
+		fmt.Fprintln(os.Stderr, "usage: jsminer [URL|PATH|-] [flags]")
 		os.Exit(2)
 	}
 

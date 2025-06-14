@@ -5,15 +5,15 @@ JSMiner provides a small command line tool for scraping JavaScript, HTML and rel
 ## Building
 
 ```
-go build ./cmd/findsomething-cli
+go build ./cmd/jsminer
 ```
 
-This produces a binary named `findsomething-cli`.
+This produces a binary named `jsminer`.
 
 ## Usage
 
 ```
-findsomething-cli [URL|PATH|-] [flags]
+jsminer [URL|PATH|-] [flags]
 ```
 
 Flags:
@@ -36,7 +36,7 @@ pattern name and the value is a Go regular expression. The file is parsed using
 phone: "\\d{3}-\\d{3}-\\d{4}"
 ipv6: "[0-9a-fA-F:]+"
 ```
-See `rules-example.yaml` for a sample file.
+See `examples/rules.yaml` for a sample file.
 
 A URL, filesystem path or `-` for stdin must be provided, or use `-targets` to supply multiple inputs. The program exits with status `1` when matches are found.
 

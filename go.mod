@@ -1,4 +1,4 @@
-module findsomething
+module jsminer
 
 go 1.23.8
 
