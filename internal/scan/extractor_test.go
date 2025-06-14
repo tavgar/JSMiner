@@ -183,3 +183,36 @@ func TestPowerRulesDefault(t *testing.T) {
 		}
 	}
 }
+
+func TestSensitiveDefaults(t *testing.T) {
+	e := NewExtractor(false)
+	r := strings.NewReader(`password="secretpass" api_key=ABCDEF1234567890 token=abcdef123456`)
+	matches, err := e.ScanReader("file.txt", r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 3 {
+		t.Fatalf("expected 3 matches, got %d", len(matches))
+	}
+	found := map[string]bool{}
+	for _, m := range matches {
+		found[m.Pattern] = true
+	}
+	for _, p := range []string{"password", "api_key", "token"} {
+		if !found[p] {
+			t.Fatalf("expected match for %s", p)
+		}
+	}
+}
+
+func TestShortPasswordIgnored(t *testing.T) {
+	e := NewExtractor(false)
+	r := strings.NewReader(`password:x api_key=short token=abc`)
+	matches, err := e.ScanReader("file.txt", r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("expected 0 matches, got %d", len(matches))
+	}
+}
