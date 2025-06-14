@@ -16,7 +16,7 @@ This produces a binary named `jsminer`.
 jsminer [flags] [URL|PATH|-] 
 ```
 
-Flags must appear before the input path or URL.
+Flags may appear before or after the input path or URL.
 
 Flags:
 
