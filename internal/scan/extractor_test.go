@@ -96,3 +96,29 @@ func TestAllowlistSuffix(t *testing.T) {
 		t.Fatalf("expected 0 matches, got %d", len(matches))
 	}
 }
+
+func TestScanLongLine(t *testing.T) {
+	e := NewExtractor(false)
+	longLine := strings.Repeat("a", 70*1024) + " test@example.com"
+	r := strings.NewReader(longLine)
+	matches, err := e.ScanReader("file.txt", r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 || matches[0].Pattern != "email" {
+		t.Fatalf("expected email match only, got %+v", matches)
+	}
+}
+
+func TestScanLongLineSafeMode(t *testing.T) {
+	e := NewExtractor(true)
+	longLine := strings.Repeat("a", 70*1024) + " eyJabc.def.ghi"
+	r := strings.NewReader(longLine)
+	matches, err := e.ScanReader("script.js", r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 || matches[0].Pattern != "jwt" {
+		t.Fatalf("expected jwt match only, got %+v", matches)
+	}
+}
