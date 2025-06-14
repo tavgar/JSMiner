@@ -3,13 +3,13 @@ package scan
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 
-	"gopkg.in/yaml.v3"
 	"jsminer/internal/scan/jsast"
 )
 
@@ -26,6 +26,33 @@ type Extractor struct {
 	rules     []Rule
 	safeMode  bool
 	allowlist []string
+}
+
+// parseSimpleYAML is a very small YAML parser that supports the subset used in
+// the tests: a mapping of string keys to string values. It ignores blank lines
+// and comments starting with '#'. The function returns an error if the input
+// does not conform to the expected "key: value" format.
+func parseSimpleYAML(data []byte) (map[string]string, error) {
+	out := make(map[string]string)
+	lines := bytes.Split(data, []byte("\n"))
+	for _, l := range lines {
+		l = bytes.TrimSpace(l)
+		if len(l) == 0 || l[0] == '#' {
+			continue
+		}
+		parts := bytes.SplitN(l, []byte(":"), 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid line: %s", l)
+		}
+		key := strings.TrimSpace(string(parts[0]))
+		val := strings.TrimSpace(string(parts[1]))
+		if key == "" || val == "" {
+			return nil, fmt.Errorf("invalid line: %s", l)
+		}
+		val = strings.Trim(val, "'\"")
+		out[key] = val
+	}
+	return out, nil
 }
 
 var jsExts = []string{".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".wasm"}
@@ -47,9 +74,13 @@ var defaultPatterns = map[string]string{
 // powerPatterns provide additional regexes enabled by default.
 var powerPatterns = map[string]string{
 	"phone": `\d{3}-\d{3}-\d{4}`,
-	"ipv6":  `[0-9a-fA-F:]+`,
-	// crude file path detection for Unix and Windows paths
-	"path": `(?:/[A-Za-z0-9._-]+)+|[A-Za-z]:\\\\(?:[^\\\\\s]+\\\\)*[^\\\\\s]+`,
+	// simple IPv6 pattern requiring at least one colon to avoid matching
+	// plain decimal numbers
+	"ipv6": `[0-9a-fA-F]*:[0-9a-fA-F:]+`,
+	// crude file path detection for Unix and Windows paths. Requires a
+	// leading whitespace or start of line to avoid matching fragments in
+	// secrets.
+	"path": `(?:^|\s)(/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*)|[A-Za-z]:\\\\(?:[^\\\\\s]+\\\\)*[^\\\\\s]+`,
 }
 
 // NewExtractor creates an Extractor
@@ -72,8 +103,8 @@ func (e *Extractor) LoadRulesFile(path string) error {
 		return err
 	}
 
-	var rules map[string]string
-	if err := yaml.Unmarshal(data, &rules); err != nil {
+	rules, err := parseSimpleYAML(data)
+	if err != nil {
 		return err
 	}
 

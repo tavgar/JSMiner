@@ -1,78 +1,57 @@
 package jsast
 
 import (
-	"bytes"
+	"regexp"
 	"strconv"
 	"strings"
-
-	"github.com/tdewolff/parse/v2"
-	"github.com/tdewolff/parse/v2/js"
 )
 
 // ExtractValues parses JavaScript source and returns string values found in
-// string literals, template strings and simple variable assignments.
+// string literals and simple variable assignments where the value consists of
+// one or more string literals concatenated with '+'. The implementation is
+// intentionally lightweight and does not rely on external parsing libraries.
 func ExtractValues(data []byte) []string {
-	l := js.NewLexer(parse.NewInputBytes(data))
-	var values []string
+	src := string(data)
+	uniq := make(map[string]struct{})
 
-	var expectAssign bool
-	var assignActive bool
-	var buf []string
-
-	for {
-		tt, lit := l.Next()
-		if tt == js.ErrorToken {
-			break
-		}
-		switch tt {
-		case js.StringToken:
-			s, _ := strconv.Unquote(string(lit))
-			if assignActive {
-				buf = append(buf, s)
-			}
-			values = append(values, s)
-		case js.TemplateToken:
-			if assignActive {
-				buf = append(buf, string(lit))
-			}
-			values = append(values, string(lit))
-		case js.IdentifierToken:
-			expectAssign = true
-		case js.KeywordToken:
-			if bytes.Equal(lit, []byte("var")) || bytes.Equal(lit, []byte("let")) || bytes.Equal(lit, []byte("const")) {
-				expectAssign = true
-			} else {
-				expectAssign = false
-			}
-		case js.PunctuatorToken:
-			if expectAssign && bytes.Equal(lit, []byte("=")) {
-				assignActive = true
-				buf = nil
-				expectAssign = false
-			} else if assignActive {
-				if !bytes.Equal(lit, []byte("+")) {
-					assignActive = false
-					if len(buf) > 0 {
-						values = append(values, strings.Join(buf, ""))
-					}
-					buf = nil
-				}
-			} else {
-				expectAssign = false
-			}
-		default:
-			if assignActive {
-				assignActive = false
-				if len(buf) > 0 {
-					values = append(values, strings.Join(buf, ""))
-				}
-				buf = nil
-			}
-			expectAssign = false
+	// regular expression for JavaScript string literals
+	pattern := `(?s)"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|` + "`" + `(?:\\.|[^\\` + "`" + `])*` + "`"
+	strRe := regexp.MustCompile(pattern)
+	for _, m := range strRe.FindAllString(src, -1) {
+		if v, err := strconv.Unquote(m); err == nil {
+			uniq[v] = struct{}{}
+		} else {
+			uniq[strings.Trim(m, "'\"`")] = struct{}{}
 		}
 	}
-	if assignActive && len(buf) > 0 {
-		values = append(values, strings.Join(buf, ""))
+
+	// match simple assignments like: const a = "foo" + "bar";
+	assignRe := regexp.MustCompile(`(?m)(?:var|let|const)\s+\w+\s*=\s*([^;\n]+)`)
+	for _, m := range assignRe.FindAllStringSubmatch(src, -1) {
+		expr := m[1]
+		parts := strings.Split(expr, "+")
+		var sb strings.Builder
+		ok := true
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if !strRe.MatchString(p) {
+				ok = false
+				break
+			}
+			if v, err := strconv.Unquote(p); err == nil {
+				sb.WriteString(v)
+			} else {
+				sb.WriteString(strings.Trim(p, "'\"`"))
+			}
+		}
+		if ok {
+			uniq[sb.String()] = struct{}{}
+		}
 	}
-	return values
+
+	out := make([]string, 0, len(uniq))
+	for v := range uniq {
+		out = append(out, v)
+	}
+	return out
 }
