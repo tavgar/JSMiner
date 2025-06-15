@@ -13,15 +13,20 @@ type Printer struct {
 	format     string
 	banner     bool
 	showSource bool
+	version    string
 }
 
 // NewPrinter creates a printer
-func NewPrinter(format string, banner bool, showSource bool) *Printer {
-	return &Printer{format: format, banner: banner, showSource: showSource}
+func NewPrinter(format string, banner bool, showSource bool, version string) *Printer {
+	return &Printer{format: format, banner: banner, showSource: showSource, version: version}
 }
 
 // Print writes matches to w
 func (p *Printer) Print(w io.Writer, matches []scan.Match) error {
+	if p.banner {
+		fmt.Fprintln(w, Banner(p.version))
+	}
+
 	if p.format == "pretty" {
 		for _, m := range matches {
 			if p.showSource {

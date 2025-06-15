@@ -14,6 +14,8 @@ import (
 	"github.com/tavgar/JSMiner/internal/scan"
 )
 
+const version = "0.01v"
+
 func main() {
 	format := flag.String("format", "json", "output format: pretty or json")
 	safe := flag.Bool("safe", true, "safe mode - only scan JS")
@@ -163,7 +165,7 @@ func main() {
 	}
 
 	showSource := len(targets) > 1
-	printer := output.NewPrinter(*format, !*quiet, showSource)
+	printer := output.NewPrinter(*format, !*quiet, showSource, version)
 	if err := printer.Print(out, allMatches); err != nil {
 		log.Fatal(err)
 	}
