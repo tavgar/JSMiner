@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -119,41 +118,34 @@ func main() {
 
 	var allMatches []scan.Match
 	for _, target := range targets {
-		var reader io.ReadCloser
-		var base string
-
-		if target == "-" {
-			reader = os.Stdin
-			base = "stdin"
-		} else if isURL(target) {
-			rc, err := scan.FetchURL(target)
-			if err != nil {
-				log.Fatal(err)
-			}
-			reader = rc
-			base = target
-		} else {
-			f, err := os.Open(target)
-			if err != nil {
-				log.Fatal(err)
-			}
-			reader = f
-			base = filepath.Base(target)
-		}
-
-		input := bufio.NewReader(reader)
 		var ms []scan.Match
 		var err error
-		if *endpoints {
-			ms, err = extractor.ScanReaderWithEndpoints(base, input)
+
+		if target == "-" {
+			reader := bufio.NewReader(os.Stdin)
+			if *endpoints {
+				ms, err = extractor.ScanReaderWithEndpoints("stdin", reader)
+			} else {
+				ms, err = extractor.ScanReader("stdin", reader)
+			}
+		} else if isURL(target) {
+			ms, err = extractor.ScanURL(target, *endpoints)
 		} else {
-			ms, err = extractor.ScanReader(base, input)
+			f, err2 := os.Open(target)
+			if err2 != nil {
+				log.Fatal(err2)
+			}
+			reader := bufio.NewReader(f)
+			if *endpoints {
+				ms, err = extractor.ScanReaderWithEndpoints(filepath.Base(target), reader)
+			} else {
+				ms, err = extractor.ScanReader(filepath.Base(target), reader)
+			}
+			f.Close()
 		}
+
 		if err != nil {
 			log.Fatal(err)
-		}
-		if target != "-" {
-			reader.Close()
 		}
 		if len(ms) > 0 {
 			allMatches = append(allMatches, ms...)
