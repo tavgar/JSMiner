@@ -90,6 +90,9 @@ func main() {
 	}
 	targets = append(targets, leftover...)
 	if len(targets) == 0 {
+		if !*quiet {
+			fmt.Fprintln(os.Stderr, output.Banner(version))
+		}
 		fmt.Fprintln(os.Stderr, "usage: jsminer [URL|PATH|-] [flags]")
 		os.Exit(2)
 	}
