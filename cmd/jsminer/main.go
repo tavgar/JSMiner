@@ -22,6 +22,7 @@ func main() {
 	allowFile := flag.String("allow", "", "allowlist file")
 	rulesFile := flag.String("rules", "", "extra regex rules YAML")
 	endpoints := flag.Bool("endpoints", false, "extract HTTP endpoints from JavaScript")
+	external := flag.Bool("external", false, "follow external scripts and imports")
 	outFile := flag.String("output", "", "output file (stdout default)")
 	quiet := flag.Bool("quiet", false, "suppress banner")
 	targetsFile := flag.String("targets", "", "file with list of targets")
@@ -41,6 +42,8 @@ func main() {
 		switch name {
 		case "endpoints":
 			*endpoints = true
+		case "external":
+			*external = true
 		case "safe":
 			*safe = true
 		case "quiet":
@@ -134,7 +137,7 @@ func main() {
 				ms, err = extractor.ScanReader("stdin", reader)
 			}
 		} else if isURL(target) {
-			ms, err = extractor.ScanURL(target, *endpoints)
+			ms, err = extractor.ScanURL(target, *endpoints, *external)
 		} else {
 			f, err2 := os.Open(target)
 			if err2 != nil {

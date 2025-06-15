@@ -89,19 +89,24 @@ func isHTMLContent(urlStr, ct string) bool {
 	return ext == ".html" || ext == ".htm"
 }
 
-// ScanURL scans urlStr and any discovered script or import references
-// within the same domain. JavaScript files are scanned using the
-// configured Extractor rules.
-func (e *Extractor) ScanURL(urlStr string, endpoints bool) ([]Match, error) {
+// ScanURL scans urlStr and any discovered script or import references.
+// By default only same-domain resources are followed, but when the
+// external parameter is true, cross-domain scripts and imports are also
+// processed. JavaScript files are scanned using the configured rules.
+func (e *Extractor) ScanURL(urlStr string, endpoints bool, external bool) ([]Match, error) {
 	u, err := url.Parse(urlStr)
 	if err != nil {
 		return nil, err
 	}
 	visited := make(map[string]struct{})
-	return e.scanURL(u.String(), u.Hostname(), endpoints, visited)
+	return e.scanURL(u.String(), u.Hostname(), endpoints, visited, external)
 }
 
-func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited map[string]struct{}) ([]Match, error) {
+// scanURL performs the recursive scanning used by ScanURL. The baseHost
+// parameter indicates the host of the initial URL. The visited map tracks
+// already processed URLs to avoid loops. When external is true, resources
+// from other domains are allowed.
+func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited map[string]struct{}, external bool) ([]Match, error) {
 	if _, ok := visited[urlStr]; ok {
 		return nil, nil
 	}
@@ -136,8 +141,8 @@ func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited map
 			if err != nil {
 				continue
 			}
-			if sameScope(baseHost, u.Hostname()) {
-				ms, err := e.scanURL(u.String(), baseHost, endpoints, visited)
+			if external || sameScope(baseHost, u.Hostname()) {
+				ms, err := e.scanURL(u.String(), baseHost, endpoints, visited, external)
 				if err != nil {
 					continue
 				}
@@ -169,8 +174,8 @@ func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited map
 		if u.Scheme != "http" && u.Scheme != "https" {
 			continue
 		}
-		if sameScope(baseHost, u.Hostname()) {
-			ms, err := e.scanURL(u.String(), baseHost, endpoints, visited)
+		if external || sameScope(baseHost, u.Hostname()) {
+			ms, err := e.scanURL(u.String(), baseHost, endpoints, visited, external)
 			if err != nil {
 				continue
 			}

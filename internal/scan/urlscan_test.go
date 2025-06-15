@@ -27,7 +27,7 @@ func TestScanURL(t *testing.T) {
 	defer ts.Close()
 
 	e := NewExtractor(true)
-	matches, err := e.ScanURL(ts.URL, true)
+	matches, err := e.ScanURL(ts.URL, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
