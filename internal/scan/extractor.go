@@ -10,7 +10,7 @@ import (
 	"regexp"
 	"strings"
 
-	"jsminer/internal/scan/jsast"
+	"github.com/tavgar/JSMiner/internal/scan/jsast"
 )
 
 // Match represents a single regex hit
