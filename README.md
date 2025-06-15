@@ -42,10 +42,13 @@ Flags:
 - `-rules` extra regex rules YAML file.
 - `-endpoints` also extract HTTP endpoints from JavaScript
 - `-external` follow external scripts and imports (default `true`)
+- `-render` render pages with headless Chrome (Chrome/Chromium must be installed)
 - `-output` write output to file instead of stdout.
 - `-quiet` suppress startup banner.
 - `-targets` file with additional URLs/paths to scan, one per line.
 - `-plugins` comma-separated list of Go plugins providing custom rules.
+
+Using `-render` requires Chrome or Chromium to be installed on your system.
 
 The binary includes a small set of **power rules** enabled by default. These
 rules detect common items such as phone numbers, IPv6 addresses and generic
