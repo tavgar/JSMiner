@@ -4,7 +4,7 @@ import (
 	"math"
 	"regexp"
 
-	"jsminer/internal/scan"
+	"github.com/tavgar/JSMiner/internal/scan"
 )
 
 // EntropyRule flags strings with high Shannon entropy.

@@ -2,6 +2,12 @@
 
 JSMiner began as a small command line tool for scraping JavaScript, HTML and related files to search for common patterns such as email addresses or JWT tokens. Over time it has grown into a more full-featured utility. The latest versions parse JavaScript into an AST to detect values stored in variables or built from string concatenation. HTTP requests now include a browser-style User-Agent header so more sites will serve their JavaScript correctly. The project is written in Go and distributed under the AGPL‑3.0 license.
 
+## Installation
+
+```
+go install github.com/tavgar/JSMiner/cmd/jsminer@latest
+```
+
 ## Building
 
 ```

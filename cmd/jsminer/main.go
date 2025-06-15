@@ -10,8 +10,8 @@ import (
 	"plugin"
 	"strings"
 
-	"jsminer/internal/output"
-	"jsminer/internal/scan"
+	"github.com/tavgar/JSMiner/internal/output"
+	"github.com/tavgar/JSMiner/internal/scan"
 )
 
 func main() {
