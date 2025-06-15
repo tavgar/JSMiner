@@ -91,20 +91,20 @@ func isHTMLContent(urlStr, ct string) bool {
 
 // ScanURL scans urlStr and any discovered script or import references.
 // Cross-domain resources are followed by default. Set external to false to restrict scanning to the same domain. JavaScript files are scanned using the configured rules.
-func (e *Extractor) ScanURL(urlStr string, endpoints bool, external bool) ([]Match, error) {
+func (e *Extractor) ScanURL(urlStr string, endpoints bool, external bool, render bool) ([]Match, error) {
 	u, err := url.Parse(urlStr)
 	if err != nil {
 		return nil, err
 	}
 	visited := make(map[string]struct{})
-	return e.scanURL(u.String(), u.Hostname(), endpoints, visited, external)
+	return e.scanURL(u.String(), u.Hostname(), endpoints, visited, external, render)
 }
 
 // scanURL performs the recursive scanning used by ScanURL. The baseHost
 // parameter indicates the host of the initial URL. The visited map tracks
 // already processed URLs to avoid loops. When external is false, only resources
 // from the same domain are processed.
-func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited map[string]struct{}, external bool) ([]Match, error) {
+func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited map[string]struct{}, external bool, render bool) ([]Match, error) {
 	if _, ok := visited[urlStr]; ok {
 		return nil, nil
 	}
@@ -126,6 +126,13 @@ func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited map
 	var matches []Match
 
 	if isHTMLContent(finalURL, resp.Header.Get("Content-Type")) {
+		var dynamic []string
+		if render {
+			if rhtml, scripts, err := RenderURL(finalURL); err == nil {
+				data = rhtml
+				dynamic = scripts
+			}
+		}
 		if !e.safeMode {
 			ms, err := e.ScanReader(finalURL, bytes.NewReader(data))
 			if err != nil {
@@ -133,14 +140,16 @@ func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited map
 			}
 			matches = append(matches, ms...)
 		}
-		for _, src := range extractScriptSrcs(data) {
+		sources := extractScriptSrcs(data)
+		sources = append(sources, dynamic...)
+		for _, src := range sources {
 			abs := resolveURL(finalURL, src)
 			u, err := url.Parse(abs)
 			if err != nil {
 				continue
 			}
 			if external || sameScope(baseHost, u.Hostname()) {
-				ms, err := e.scanURL(u.String(), baseHost, endpoints, visited, external)
+				ms, err := e.scanURL(u.String(), baseHost, endpoints, visited, external, render)
 				if err != nil {
 					continue
 				}
@@ -173,7 +182,7 @@ func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited map
 			continue
 		}
 		if external || sameScope(baseHost, u.Hostname()) {
-			ms, err := e.scanURL(u.String(), baseHost, endpoints, visited, external)
+			ms, err := e.scanURL(u.String(), baseHost, endpoints, visited, external, render)
 			if err != nil {
 				continue
 			}

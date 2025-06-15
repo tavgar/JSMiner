@@ -28,7 +28,7 @@ func TestScanURL(t *testing.T) {
 	defer ts.Close()
 
 	e := NewExtractor(true)
-	matches, err := e.ScanURL(ts.URL, true, false)
+	matches, err := e.ScanURL(ts.URL, true, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestScanURLExternal(t *testing.T) {
 	defer ts.Close()
 
 	e := NewExtractor(true)
-	matches, err := e.ScanURL(ts.URL, true, true)
+	matches, err := e.ScanURL(ts.URL, true, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,5 +85,36 @@ func TestScanURLExternal(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("expected to find endpoint from external script")
+	}
+}
+
+// Test ScanURL with rendering to detect dynamically inserted script
+func TestScanURLRender(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		io.WriteString(w, `<html><head><script>document.write('<script src="/dyn.js"></script>');</script></head><body></body></html>`)
+	})
+	mux.HandleFunc("/dyn.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript")
+		io.WriteString(w, `fetch('/api/data');`)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	e := NewExtractor(true)
+	matches, err := e.ScanURL(ts.URL, true, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range matches {
+		if m.Pattern == "endpoint_path" && strings.Contains(m.Value, "/api/data") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected endpoint from dynamic script")
 	}
 }
