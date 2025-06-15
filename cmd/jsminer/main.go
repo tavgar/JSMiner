@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"plugin"
+	"strconv"
 	"strings"
 
 	"github.com/tavgar/JSMiner/internal/output"
@@ -22,7 +23,7 @@ func main() {
 	allowFile := flag.String("allow", "", "allowlist file")
 	rulesFile := flag.String("rules", "", "extra regex rules YAML")
 	endpoints := flag.Bool("endpoints", false, "extract HTTP endpoints from JavaScript")
-	external := flag.Bool("external", false, "follow external scripts and imports")
+	external := flag.Bool("external", true, "follow external scripts and imports")
 	outFile := flag.String("output", "", "output file (stdout default)")
 	quiet := flag.Bool("quiet", false, "suppress banner")
 	targetsFile := flag.String("targets", "", "file with list of targets")
@@ -39,11 +40,24 @@ func main() {
 			continue
 		}
 		name := strings.TrimLeft(a, "-")
+		parts := strings.SplitN(name, "=", 2)
+		name = parts[0]
 		switch name {
 		case "endpoints":
 			*endpoints = true
 		case "external":
-			*external = true
+			val := "true"
+			if len(parts) == 2 {
+				val = parts[1]
+			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				val = args[i+1]
+				i++
+			}
+			if b, err := strconv.ParseBool(val); err == nil {
+				*external = b
+			} else {
+				*external = true
+			}
 		case "safe":
 			*safe = true
 		case "quiet":

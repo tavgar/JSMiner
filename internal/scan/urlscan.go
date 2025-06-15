@@ -90,9 +90,7 @@ func isHTMLContent(urlStr, ct string) bool {
 }
 
 // ScanURL scans urlStr and any discovered script or import references.
-// By default only same-domain resources are followed, but when the
-// external parameter is true, cross-domain scripts and imports are also
-// processed. JavaScript files are scanned using the configured rules.
+// Cross-domain resources are followed by default. Set external to false to restrict scanning to the same domain. JavaScript files are scanned using the configured rules.
 func (e *Extractor) ScanURL(urlStr string, endpoints bool, external bool) ([]Match, error) {
 	u, err := url.Parse(urlStr)
 	if err != nil {
@@ -104,8 +102,8 @@ func (e *Extractor) ScanURL(urlStr string, endpoints bool, external bool) ([]Mat
 
 // scanURL performs the recursive scanning used by ScanURL. The baseHost
 // parameter indicates the host of the initial URL. The visited map tracks
-// already processed URLs to avoid loops. When external is true, resources
-// from other domains are allowed.
+// already processed URLs to avoid loops. When external is false, only resources
+// from the same domain are processed.
 func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited map[string]struct{}, external bool) ([]Match, error) {
 	if _, ok := visited[urlStr]; ok {
 		return nil, nil

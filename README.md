@@ -41,7 +41,7 @@ Flags:
 - `-allow` allowlist file. Sources whose names end with any suffix listed in this file are ignored.
 - `-rules` extra regex rules YAML file.
 - `-endpoints` also extract HTTP endpoints from JavaScript
-- `-external` follow external scripts and imports when scanning URLs
+- `-external` follow external scripts and imports (default `true`)
 - `-output` write output to file instead of stdout.
 - `-quiet` suppress startup banner.
 - `-targets` file with additional URLs/paths to scan, one per line.
@@ -75,8 +75,7 @@ HTTP endpoint strings inside JavaScript sources. Endpoint matches are returned
 with the pattern name `endpoint_url` for absolute URLs and `endpoint_path` for
 relative paths. The extractor recognizes protocol-relative references and
 relative paths beginning with `./` or `../`.
-Use the `-external` flag when scanning a URL to also process scripts and
-imports hosted on other domains.
+Cross-domain scripts and imports are followed by default. Pass `-external=false` to restrict scanning to the same domain.
 
 ### Plugins
 
