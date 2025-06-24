@@ -41,7 +41,7 @@ Flags:
 - `-allow` allowlist file. Sources whose names end with any suffix listed in this file are ignored.
 - `-rules` extra regex rules YAML file.
 - `-endpoints` return only HTTP endpoints (default includes all matches)
-- `-posts` return only HTTP POST request endpoints
+- `-posts` return HTTP POST request endpoints with any parameters
 - `-external` follow external scripts and imports (default `true`)
 - `-render` render pages with headless Chrome (Chrome/Chromium must be installed)
 - `-output` write output to file instead of stdout.
@@ -82,8 +82,9 @@ relative paths. Endpoint extraction is enabled by default. Pass the
 protocol-relative references and relative paths beginning with `./` or `../`.
 Cross-domain scripts and imports are followed by default. Pass `-external=false` to restrict scanning to the same domain.
 Package `scan` also provides `Extractor.ScanReaderPostRequests` to capture
-endpoints used in HTTP POST requests. Use the `-posts` flag to return only POST
-request endpoints.
+endpoints used in HTTP POST requests. The function returns any associated
+parameters when available. Use the `-posts` flag to output only POST request
+endpoints with their parameters.
 
 ### Plugins
 

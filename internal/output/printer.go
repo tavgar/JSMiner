@@ -30,10 +30,14 @@ func (p *Printer) Print(w io.Writer, matches []scan.Match) error {
 	if p.format == "pretty" {
 		for _, m := range matches {
 			if p.showSource {
-				fmt.Fprintf(w, "%s: [%s] (%s) %s\n", m.Source, m.Pattern, m.Severity, m.Value)
+				fmt.Fprintf(w, "%s: [%s] (%s) %s", m.Source, m.Pattern, m.Severity, m.Value)
 			} else {
-				fmt.Fprintf(w, "[%s] (%s) %s\n", m.Pattern, m.Severity, m.Value)
+				fmt.Fprintf(w, "[%s] (%s) %s", m.Pattern, m.Severity, m.Value)
 			}
+			if m.Params != "" {
+				fmt.Fprintf(w, " params=%s", m.Params)
+			}
+			fmt.Fprintln(w)
 		}
 		return nil
 	}
@@ -42,11 +46,12 @@ func (p *Printer) Print(w io.Writer, matches []scan.Match) error {
 		Source   string `json:"source,omitempty"`
 		Pattern  string `json:"pattern"`
 		Value    string `json:"value"`
+		Params   string `json:"params,omitempty"`
 		Severity string `json:"severity"`
 	}
 	out := make([]outMatch, 0, len(matches))
 	for _, m := range matches {
-		om := outMatch{Pattern: m.Pattern, Value: m.Value, Severity: m.Severity}
+		om := outMatch{Pattern: m.Pattern, Value: m.Value, Params: m.Params, Severity: m.Severity}
 		if p.showSource {
 			om.Source = m.Source
 		}

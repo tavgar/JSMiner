@@ -6,29 +6,32 @@ import (
 )
 
 func TestParseJSPostRequests(t *testing.T) {
-	js := `fetch("https://api.example.com/v1", {method:"POST"});
-    axios.post('/v2/data');
-    $.post("./local");
-    $.ajax({url:'../ajax', type:'POST'});
-    xhr.open('POST', '//cdn.example.com/u');`
+	js := `fetch("https://api.example.com/v1", {method:"POST", body:send});
+    axios.post('/v2/data', form);
+    $.post("./local", {a:1});
+    $.ajax({url:'../ajax', type:'POST', data:payload});
+    var x = new XMLHttpRequest();x.open('POST', '//cdn.example.com/u');x.send(file);`
 	eps := parseJSPostRequests([]byte(js))
 	if len(eps) != 5 {
 		t.Fatalf("expected 5 endpoints, got %d", len(eps))
 	}
-	expected := map[string]bool{
-		"https://api.example.com/v1": true,
-		"/v2/data":                   false,
-		"./local":                    false,
-		"../ajax":                    false,
-		"//cdn.example.com/u":        true,
+	expected := map[string]struct {
+		url  bool
+		parm string
+	}{
+		"https://api.example.com/v1": {true, "send"},
+		"/v2/data":                   {false, "form"},
+		"./local":                    {false, "{a:1}"},
+		"../ajax":                    {false, "payload"},
+		"//cdn.example.com/u":        {true, "file"},
 	}
 	for _, e := range eps {
-		v, ok := expected[e.Value]
+		ex, ok := expected[e.Value]
 		if !ok {
 			t.Fatalf("unexpected endpoint %s", e.Value)
 		}
-		if v != e.IsURL {
-			t.Fatalf("endpoint %s classification mismatch", e.Value)
+		if ex.url != e.IsURL || ex.parm != e.Params {
+			t.Fatalf("endpoint %s mismatch", e.Value)
 		}
 		delete(expected, e.Value)
 	}
@@ -38,13 +41,13 @@ func TestParseJSPostRequests(t *testing.T) {
 }
 
 func TestScanReaderPostRequests(t *testing.T) {
-	js := `fetch("https://ex.com/api", {method:'POST'}); axios.post('/submit');`
+	js := `fetch("https://ex.com/api", {method:'POST', body:req}); axios.post('/submit', data);`
 	e := NewExtractor(true)
 	matches, err := e.ScanReaderPostRequests("script.js", strings.NewReader(js))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var urls, paths []string
+	var urls, paths, params []string
 	for _, m := range matches {
 		switch m.Pattern {
 		case "post_url":
@@ -52,9 +55,10 @@ func TestScanReaderPostRequests(t *testing.T) {
 		case "post_path":
 			paths = append(paths, m.Value)
 		}
+		params = append(params, m.Params)
 	}
-	if len(urls) != 1 || len(paths) != 1 {
-		t.Fatalf("expected 1 url and 1 path, got %d and %d", len(urls), len(paths))
+	if len(urls) != 1 || len(paths) != 1 || len(params) != 2 {
+		t.Fatalf("unexpected counts: %d urls %d paths %d params", len(urls), len(paths), len(params))
 	}
 }
 

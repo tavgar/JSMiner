@@ -20,6 +20,7 @@ type Match struct {
 	Source   string `json:"source"`
 	Pattern  string `json:"pattern"`
 	Value    string `json:"value"`
+	Params   string `json:"params,omitempty"`
 	Severity string `json:"severity"`
 }
 
@@ -257,12 +258,13 @@ func (e *Extractor) ScanReaderPostRequests(source string, r io.Reader) ([]Match,
 			p = "post_url"
 		}
 		val := strings.TrimSpace(ep.Value)
-		key := p + "|" + val
+		params := strings.TrimSpace(ep.Params)
+		key := p + "|" + val + "|" + params
 		if _, ok := seen[key]; ok {
 			continue
 		}
 		seen[key] = struct{}{}
-		matches = append(matches, Match{Source: source, Pattern: p, Value: val, Severity: "info"})
+		matches = append(matches, Match{Source: source, Pattern: p, Value: val, Params: params, Severity: "info"})
 	}
 	return matches, nil
 }
