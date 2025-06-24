@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -208,12 +210,22 @@ func (e *Extractor) ScanReaderWithEndpoints(source string, r io.Reader) ([]Match
 	}
 
 	if source == "stdin" || isJSFile(source) {
+		seen := make(map[string]struct{})
 		for _, ep := range parseJSEndpoints(data) {
 			p := "endpoint_path"
 			if ep.IsURL {
 				p = "endpoint_url"
 			}
-			matches = append(matches, Match{Source: source, Pattern: p, Value: ep.Value, Severity: "info"})
+			val := strings.TrimSpace(ep.Value)
+			if !validEndpoint(p, val) {
+				continue
+			}
+			key := p + "|" + val
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			matches = append(matches, Match{Source: source, Pattern: p, Value: val, Severity: "info"})
 		}
 	}
 	return matches, nil
@@ -221,13 +233,49 @@ func (e *Extractor) ScanReaderWithEndpoints(source string, r io.Reader) ([]Match
 
 // FilterEndpointMatches returns only endpoint matches from ms.
 func FilterEndpointMatches(ms []Match) []Match {
+	seen := make(map[string]struct{})
 	var out []Match
 	for _, m := range ms {
-		if strings.HasPrefix(m.Pattern, "endpoint_") {
-			out = append(out, m)
+		if !strings.HasPrefix(m.Pattern, "endpoint_") {
+			continue
 		}
+		val := strings.TrimSpace(m.Value)
+		if !validEndpoint(m.Pattern, val) {
+			continue
+		}
+		key := m.Pattern + "|" + val
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		m.Value = val
+		out = append(out, m)
 	}
 	return out
+}
+
+func validEndpoint(pattern, val string) bool {
+	if pattern == "endpoint_url" {
+		u, err := url.Parse(val)
+		if err != nil || u.Hostname() == "" {
+			return false
+		}
+		host := strings.ToLower(u.Hostname())
+		if strings.HasSuffix(host, "w3.org") {
+			return false
+		}
+		if !strings.Contains(host, ".") && net.ParseIP(host) == nil && host != "localhost" {
+			return false
+		}
+		if val == "//" {
+			return false
+		}
+	} else {
+		if val == "" || val == "/" || val == "//" || val == "/./" || val == "/$" || val == "/*" || val == "./" || val == "../" {
+			return false
+		}
+	}
+	return true
 }
 
 // ScanReaderAST scans JavaScript source using an AST and applies regex patterns

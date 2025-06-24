@@ -173,6 +173,8 @@ func main() {
 		}
 	}
 
+	allMatches = scan.UniqueMatches(allMatches)
+
 	var out *os.File = os.Stdout
 	if *outFile != "" {
 		f, err := os.Create(*outFile)

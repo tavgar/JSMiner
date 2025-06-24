@@ -71,3 +71,18 @@ func TestScanReaderWithEndpointsNonJS(t *testing.T) {
 		}
 	}
 }
+
+func TestScanReaderFiltersInvalidEndpoints(t *testing.T) {
+	js := `fetch("http://a"); fetch('/./'); fetch('//'); fetch('/$'); fetch('https://valid.com/api');`
+	e := NewExtractor(true)
+	matches, err := e.ScanReaderWithEndpoints("script.js", strings.NewReader(js))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected 1 valid endpoint, got %d", len(matches))
+	}
+	if matches[0].Value != "https://valid.com/api" {
+		t.Fatalf("unexpected endpoint %s", matches[0].Value)
+	}
+}
