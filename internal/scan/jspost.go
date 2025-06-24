@@ -15,6 +15,10 @@ var (
 
 	jqueryPostRe = regexp.MustCompile("(?is)\\$\\.post\\(\\s*['\"`]([^'\"`]+)['\"`](?:\\s*,\\s*([^),]+))?")
 
+	genericPostRe = regexp.MustCompile("(?is)[A-Za-z0-9_$.]+\\.post\\(\\s*['\"`]([^'\"`]+)['\"`](?:\\s*,\\s*([^),]+))?")
+
+	fetchQuestRe = regexp.MustCompile("(?is)fetchQuest\\(\\s*['\"`]([^'\"`]+)['\"`](?:\\s*,\\s*([^),]+))?\\)")
+
 	ajaxPostObjRe = regexp.MustCompile("(?is)\\$\\.ajax\\(\\s*{([^}]*)}\\s*\\)")
 	ajaxURLRe     = regexp.MustCompile("url\\s*:\\s*['\"`]([^'\"`]+)['\"`]")
 	ajaxMethodRe  = regexp.MustCompile("(?is)(?:type|method)\\s*:\\s*['\"`]POST['\"`]")
@@ -61,6 +65,26 @@ func parseJSPostRequests(data []byte) []jsEndpoint {
 	}
 
 	for _, m := range jqueryPostRe.FindAllSubmatch(data, -1) {
+		val := string(m[1])
+		params := ""
+		if len(m) > 2 {
+			params = strings.TrimSpace(string(m[2]))
+		}
+		isURL := strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") || strings.HasPrefix(val, "//")
+		uniq[val+"|"+params] = jsEndpoint{Value: val, IsURL: isURL, Params: params}
+	}
+
+	for _, m := range genericPostRe.FindAllSubmatch(data, -1) {
+		val := string(m[1])
+		params := ""
+		if len(m) > 2 {
+			params = strings.TrimSpace(string(m[2]))
+		}
+		isURL := strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") || strings.HasPrefix(val, "//")
+		uniq[val+"|"+params] = jsEndpoint{Value: val, IsURL: isURL, Params: params}
+	}
+
+	for _, m := range fetchQuestRe.FindAllSubmatch(data, -1) {
 		val := string(m[1])
 		params := ""
 		if len(m) > 2 {

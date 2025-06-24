@@ -125,3 +125,23 @@ function createOrder(order) {
 		t.Fatalf("unexpected endpoint %+v", ep)
 	}
 }
+func TestParseJSPostRequestsGeneric(t *testing.T) {
+	js := `api.post('/send', payload); fetchQuest('https://ex.com/api', body);`
+	eps := parseJSPostRequests([]byte(js))
+	if len(eps) != 2 {
+		t.Fatalf("expected 2 endpoints, got %d", len(eps))
+	}
+	expected := map[string]string{
+		"/send":              "payload",
+		"https://ex.com/api": "body",
+	}
+	for _, ep := range eps {
+		if expected[ep.Value] != ep.Params {
+			t.Fatalf("unexpected %+v", ep)
+		}
+		delete(expected, ep.Value)
+	}
+	if len(expected) != 0 {
+		t.Fatalf("missing endpoints %v", expected)
+	}
+}
