@@ -231,6 +231,42 @@ func (e *Extractor) ScanReaderWithEndpoints(source string, r io.Reader) ([]Match
 	return matches, nil
 }
 
+// ScanReaderPostRequests extracts HTTP POST request endpoints from r. Matches
+// use the pattern name "post_url" for absolute URLs and "post_path" for
+// relative paths. Only JavaScript files are processed when safe mode is
+// enabled.
+func (e *Extractor) ScanReaderPostRequests(source string, r io.Reader) ([]Match, error) {
+	if e.safeMode && source != "stdin" && !isJSFile(source) {
+		io.Copy(io.Discard, r)
+		return nil, nil
+	}
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+
+	if source != "stdin" && !isJSFile(source) {
+		return nil, nil
+	}
+
+	seen := make(map[string]struct{})
+	var matches []Match
+	for _, ep := range parseJSPostRequests(data) {
+		p := "post_path"
+		if ep.IsURL {
+			p = "post_url"
+		}
+		val := strings.TrimSpace(ep.Value)
+		key := p + "|" + val
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		matches = append(matches, Match{Source: source, Pattern: p, Value: val, Severity: "info"})
+	}
+	return matches, nil
+}
+
 // FilterEndpointMatches returns only endpoint matches from ms.
 func FilterEndpointMatches(ms []Match) []Match {
 	seen := make(map[string]struct{})

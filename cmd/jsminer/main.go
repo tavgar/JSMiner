@@ -23,6 +23,7 @@ func main() {
 	allowFile := flag.String("allow", "", "allowlist file")
 	rulesFile := flag.String("rules", "", "extra regex rules YAML")
 	endpoints := flag.Bool("endpoints", false, "only return HTTP endpoints")
+	posts := flag.Bool("posts", false, "only return HTTP POST request endpoints")
 	external := flag.Bool("external", true, "follow external scripts and imports")
 	render := flag.Bool("render", false, "render pages in headless Chrome")
 	outFile := flag.String("output", "", "output file (stdout default)")
@@ -46,6 +47,8 @@ func main() {
 		switch name {
 		case "endpoints":
 			*endpoints = true
+		case "posts":
+			*posts = true
 		case "render":
 			*render = true
 		case "external":
@@ -148,20 +151,32 @@ func main() {
 
 		if target == "-" {
 			reader := bufio.NewReader(os.Stdin)
-			ms, err = extractor.ScanReaderWithEndpoints("stdin", reader)
+			if *posts {
+				ms, err = extractor.ScanReaderPostRequests("stdin", reader)
+			} else {
+				ms, err = extractor.ScanReaderWithEndpoints("stdin", reader)
+			}
 		} else if isURL(target) {
-			ms, err = extractor.ScanURL(target, *endpoints, *external, *render)
+			if *posts {
+				ms, err = extractor.ScanURLPosts(target, *external, *render)
+			} else {
+				ms, err = extractor.ScanURL(target, *endpoints, *external, *render)
+			}
 		} else {
 			f, err2 := os.Open(target)
 			if err2 != nil {
 				log.Fatal(err2)
 			}
 			reader := bufio.NewReader(f)
-			ms, err = extractor.ScanReaderWithEndpoints(filepath.Base(target), reader)
+			if *posts {
+				ms, err = extractor.ScanReaderPostRequests(filepath.Base(target), reader)
+			} else {
+				ms, err = extractor.ScanReaderWithEndpoints(filepath.Base(target), reader)
+			}
 			f.Close()
 		}
 
-		if *endpoints {
+		if !*posts && *endpoints {
 			ms = scan.FilterEndpointMatches(ms)
 		}
 

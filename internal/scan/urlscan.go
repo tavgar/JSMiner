@@ -102,6 +102,17 @@ func (e *Extractor) ScanURL(urlStr string, endpoints bool, external bool, render
 	return e.scanURL(u.String(), u.Hostname(), endpoints, visited, external, render)
 }
 
+// ScanURLPosts scans urlStr and discovered script/import references returning
+// only HTTP POST request endpoints found in JavaScript sources.
+func (e *Extractor) ScanURLPosts(urlStr string, external bool, render bool) ([]Match, error) {
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return nil, err
+	}
+	visited := make(map[string]struct{})
+	return e.scanURLPosts(u.String(), u.Hostname(), visited, external, render)
+}
+
 // scanURL performs the recursive scanning used by ScanURL. The baseHost
 // parameter indicates the host of the initial URL. The visited map tracks
 // already processed URLs to avoid loops. When external is false, only resources
@@ -183,6 +194,83 @@ func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited map
 		}
 		if external || sameScope(baseHost, u.Hostname()) {
 			ms, err := e.scanURL(u.String(), baseHost, endpoints, visited, external, render)
+			if err != nil {
+				continue
+			}
+			matches = append(matches, ms...)
+		}
+	}
+	return matches, nil
+}
+
+// scanURLPosts performs recursive scanning like scanURL but returns only POST
+// request endpoints.
+func (e *Extractor) scanURLPosts(urlStr, baseHost string, visited map[string]struct{}, external bool, render bool) ([]Match, error) {
+	if _, ok := visited[urlStr]; ok {
+		return nil, nil
+	}
+	visited[urlStr] = struct{}{}
+
+	resp, err := fetchURLResponse(urlStr)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	finalURL := resp.Request.URL.String()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var matches []Match
+
+	if isHTMLContent(finalURL, resp.Header.Get("Content-Type")) {
+		var dynamic []string
+		if render {
+			if rhtml, scripts, err := RenderURL(finalURL); err == nil {
+				data = rhtml
+				dynamic = scripts
+			}
+		}
+		sources := extractScriptSrcs(data)
+		sources = append(sources, dynamic...)
+		for _, src := range sources {
+			abs := resolveURL(finalURL, src)
+			u, err := url.Parse(abs)
+			if err != nil {
+				continue
+			}
+			if external || sameScope(baseHost, u.Hostname()) {
+				ms, err := e.scanURLPosts(u.String(), baseHost, visited, external, render)
+				if err != nil {
+					continue
+				}
+				matches = append(matches, ms...)
+			}
+		}
+		return matches, nil
+	}
+
+	reader := bytes.NewReader(data)
+	ms, err := e.ScanReaderPostRequests(finalURL, reader)
+	if err != nil {
+		return nil, err
+	}
+	matches = append(matches, ms...)
+
+	for _, imp := range extractJSImports(data) {
+		abs := resolveURL(finalURL, imp)
+		u, err := url.Parse(abs)
+		if err != nil {
+			continue
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			continue
+		}
+		if external || sameScope(baseHost, u.Hostname()) {
+			ms, err := e.scanURLPosts(u.String(), baseHost, visited, external, render)
 			if err != nil {
 				continue
 			}
