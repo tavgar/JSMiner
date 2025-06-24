@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"bytes"
 	"regexp"
 	"strings"
 )
@@ -17,7 +18,8 @@ var (
 
 	genericPostRe = regexp.MustCompile("(?is)[A-Za-z0-9_$.]+\\.post\\(\\s*['\"`]([^'\"`]+)['\"`](?:\\s*,\\s*([^),]+))?")
 
-	fetchQuestRe = regexp.MustCompile("(?is)fetchQuest\\(\\s*['\"`]([^'\"`]+)['\"`](?:\\s*,\\s*([^),]+))?\\)")
+	fetchQuestRe    = regexp.MustCompile("(?is)fetchQuest\\(([^,)]+)(?:,\\s*([^)]*))?\\)")
+	stringLiteralRe = regexp.MustCompile("['\\\"`]+([^'\\\"`]+)['\\\"`]+")
 
 	ajaxPostObjRe = regexp.MustCompile("(?is)\\$\\.ajax\\(\\s*{([^}]*)}\\s*\\)")
 	ajaxURLRe     = regexp.MustCompile("url\\s*:\\s*['\"`]([^'\"`]+)['\"`]")
@@ -85,10 +87,28 @@ func parseJSPostRequests(data []byte) []jsEndpoint {
 	}
 
 	for _, m := range fetchQuestRe.FindAllSubmatch(data, -1) {
-		val := string(m[1])
+		arg := bytes.TrimSpace(m[1])
 		params := ""
 		if len(m) > 2 {
 			params = strings.TrimSpace(string(m[2]))
+		}
+		val := ""
+		if lit := stringLiteralRe.FindSubmatch(arg); lit != nil {
+			val = string(lit[1])
+		} else if idx := bytes.Index(arg, []byte("/v2/q/")); idx != -1 {
+			end := idx + bytes.IndexAny(arg[idx:], "'\"`+")
+			if end <= idx {
+				end = len(arg)
+			}
+			val = string(arg[idx:end])
+		} else if idx := bytes.Index(arg, []byte("/v1/q/")); idx != -1 {
+			end := idx + bytes.IndexAny(arg[idx:], "'\"`+")
+			if end <= idx {
+				end = len(arg)
+			}
+			val = string(arg[idx:end])
+		} else {
+			val = string(arg)
 		}
 		isURL := strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") || strings.HasPrefix(val, "//")
 		uniq[val+"|"+params] = jsEndpoint{Value: val, IsURL: isURL, Params: params}

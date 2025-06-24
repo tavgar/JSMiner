@@ -272,6 +272,16 @@ func (e *Extractor) scanURLPosts(urlStr, baseHost string, visited map[string]str
 	}
 	matches = append(matches, ms...)
 
+	if len(matches) == 0 {
+		if u, err := url.Parse(finalURL); err == nil && strings.Contains(u.Hostname(), "tiktok.com") {
+			parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+			if len(parts) >= 4 && parts[0] == "q" {
+				postURL := u.Scheme + "://" + u.Host + "/open_api/v2/q/" + parts[1] + "/" + parts[2] + "/" + parts[3] + "/"
+				matches = append(matches, Match{Source: finalURL, Pattern: "post_url", Value: postURL, Severity: "info"})
+			}
+		}
+	}
+
 	for _, imp := range extractJSImports(data) {
 		abs := resolveURL(finalURL, imp)
 		u, err := url.Parse(abs)

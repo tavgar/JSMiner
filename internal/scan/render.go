@@ -48,6 +48,7 @@ func RenderURL(urlStr string) ([]byte, []string, error) {
 		network.Enable(),
 		chromedp.Navigate(urlStr),
 		chromedp.WaitReady("body", chromedp.ByQuery),
+		chromedp.Sleep(5*time.Second),
 		chromedp.OuterHTML("html", &html, chromedp.ByQuery),
 	)
 	if err != nil {
@@ -101,6 +102,7 @@ func RenderURLWithRequests(urlStr string) ([]byte, []string, []HTTPRequest, erro
 		network.Enable().WithMaxPostDataSize(64*1024),
 		chromedp.Navigate(urlStr),
 		chromedp.WaitReady("body", chromedp.ByQuery),
+		chromedp.Sleep(5*time.Second),
 		chromedp.OuterHTML("html", &html, chromedp.ByQuery),
 	)
 	if err != nil {
