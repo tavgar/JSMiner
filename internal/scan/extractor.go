@@ -210,12 +210,22 @@ func (e *Extractor) ScanReaderWithEndpoints(source string, r io.Reader) ([]Match
 	}
 
 	if source == "stdin" || isJSFile(source) {
+		seen := make(map[string]struct{})
 		for _, ep := range parseJSEndpoints(data) {
 			p := "endpoint_path"
 			if ep.IsURL {
 				p = "endpoint_url"
 			}
-			matches = append(matches, Match{Source: source, Pattern: p, Value: ep.Value, Severity: "info"})
+			val := strings.TrimSpace(ep.Value)
+			if !validEndpoint(p, val) {
+				continue
+			}
+			key := p + "|" + val
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			matches = append(matches, Match{Source: source, Pattern: p, Value: val, Severity: "info"})
 		}
 	}
 	return matches, nil
