@@ -22,7 +22,7 @@ func main() {
 	safe := flag.Bool("safe", true, "safe mode - only scan JS")
 	allowFile := flag.String("allow", "", "allowlist file")
 	rulesFile := flag.String("rules", "", "extra regex rules YAML")
-	endpoints := flag.Bool("endpoints", false, "extract HTTP endpoints from JavaScript")
+	endpoints := flag.Bool("endpoints", false, "only return HTTP endpoints")
 	external := flag.Bool("external", true, "follow external scripts and imports")
 	render := flag.Bool("render", false, "render pages in headless Chrome")
 	outFile := flag.String("output", "", "output file (stdout default)")
@@ -148,11 +148,7 @@ func main() {
 
 		if target == "-" {
 			reader := bufio.NewReader(os.Stdin)
-			if *endpoints {
-				ms, err = extractor.ScanReaderWithEndpoints("stdin", reader)
-			} else {
-				ms, err = extractor.ScanReader("stdin", reader)
-			}
+			ms, err = extractor.ScanReaderWithEndpoints("stdin", reader)
 		} else if isURL(target) {
 			ms, err = extractor.ScanURL(target, *endpoints, *external, *render)
 		} else {
@@ -161,12 +157,12 @@ func main() {
 				log.Fatal(err2)
 			}
 			reader := bufio.NewReader(f)
-			if *endpoints {
-				ms, err = extractor.ScanReaderWithEndpoints(filepath.Base(target), reader)
-			} else {
-				ms, err = extractor.ScanReader(filepath.Base(target), reader)
-			}
+			ms, err = extractor.ScanReaderWithEndpoints(filepath.Base(target), reader)
 			f.Close()
+		}
+
+		if *endpoints {
+			ms = scan.FilterEndpointMatches(ms)
 		}
 
 		if err != nil {

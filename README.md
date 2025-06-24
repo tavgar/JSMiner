@@ -40,7 +40,7 @@ Flags:
 - `-safe` safe mode - ignore non-JS files and patterns that aren't JavaScript specific (default `true`).
 - `-allow` allowlist file. Sources whose names end with any suffix listed in this file are ignored.
 - `-rules` extra regex rules YAML file.
-- `-endpoints` also extract HTTP endpoints from JavaScript
+- `-endpoints` return only HTTP endpoints (default includes all matches)
 - `-external` follow external scripts and imports (default `true`)
 - `-render` render pages with headless Chrome (Chrome/Chromium must be installed)
 - `-output` write output to file instead of stdout.
@@ -73,11 +73,12 @@ When scanning a single input, the JSON output omits the `source` field.
 
 ### Endpoint scanning
 
-Package `scan` also exposes `Extractor.ScanReaderWithEndpoints` to collect
-HTTP endpoint strings inside JavaScript sources. Endpoint matches are returned
-with the pattern name `endpoint_url` for absolute URLs and `endpoint_path` for
-relative paths. The extractor recognizes protocol-relative references and
-relative paths beginning with `./` or `../`.
+Package `scan` exposes `Extractor.ScanReaderWithEndpoints` to collect HTTP
+endpoint strings inside JavaScript sources. Endpoint matches are returned with
+the pattern name `endpoint_url` for absolute URLs and `endpoint_path` for
+relative paths. Endpoint extraction is enabled by default. Pass the
+`-endpoints` flag to filter output to endpoints only. The extractor recognizes
+protocol-relative references and relative paths beginning with `./` or `../`.
 Cross-domain scripts and imports are followed by default. Pass `-external=false` to restrict scanning to the same domain.
 
 ### Plugins

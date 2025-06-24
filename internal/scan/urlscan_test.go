@@ -28,7 +28,7 @@ func TestScanURL(t *testing.T) {
 	defer ts.Close()
 
 	e := NewExtractor(true)
-	matches, err := e.ScanURL(ts.URL, true, false, false)
+	matches, err := e.ScanURL(ts.URL, false, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestScanURLExternal(t *testing.T) {
 	defer ts.Close()
 
 	e := NewExtractor(true)
-	matches, err := e.ScanURL(ts.URL, true, true, false)
+	matches, err := e.ScanURL(ts.URL, false, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestScanURLRender(t *testing.T) {
 	defer ts.Close()
 
 	e := NewExtractor(true)
-	matches, err := e.ScanURL(ts.URL, true, false, true)
+	matches, err := e.ScanURL(ts.URL, false, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,5 +116,34 @@ func TestScanURLRender(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected endpoint from dynamic script")
+	}
+}
+
+// Test that passing endpoints=true filters out non-endpoint matches.
+func TestScanURLEndpointsOnly(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/a.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript")
+		io.WriteString(w, `const t='eyJabc.def.ghi'; fetch('/api/one');`)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		io.WriteString(w, `<html><script src="/a.js"></script></html>`)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	e := NewExtractor(true)
+	matches, err := e.ScanURL(ts.URL, true, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) == 0 {
+		t.Fatal("expected endpoint matches")
+	}
+	for _, m := range matches {
+		if !strings.HasPrefix(m.Pattern, "endpoint_") {
+			t.Fatalf("unexpected non-endpoint pattern %s", m.Pattern)
+		}
 	}
 }

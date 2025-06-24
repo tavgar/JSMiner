@@ -91,6 +91,8 @@ func isHTMLContent(urlStr, ct string) bool {
 
 // ScanURL scans urlStr and any discovered script or import references.
 // Cross-domain resources are followed by default. Set external to false to restrict scanning to the same domain. JavaScript files are scanned using the configured rules.
+// ScanURL scans urlStr and any discovered script or import references. When
+// endpoints is true, only endpoint matches are returned.
 func (e *Extractor) ScanURL(urlStr string, endpoints bool, external bool, render bool) ([]Match, error) {
 	u, err := url.Parse(urlStr)
 	if err != nil {
@@ -160,15 +162,13 @@ func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited map
 	}
 
 	// treat as JavaScript or other
-	var ms []Match
 	reader := bytes.NewReader(data)
-	if endpoints {
-		ms, err = e.ScanReaderWithEndpoints(finalURL, reader)
-	} else {
-		ms, err = e.ScanReader(finalURL, reader)
-	}
+	ms, err := e.ScanReaderWithEndpoints(finalURL, reader)
 	if err != nil {
 		return nil, err
+	}
+	if endpoints {
+		ms = FilterEndpointMatches(ms)
 	}
 	matches = append(matches, ms...)
 
