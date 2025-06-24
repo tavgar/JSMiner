@@ -219,6 +219,17 @@ func (e *Extractor) ScanReaderWithEndpoints(source string, r io.Reader) ([]Match
 	return matches, nil
 }
 
+// FilterEndpointMatches returns only endpoint matches from ms.
+func FilterEndpointMatches(ms []Match) []Match {
+	var out []Match
+	for _, m := range ms {
+		if strings.HasPrefix(m.Pattern, "endpoint_") {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // ScanReaderAST scans JavaScript source using an AST and applies regex patterns
 // to all discovered string values. Only JavaScript files are processed when
 // safe mode is enabled.
