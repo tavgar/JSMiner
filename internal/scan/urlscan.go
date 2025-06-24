@@ -141,7 +141,13 @@ func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited map
 	if isHTMLContent(finalURL, resp.Header.Get("Content-Type")) {
 		var dynamic []string
 		if render {
-			if rhtml, scripts, err := RenderURL(finalURL); err == nil {
+			if rhtml, scripts, posts, err := RenderURLWithRequests(finalURL); err == nil {
+				data = rhtml
+				dynamic = scripts
+				for _, p := range posts {
+					matches = append(matches, Match{Source: finalURL, Pattern: "post_url", Value: p.URL, Params: p.Body, Severity: "info"})
+				}
+			} else if rhtml, scripts, err := RenderURL(finalURL); err == nil {
 				data = rhtml
 				dynamic = scripts
 			}
@@ -229,7 +235,13 @@ func (e *Extractor) scanURLPosts(urlStr, baseHost string, visited map[string]str
 	if isHTMLContent(finalURL, resp.Header.Get("Content-Type")) {
 		var dynamic []string
 		if render {
-			if rhtml, scripts, err := RenderURL(finalURL); err == nil {
+			if rhtml, scripts, posts, err := RenderURLWithRequests(finalURL); err == nil {
+				data = rhtml
+				dynamic = scripts
+				for _, p := range posts {
+					matches = append(matches, Match{Source: finalURL, Pattern: "post_url", Value: p.URL, Params: p.Body, Severity: "info"})
+				}
+			} else if rhtml, scripts, err := RenderURL(finalURL); err == nil {
 				data = rhtml
 				dynamic = scripts
 			}
