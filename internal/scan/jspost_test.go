@@ -73,3 +73,55 @@ func TestScanReaderPostRequestsNonJS(t *testing.T) {
 		t.Fatalf("expected 0 matches, got %d", len(matches))
 	}
 }
+
+func TestParseJSPostRequestsXHRComplex(t *testing.T) {
+	js := `export function sendAnalytics(payload) {
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', 'https://analytics.example.com/collect', true);
+  xhr.setRequestHeader('Content-Type', 'application/json;charset=UTF-8');
+  xhr.send(JSON.stringify(payload));
+}`
+	eps := parseJSPostRequests([]byte(js))
+	if len(eps) != 1 {
+		t.Fatalf("expected 1 endpoint, got %d", len(eps))
+	}
+	ep := eps[0]
+	if !ep.IsURL || ep.Value != "https://analytics.example.com/collect" || ep.Params != "JSON.stringify(payload)" {
+		t.Fatalf("unexpected endpoint %+v", ep)
+	}
+}
+
+func TestParseJSPostRequestsNode(t *testing.T) {
+	js := `const https = require('https');
+function createOrder(order) {
+  const postData = JSON.stringify(order);
+
+  const options = {
+    hostname: 'api.shop.com',
+    path: '/orders',
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(postData)
+    }
+  };
+
+  const req = https.request(options, res => {
+    let data = '';
+    res.on('data', chunk => (data += chunk));
+    res.on('end', () => console.log('Order created:', data));
+  });
+
+  req.on('error', console.error);
+  req.write(postData);
+  req.end();
+}`
+	eps := parseJSPostRequests([]byte(js))
+	if len(eps) != 1 {
+		t.Fatalf("expected 1 endpoint, got %d", len(eps))
+	}
+	ep := eps[0]
+	if !ep.IsURL || ep.Value != "https://api.shop.com/orders" || ep.Params != "postData" {
+		t.Fatalf("unexpected endpoint %+v", ep)
+	}
+}
