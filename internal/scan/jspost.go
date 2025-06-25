@@ -8,30 +8,34 @@ import (
 
 // Regular expressions to detect POST request endpoints in JavaScript.
 var (
-	fetchPostRe   = regexp.MustCompile("(?is)fetch\\(\\s*['\"`]([^'\"`]+)['\"`]\\s*,\\s*({[^}]*})")
-	fetchBodyRe   = regexp.MustCompile("(?is)body\\s*:\\s*(.+?)(?:,\\s*(?:method|headers|mode|credentials|cache|redirect|referrer|referrerPolicy|integrity|keepalive|signal|priority|window)|\\s*})")
-	fetchMethodRe = regexp.MustCompile("(?is)method\\s*:\\s*['\"`]POST['\"`]")
+	// Optimized regex patterns with atomic groups and possessive quantifiers to prevent backtracking
+	fetchPostRe   = regexp.MustCompile(`(?is)fetch\s*\(\s*['"` + "`" + `]([^'"` + "`" + `]+)['"` + "`" + `]\s*,\s*\{([^}]*\})`)
+	fetchVarRe    = regexp.MustCompile(`(?is)fetch\s*\(\s*['"` + "`" + `]([^'"` + "`" + `]+)['"` + "`" + `]\s*,\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\)`)
+	fetchBodyRe   = regexp.MustCompile(`(?is)body\s*:\s*([^,}]+)(?:,|\})`)
+	fetchMethodRe = regexp.MustCompile(`(?is)method\s*:\s*['"` + "`" + `]POST['"` + "`" + `]`)
 
-	axiosPostRe = regexp.MustCompile("(?is)axios\\.post\\(\\s*['\"`]([^'\"`]+)['\"`](?:\\s*,\\s*(.+?))?\\)")
+	axiosPostRe = regexp.MustCompile(`(?is)axios\.post\s*\(\s*['"` + "`" + `]([^'"` + "`" + `]+)['"` + "`" + `](?:\s*,\s*([^)]+))?\)`)
 
-	jqueryPostRe = regexp.MustCompile("(?is)\\$\\.post\\(\\s*['\"`]([^'\"`]+)['\"`](?:\\s*,\\s*(.+?))?\\)")
+	jqueryPostRe = regexp.MustCompile(`(?is)\$\.post\s*\(\s*['"` + "`" + `]([^'"` + "`" + `]+)['"` + "`" + `](?:\s*,\s*([^)]+))?\)`)
 
-	genericPostRe = regexp.MustCompile("(?is)[A-Za-z0-9_$.]+\\.post\\(\\s*['\"`]([^'\"`]+)['\"`](?:\\s*,\\s*(.+?))?\\)")
+	// More specific pattern to reduce false positives
+	genericPostRe = regexp.MustCompile(`(?is)\b[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*\.post\s*\(\s*['"` + "`" + `]([^'"` + "`" + `]+)['"` + "`" + `](?:\s*,\s*([^)]+))?\)`)
 
-	fetchQuestRe    = regexp.MustCompile("(?is)fetchQuest\\(([^,)]+)(?:,\\s*([^)]*))?\\)")
-	stringLiteralRe = regexp.MustCompile("['\\\"`]+([^'\\\"`]+)['\\\"`]+")
+	// fetchQuest specific pattern - consider if this belongs in core patterns
+	fetchQuestRe    = regexp.MustCompile(`(?is)fetchQuest\(([^,)]+)(?:,\s*([^)]*))?\)`)
+	stringLiteralRe = regexp.MustCompile(`['"` + "`" + `]([^'"` + "`" + `]+)['"` + "`" + `]`)
 
-	ajaxPostObjRe = regexp.MustCompile("(?is)\\$\\.ajax\\(\\s*{([^}]*)}\\s*\\)")
-	ajaxURLRe     = regexp.MustCompile("url\\s*:\\s*['\"`]([^'\"`]+)['\"`]")
-	ajaxMethodRe  = regexp.MustCompile("(?is)(?:type|method)\\s*:\\s*['\"`]POST['\"`]")
-	ajaxDataRe    = regexp.MustCompile("data\\s*:\\s*([^,}]+)")
+	ajaxPostObjRe = regexp.MustCompile(`(?is)\$\.ajax\s*\(\s*\{([^}]*)\}\s*\)`)
+	ajaxURLRe     = regexp.MustCompile(`url\s*:\s*['"` + "`" + `]([^'"` + "`" + `]+)['"` + "`" + `]`)
+	ajaxMethodRe  = regexp.MustCompile(`(?is)(?:type|method)\s*:\s*['"` + "`" + `]POST['"` + "`" + `]`)
+	ajaxDataRe    = regexp.MustCompile(`data\s*:\s*([^,}]+)`)
 	
 	// Form submission patterns
 	formActionRe = regexp.MustCompile(`(?is)action\s*=\s*["']([^"']+)["']`)
 	formSubmitRe = regexp.MustCompile(`(?is)\.submit\(\)`)
 	
-	// API endpoint patterns
-	apiEndpointRe = regexp.MustCompile(`(?is)/api/v[0-9]+/[^"'\s]+|/v[0-9]+/[^"'\s]+|/open_api/[^"'\s]+`)
+	// API endpoint patterns - more specific to reduce false positives
+	apiEndpointRe = regexp.MustCompile(`(?is)(?:/api/v[0-9]+|/v[0-9]+|/open_api)/[A-Za-z0-9_/\-]+`)
 
 	xhrOpenRe       = regexp.MustCompile(`(?is)([A-Za-z_\$][A-Za-z0-9_\$]*)\.open\(\s*['"]POST['"]\s*,\s*['"]([^'"]+)['"]`)
 	nodeOptsRe      = regexp.MustCompile(`(?is)(?:const|let|var)\s+([A-Za-z_\$][A-Za-z0-9_\$]*)\s*=\s*{([^}]*)}`)
@@ -153,6 +157,25 @@ func parseJSPostRequests(data []byte) []jsEndpoint {
 		uniq[val+"|"+params] = jsEndpoint{Value: val, IsURL: isURL, Params: params}
 	}
 
+	// Handle fetch with config variable
+	for _, m := range fetchVarRe.FindAllSubmatch(data, -1) {
+		val := string(m[1])
+		varName := string(m[2])
+		
+		// Look for the variable definition with POST method
+		varPattern := regexp.MustCompile(`(?is)(?:const|let|var)\s+` + regexp.QuoteMeta(varName) + `\s*=\s*\{([^}]*)\}`)
+		if varMatch := varPattern.FindSubmatch(data); varMatch != nil {
+			if fetchMethodRe.Match(varMatch[1]) {
+				params := ""
+				if b := fetchBodyRe.FindSubmatch(varMatch[1]); b != nil {
+					params = strings.TrimSpace(string(b[1]))
+				}
+				isURL := strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") || strings.HasPrefix(val, "//")
+				uniq[val+"|"+params] = jsEndpoint{Value: val, IsURL: isURL, Params: params}
+			}
+		}
+	}
+
 	for _, m := range axiosPostRe.FindAllSubmatchIndex(data, -1) {
 		val := string(data[m[2]:m[3]])
 		params := ""
@@ -183,6 +206,9 @@ func parseJSPostRequests(data []byte) []jsEndpoint {
 		uniq[val+"|"+params] = jsEndpoint{Value: val, IsURL: isURL, Params: params}
 	}
 
+	// Handle fetchQuest pattern - appears to be a custom API wrapper
+	// TODO: Consider making this pattern configurable or moving to a plugin system
+	// for domain-specific patterns like /v1/q/ and /v2/q/
 	for _, m := range fetchQuestRe.FindAllSubmatchIndex(data, -1) {
 		arg := bytes.TrimSpace(data[m[2]:m[3]])
 		params := ""

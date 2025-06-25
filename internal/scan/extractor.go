@@ -180,7 +180,7 @@ func (e *Extractor) ScanReader(source string, r io.Reader) ([]Match, error) {
 		return matches, nil
 	}
 	buf := bufio.NewScanner(r)
-	buf.Buffer(make([]byte, 0, 1024), 1024*1024)
+	buf.Buffer(make([]byte, 0, InitialBufferSize), MaxBufferSize)
 	for buf.Scan() {
 		line := []byte(buf.Text())
 		for _, rule := range e.rules {

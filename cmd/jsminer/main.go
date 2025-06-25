@@ -164,25 +164,44 @@ func main() {
 			reader := bufio.NewReader(os.Stdin)
 			if *posts {
 				ms, err = extractor.ScanReaderPostRequests("stdin", reader)
+				if err != nil {
+					err = fmt.Errorf("failed to scan POST requests from stdin: %w", err)
+				}
 			} else {
 				ms, err = extractor.ScanReaderWithEndpoints("stdin", reader)
+				if err != nil {
+					err = fmt.Errorf("failed to scan endpoints from stdin: %w", err)
+				}
 			}
 		} else if isURL(target) {
 			if *posts {
 				ms, err = extractor.ScanURLPosts(target, *external, *render)
+				if err != nil {
+					err = fmt.Errorf("failed to scan POST requests from URL %s: %w", target, err)
+				}
 			} else {
 				ms, err = extractor.ScanURL(target, *endpoints, *external, *render)
+				if err != nil {
+					err = fmt.Errorf("failed to scan endpoints from URL %s: %w", target, err)
+				}
 			}
 		} else {
 			f, err2 := os.Open(target)
 			if err2 != nil {
-				log.Fatal(err2)
+				log.Printf("Error: failed to open file %s: %v", target, err2)
+				continue
 			}
 			reader := bufio.NewReader(f)
 			if *posts {
 				ms, err = extractor.ScanReaderPostRequests(filepath.Base(target), reader)
+				if err != nil {
+					err = fmt.Errorf("failed to scan POST requests from file %s: %w", target, err)
+				}
 			} else {
 				ms, err = extractor.ScanReaderWithEndpoints(filepath.Base(target), reader)
+				if err != nil {
+					err = fmt.Errorf("failed to scan endpoints from file %s: %w", target, err)
+				}
 			}
 			f.Close()
 		}
@@ -192,7 +211,8 @@ func main() {
 		}
 
 		if err != nil {
-			log.Fatal(err)
+			log.Printf("Error processing %s: %v", target, err)
+			continue
 		}
 		if len(ms) > 0 {
 			allMatches = append(allMatches, ms...)

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/tavgar/JSMiner/internal/scan"
 )
@@ -35,7 +36,19 @@ func (p *Printer) Print(w io.Writer, matches []scan.Match) error {
 				fmt.Fprintf(w, "[%s] (%s) %s", m.Pattern, m.Severity, m.Value)
 			}
 			if m.Params != "" {
-				fmt.Fprintf(w, " params=%s", m.Params)
+				params := m.Params
+				if len(params) > scan.MaxParameterDisplayLength {
+					params = params[:scan.MaxParameterDisplayLength-3] + "..."
+				}
+				// Replace newlines with spaces for better display
+				params = strings.ReplaceAll(params, "\n", " ")
+				params = strings.ReplaceAll(params, "\r", "")
+				params = strings.ReplaceAll(params, "\t", " ")
+				// Collapse multiple spaces
+				for strings.Contains(params, "  ") {
+					params = strings.ReplaceAll(params, "  ", " ")
+				}
+				fmt.Fprintf(w, " params=%s", strings.TrimSpace(params))
 			}
 			fmt.Fprintln(w)
 		}
@@ -51,7 +64,22 @@ func (p *Printer) Print(w io.Writer, matches []scan.Match) error {
 	}
 	out := make([]outMatch, 0, len(matches))
 	for _, m := range matches {
-		om := outMatch{Pattern: m.Pattern, Value: m.Value, Params: m.Params, Severity: m.Severity}
+		params := m.Params
+		if params != "" {
+			if len(params) > scan.MaxParameterDisplayLength {
+				params = params[:scan.MaxParameterDisplayLength-3] + "..."
+			}
+			// Replace newlines with spaces for better display
+			params = strings.ReplaceAll(params, "\n", " ")
+			params = strings.ReplaceAll(params, "\r", "")
+			params = strings.ReplaceAll(params, "\t", " ")
+			// Collapse multiple spaces
+			for strings.Contains(params, "  ") {
+				params = strings.ReplaceAll(params, "  ", " ")
+			}
+			params = strings.TrimSpace(params)
+		}
+		om := outMatch{Pattern: m.Pattern, Value: m.Value, Params: params, Severity: m.Severity}
 		if p.showSource {
 			om.Source = m.Source
 		}

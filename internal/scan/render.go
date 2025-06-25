@@ -3,7 +3,6 @@ package scan
 import (
 	"context"
 	"strings"
-	"time"
 
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
@@ -29,7 +28,7 @@ func RenderURL(urlStr string) ([]byte, []string, error) {
 	ctx, cancelCtx := chromedp.NewContext(allocCtx)
 	defer cancelCtx()
 
-	ctx, cancelTimeout := context.WithTimeout(ctx, 15*time.Second)
+	ctx, cancelTimeout := context.WithTimeout(ctx, RenderTimeout)
 	defer cancelTimeout()
 
 	scriptSet := make(map[string]struct{})
@@ -48,7 +47,7 @@ func RenderURL(urlStr string) ([]byte, []string, error) {
 		network.Enable(),
 		chromedp.Navigate(urlStr),
 		chromedp.WaitReady("body", chromedp.ByQuery),
-		chromedp.Sleep(8*time.Second),
+		chromedp.Sleep(RenderSleepDuration),
 		chromedp.OuterHTML("html", &html, chromedp.ByQuery),
 	)
 	if err != nil {
@@ -76,7 +75,7 @@ func RenderURLWithRequests(urlStr string) ([]byte, []string, []HTTPRequest, erro
 	ctx, cancelCtx := chromedp.NewContext(allocCtx)
 	defer cancelCtx()
 
-	ctx, cancelTimeout := context.WithTimeout(ctx, 15*time.Second)
+	ctx, cancelTimeout := context.WithTimeout(ctx, RenderTimeout)
 	defer cancelTimeout()
 
 	scriptSet := make(map[string]struct{})
@@ -99,10 +98,10 @@ func RenderURLWithRequests(urlStr string) ([]byte, []string, []HTTPRequest, erro
 
 	var html string
 	err := chromedp.Run(ctx,
-		network.Enable().WithMaxPostDataSize(64*1024),
+		network.Enable().WithMaxPostDataSize(MaxPostDataSize),
 		chromedp.Navigate(urlStr),
 		chromedp.WaitReady("body", chromedp.ByQuery),
-		chromedp.Sleep(8*time.Second),
+		chromedp.Sleep(RenderSleepDuration),
 		chromedp.OuterHTML("html", &html, chromedp.ByQuery),
 	)
 	if err != nil {
