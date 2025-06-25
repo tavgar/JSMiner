@@ -9,14 +9,14 @@ import (
 // Regular expressions to detect POST request endpoints in JavaScript.
 var (
 	fetchPostRe   = regexp.MustCompile("(?is)fetch\\(\\s*['\"`]([^'\"`]+)['\"`]\\s*,\\s*({[^}]*})")
-	fetchBodyRe   = regexp.MustCompile("(?is)body\\s*:\\s*([^,}]+)")
+	fetchBodyRe   = regexp.MustCompile("(?is)body\\s*:\\s*(.+?)(?:,\\s*(?:method|headers|mode|credentials|cache|redirect|referrer|referrerPolicy|integrity|keepalive|signal|priority|window)|\\s*})")
 	fetchMethodRe = regexp.MustCompile("(?is)method\\s*:\\s*['\"`]POST['\"`]")
 
-	axiosPostRe = regexp.MustCompile("(?is)axios\\.post\\(\\s*['\"`]([^'\"`]+)['\"`](?:\\s*,\\s*([^),]+))?")
+	axiosPostRe = regexp.MustCompile("(?is)axios\\.post\\(\\s*['\"`]([^'\"`]+)['\"`](?:\\s*,\\s*(.+?))?\\)")
 
-	jqueryPostRe = regexp.MustCompile("(?is)\\$\\.post\\(\\s*['\"`]([^'\"`]+)['\"`](?:\\s*,\\s*([^),]+))?")
+	jqueryPostRe = regexp.MustCompile("(?is)\\$\\.post\\(\\s*['\"`]([^'\"`]+)['\"`](?:\\s*,\\s*(.+?))?\\)")
 
-	genericPostRe = regexp.MustCompile("(?is)[A-Za-z0-9_$.]+\\.post\\(\\s*['\"`]([^'\"`]+)['\"`](?:\\s*,\\s*([^),]+))?")
+	genericPostRe = regexp.MustCompile("(?is)[A-Za-z0-9_$.]+\\.post\\(\\s*['\"`]([^'\"`]+)['\"`](?:\\s*,\\s*(.+?))?\\)")
 
 	fetchQuestRe    = regexp.MustCompile("(?is)fetchQuest\\(([^,)]+)(?:,\\s*([^)]*))?\\)")
 	stringLiteralRe = regexp.MustCompile("['\\\"`]+([^'\\\"`]+)['\\\"`]+")
@@ -25,6 +25,13 @@ var (
 	ajaxURLRe     = regexp.MustCompile("url\\s*:\\s*['\"`]([^'\"`]+)['\"`]")
 	ajaxMethodRe  = regexp.MustCompile("(?is)(?:type|method)\\s*:\\s*['\"`]POST['\"`]")
 	ajaxDataRe    = regexp.MustCompile("data\\s*:\\s*([^,}]+)")
+	
+	// Form submission patterns
+	formActionRe = regexp.MustCompile(`(?is)action\s*=\s*["']([^"']+)["']`)
+	formSubmitRe = regexp.MustCompile(`(?is)\.submit\(\)`)
+	
+	// API endpoint patterns
+	apiEndpointRe = regexp.MustCompile(`(?is)/api/v[0-9]+/[^"'\s]+|/v[0-9]+/[^"'\s]+|/open_api/[^"'\s]+`)
 
 	xhrOpenRe       = regexp.MustCompile(`(?is)([A-Za-z_\$][A-Za-z0-9_\$]*)\.open\(\s*['"]POST['"]\s*,\s*['"]([^'"]+)['"]`)
 	nodeOptsRe      = regexp.MustCompile(`(?is)(?:const|let|var)\s+([A-Za-z_\$][A-Za-z0-9_\$]*)\s*=\s*{([^}]*)}`)
@@ -36,6 +43,96 @@ var (
 	nodeInlineRe1   = regexp.MustCompile(`(?is)(https?\.request)\(\s*{([^}]*)}`)
 	nodeInlineRe2   = regexp.MustCompile(`(?is)(https?\.request)\([^,]+,\s*{([^}]*)}`)
 )
+
+// extractJSExpression extracts a complete JavaScript expression (object, array, function call, etc.)
+// starting at the given position in the data. It handles nested structures by counting brackets.
+func extractJSExpression(data []byte, start int) string {
+	if start >= len(data) {
+		return ""
+	}
+	
+	// Skip whitespace
+	for start < len(data) && (data[start] == ' ' || data[start] == '\t' || data[start] == '\n' || data[start] == '\r') {
+		start++
+	}
+	
+	if start >= len(data) {
+		return ""
+	}
+	
+	openDelim := data[start]
+	var closeDelim byte
+	
+	switch openDelim {
+	case '{':
+		closeDelim = '}'
+	case '[':
+		closeDelim = ']'
+	case '(':
+		closeDelim = ')'
+	default:
+		// Not an object/array, extract until comma or closing parenthesis
+		end := start
+		parenDepth := 0
+		inString := false
+		var stringDelim byte
+		
+		for end < len(data) {
+			if !inString {
+				if data[end] == '"' || data[end] == '\'' || data[end] == '`' {
+					inString = true
+					stringDelim = data[end]
+				} else if data[end] == '(' {
+					parenDepth++
+				} else if data[end] == ')' {
+					if parenDepth == 0 {
+						break
+					}
+					parenDepth--
+				} else if data[end] == ',' && parenDepth == 0 {
+					break
+				}
+			} else {
+				if data[end] == stringDelim && (end == 0 || data[end-1] != '\\') {
+					inString = false
+				}
+			}
+			end++
+		}
+		
+		return strings.TrimSpace(string(data[start:end]))
+	}
+	
+	// Extract nested structure
+	depth := 1
+	end := start + 1
+	inString := false
+	var stringDelim byte
+	
+	for end < len(data) && depth > 0 {
+		if !inString {
+			if data[end] == '"' || data[end] == '\'' || data[end] == '`' {
+				inString = true
+				stringDelim = data[end]
+			} else if data[end] == openDelim {
+				depth++
+			} else if data[end] == closeDelim {
+				depth--
+			}
+		} else {
+			if data[end] == stringDelim && (end == 0 || data[end-1] != '\\') {
+				inString = false
+			}
+		}
+		end++
+	}
+	
+	if depth == 0 && end <= len(data) {
+		return strings.TrimSpace(string(data[start:end]))
+	}
+	
+	return strings.TrimSpace(string(data[start:]))
+}
 
 // parseJSPostRequests extracts POST request endpoints from JavaScript source
 // data. Returned endpoints indicate whether they are absolute URLs.
@@ -56,41 +153,41 @@ func parseJSPostRequests(data []byte) []jsEndpoint {
 		uniq[val+"|"+params] = jsEndpoint{Value: val, IsURL: isURL, Params: params}
 	}
 
-	for _, m := range axiosPostRe.FindAllSubmatch(data, -1) {
-		val := string(m[1])
+	for _, m := range axiosPostRe.FindAllSubmatchIndex(data, -1) {
+		val := string(data[m[2]:m[3]])
 		params := ""
-		if len(m) > 2 {
-			params = strings.TrimSpace(string(m[2]))
+		if len(m) > 4 && m[4] != -1 {
+			params = extractJSExpression(data, m[4])
 		}
 		isURL := strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") || strings.HasPrefix(val, "//")
 		uniq[val+"|"+params] = jsEndpoint{Value: val, IsURL: isURL, Params: params}
 	}
 
-	for _, m := range jqueryPostRe.FindAllSubmatch(data, -1) {
-		val := string(m[1])
+	for _, m := range jqueryPostRe.FindAllSubmatchIndex(data, -1) {
+		val := string(data[m[2]:m[3]])
 		params := ""
-		if len(m) > 2 {
-			params = strings.TrimSpace(string(m[2]))
+		if len(m) > 4 && m[4] != -1 {
+			params = extractJSExpression(data, m[4])
 		}
 		isURL := strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") || strings.HasPrefix(val, "//")
 		uniq[val+"|"+params] = jsEndpoint{Value: val, IsURL: isURL, Params: params}
 	}
 
-	for _, m := range genericPostRe.FindAllSubmatch(data, -1) {
-		val := string(m[1])
+	for _, m := range genericPostRe.FindAllSubmatchIndex(data, -1) {
+		val := string(data[m[2]:m[3]])
 		params := ""
-		if len(m) > 2 {
-			params = strings.TrimSpace(string(m[2]))
+		if len(m) > 4 && m[4] != -1 {
+			params = extractJSExpression(data, m[4])
 		}
 		isURL := strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") || strings.HasPrefix(val, "//")
 		uniq[val+"|"+params] = jsEndpoint{Value: val, IsURL: isURL, Params: params}
 	}
 
-	for _, m := range fetchQuestRe.FindAllSubmatch(data, -1) {
-		arg := bytes.TrimSpace(m[1])
+	for _, m := range fetchQuestRe.FindAllSubmatchIndex(data, -1) {
+		arg := bytes.TrimSpace(data[m[2]:m[3]])
 		params := ""
-		if len(m) > 2 {
-			params = strings.TrimSpace(string(m[2]))
+		if len(m) > 4 && m[4] != -1 {
+			params = extractJSExpression(data, m[4])
 		}
 		val := ""
 		if lit := stringLiteralRe.FindSubmatch(arg); lit != nil {
@@ -246,6 +343,7 @@ func parseJSPostRequests(data []byte) []jsEndpoint {
 		}
 		addNodeMatch(proto, host, path, "")
 	}
+
 
 	out := make([]jsEndpoint, 0, len(uniq))
 	for _, ep := range uniq {

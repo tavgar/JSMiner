@@ -48,7 +48,7 @@ func RenderURL(urlStr string) ([]byte, []string, error) {
 		network.Enable(),
 		chromedp.Navigate(urlStr),
 		chromedp.WaitReady("body", chromedp.ByQuery),
-		chromedp.Sleep(5*time.Second),
+		chromedp.Sleep(8*time.Second),
 		chromedp.OuterHTML("html", &html, chromedp.ByQuery),
 	)
 	if err != nil {
@@ -102,7 +102,7 @@ func RenderURLWithRequests(urlStr string) ([]byte, []string, []HTTPRequest, erro
 		network.Enable().WithMaxPostDataSize(64*1024),
 		chromedp.Navigate(urlStr),
 		chromedp.WaitReady("body", chromedp.ByQuery),
-		chromedp.Sleep(5*time.Second),
+		chromedp.Sleep(8*time.Second),
 		chromedp.OuterHTML("html", &html, chromedp.ByQuery),
 	)
 	if err != nil {
@@ -111,8 +111,11 @@ func RenderURLWithRequests(urlStr string) ([]byte, []string, []HTTPRequest, erro
 
 	var posts []HTTPRequest
 	for id, r := range reqMap {
-		if data, err := network.GetRequestPostData(id).Do(ctx); err == nil {
-			r.Body = data
+		// Try to get POST data if we don't have it yet
+		if r.Body == "" {
+			if data, err := network.GetRequestPostData(id).Do(ctx); err == nil && data != "" {
+				r.Body = data
+			}
 		}
 		posts = append(posts, *r)
 	}
