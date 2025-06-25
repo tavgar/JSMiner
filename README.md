@@ -43,7 +43,7 @@ Flags:
 - `-endpoints` return only HTTP endpoints (default includes all matches)
 - `-posts` return HTTP POST request endpoints with any parameters
 - `-external` follow external scripts and imports (default `true`)
-- `-render` render pages with headless Chrome (Chrome/Chromium must be installed)
+- `-render` render pages with headless Chrome (default `true`, set `-render=false` to disable; Chrome/Chromium must be installed)
 - `-output` write output to file instead of stdout.
 - `-quiet` suppress startup banner.
 - `-targets` file with additional URLs/paths to scan, one per line.
