@@ -90,18 +90,157 @@ func RenderURLWithRequests(urlStr string) ([]byte, []string, []HTTPRequest, erro
 				scriptSet[u] = struct{}{}
 			}
 		case *network.EventRequestWillBeSent:
-			if e.Request != nil && e.Request.Method == "POST" {
-				reqMap[e.RequestID] = &HTTPRequest{URL: e.Request.URL}
+			if e.Request != nil && (e.Request.Method == "POST" || e.Request.Method == "PUT" || e.Request.Method == "PATCH") {
+				req := &HTTPRequest{URL: e.Request.URL}
+				// Try to get POST data immediately
+				if e.Request.HasPostData {
+					// PostData will be retrieved later
+					req.Body = ""
+				}
+				reqMap[e.RequestID] = req
+			}
+		case *network.EventRequestWillBeSentExtraInfo:
+			// Capture additional POST data that might not be in RequestWillBeSent
+			if req, ok := reqMap[e.RequestID]; ok && req.Body == "" {
+				// Headers might contain form data info
+				if contentType, ok := e.Headers["Content-Type"]; ok {
+					if ct, ok := contentType.(string); ok {
+						if strings.Contains(ct, "application/x-www-form-urlencoded") ||
+						   strings.Contains(ct, "multipart/form-data") {
+							// Mark that this is likely a form submission
+							req.Body = "[Form data captured via headers]"
+						}
+					}
+				}
 			}
 		}
 	})
 
+	// JavaScript to inject for intercepting fetch/XHR and analyzing forms
+	interceptScript := `
+	(function() {
+		window.__interceptedPOSTs = [];
+		window.__formFields = {};
+		
+		// Helper to stringify body data
+		function stringifyBody(body) {
+			if (!body) return '';
+			if (typeof body === 'string') return body;
+			if (body instanceof FormData) {
+				const pairs = [];
+				for (const [key, value] of body) {
+					pairs.push(key + '=' + encodeURIComponent(value));
+				}
+				return pairs.join('&');
+			}
+			if (body instanceof URLSearchParams) {
+				return body.toString();
+			}
+			try {
+				return JSON.stringify(body);
+			} catch (e) {
+				return String(body);
+			}
+		}
+		
+		// Intercept fetch
+		const originalFetch = window.fetch;
+		window.fetch = function(...args) {
+			const [url, options = {}] = args;
+			if (options.method && ['POST', 'PUT', 'PATCH'].includes(options.method.toUpperCase())) {
+				const bodyStr = stringifyBody(options.body);
+				window.__interceptedPOSTs.push({
+					url: new URL(url, window.location.href).href,
+					body: bodyStr
+				});
+			}
+			return originalFetch.apply(this, args);
+		};
+		
+		// Intercept XMLHttpRequest
+		const XHR = XMLHttpRequest.prototype;
+		const originalOpen = XHR.open;
+		const originalSend = XHR.send;
+		
+		XHR.open = function(method, url, ...args) {
+			this._method = method;
+			this._url = url;
+			return originalOpen.apply(this, [method, url, ...args]);
+		};
+		
+		XHR.send = function(data) {
+			if (this._method && ['POST', 'PUT', 'PATCH'].includes(this._method.toUpperCase())) {
+				const bodyStr = stringifyBody(data);
+				window.__interceptedPOSTs.push({
+					url: new URL(this._url, window.location.href).href,
+					body: bodyStr
+				});
+			}
+			return originalSend.apply(this, arguments);
+		};
+		
+		// Analyze forms on the page
+		function analyzeForms() {
+			const forms = document.querySelectorAll('form');
+			forms.forEach((form, idx) => {
+				const formKey = form.action || 'form_' + idx;
+				window.__formFields[formKey] = {};
+				
+				const inputs = form.querySelectorAll('input, select, textarea');
+				inputs.forEach(input => {
+					const name = input.name || input.id || input.type;
+					if (name) {
+						window.__formFields[formKey][name] = {
+							type: input.type || 'text',
+							name: input.name,
+							id: input.id,
+							placeholder: input.placeholder,
+							required: input.required,
+							value: input.value || ''
+						};
+					}
+				});
+			});
+		}
+		
+		// Initial analysis
+		analyzeForms();
+		
+		// Re-analyze when DOM changes
+		const observer = new MutationObserver(analyzeForms);
+		observer.observe(document.body, { childList: true, subtree: true });
+		
+		// Intercept form submissions
+		document.addEventListener('submit', function(e) {
+			const form = e.target;
+			if (form.tagName === 'FORM') {
+				const formData = new FormData(form);
+				const params = {};
+				for (const [key, value] of formData) {
+					params[key] = value;
+				}
+				
+				const body = new URLSearchParams(formData).toString();
+				window.__interceptedPOSTs.push({
+					url: new URL(form.action || window.location.href, window.location.href).href,
+					body: body
+				});
+			}
+		}, true);
+	})();
+	`
+	
 	var html string
+	var interceptedPosts []HTTPRequest
+	var formFields map[string]interface{}
 	err := chromedp.Run(ctx,
 		network.Enable().WithMaxPostDataSize(MaxPostDataSize),
 		chromedp.Navigate(urlStr),
+		chromedp.Evaluate(interceptScript, nil),
 		chromedp.WaitReady("body", chromedp.ByQuery),
 		chromedp.Sleep(RenderSleepDuration),
+		chromedp.Evaluate(`window.__interceptedPOSTs || []`, &interceptedPosts),
+		chromedp.Evaluate(`window.__formFields || {}`, &formFields),
 		chromedp.OuterHTML("html", &html, chromedp.ByQuery),
 	)
 	if err != nil {
@@ -117,6 +256,56 @@ func RenderURLWithRequests(urlStr string) ([]byte, []string, []HTTPRequest, erro
 			}
 		}
 		posts = append(posts, *r)
+	}
+	
+	// Add intercepted posts from JavaScript
+	for _, p := range interceptedPosts {
+		// Check if we already have this request (avoid duplicates)
+		duplicate := false
+		for _, existing := range posts {
+			if existing.URL == p.URL {
+				duplicate = true
+				// If existing has no body but intercepted does, update it
+				if existing.Body == "" && p.Body != "" {
+					existing.Body = p.Body
+				}
+				break
+			}
+		}
+		if !duplicate {
+			posts = append(posts, p)
+		}
+	}
+	
+	// For POST endpoints without body, try to infer parameters from forms
+	for i := range posts {
+		if posts[i].Body == "" || posts[i].Body == "[Form data captured via headers]" {
+			// Try to match URL with form actions
+			for formAction, fields := range formFields {
+				if strings.Contains(posts[i].URL, formAction) || formAction == "form_0" {
+					// Build parameter list from form fields
+					params := []string{}
+					if fieldsMap, ok := fields.(map[string]interface{}); ok {
+						for fieldName, fieldInfo := range fieldsMap {
+							if info, ok := fieldInfo.(map[string]interface{}); ok {
+								fieldType := "text"
+								if t, ok := info["type"].(string); ok {
+									fieldType = t
+								}
+								// Skip hidden submit buttons
+								if fieldType != "submit" && fieldType != "button" {
+									params = append(params, fieldName+"=["+fieldType+"]")
+								}
+							}
+						}
+					}
+					if len(params) > 0 {
+						posts[i].Body = "Form fields: " + strings.Join(params, "&")
+					}
+					break
+				}
+			}
+		}
 	}
 
 	scripts := make([]string, 0, len(scriptSet))
