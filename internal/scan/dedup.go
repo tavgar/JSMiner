@@ -7,7 +7,7 @@ func UniqueMatches(ms []Match) []Match {
 	seen := make(map[string]struct{})
 	out := make([]Match, 0, len(ms))
 	for _, m := range ms {
-		key := m.Pattern + "|" + m.Value
+		key := m.Pattern + "|" + m.Value + "|" + m.Params
 		if _, ok := seen[key]; ok {
 			continue
 		}

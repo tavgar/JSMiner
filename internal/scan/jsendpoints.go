@@ -11,9 +11,12 @@ import (
 var endpointRe = regexp.MustCompile("(?i)[\"'`](((?:https?:)?//[^\"'`\\s]+|\\.?\\.?/[^\"'`\\s]+))[\"'`]")
 
 // jsEndpoint holds an endpoint string and whether it is an absolute URL.
+// jsEndpoint holds an endpoint string, whether it is an absolute URL and any
+// associated POST request parameters if available.
 type jsEndpoint struct {
-	Value string
-	IsURL bool
+	Value  string
+	IsURL  bool
+	Params string
 }
 
 // parseJSEndpoints extracts endpoints from JavaScript source data and
@@ -24,7 +27,7 @@ func parseJSEndpoints(data []byte) []jsEndpoint {
 	for _, m := range ms {
 		val := string(m[1])
 		isURL := strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") || strings.HasPrefix(val, "//")
-		out = append(out, jsEndpoint{Value: val, IsURL: isURL})
+		out = append(out, jsEndpoint{Value: val, IsURL: isURL, Params: ""})
 	}
 	return out
 }
