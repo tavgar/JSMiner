@@ -25,7 +25,7 @@ func main() {
 	endpoints := flag.Bool("endpoints", false, "only return HTTP endpoints")
 	posts := flag.Bool("posts", false, "only return HTTP POST request endpoints")
 	external := flag.Bool("external", true, "follow external scripts and imports")
-	render := flag.Bool("render", false, "render pages in headless Chrome")
+	render := flag.Bool("render", true, "render pages in headless Chrome")
 	outFile := flag.String("output", "", "output file (stdout default)")
 	quiet := flag.Bool("quiet", false, "suppress banner")
 	targetsFile := flag.String("targets", "", "file with list of targets")
@@ -50,7 +50,18 @@ func main() {
 		case "posts":
 			*posts = true
 		case "render":
-			*render = true
+			val := "true"
+			if len(parts) == 2 {
+				val = parts[1]
+			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				val = args[i+1]
+				i++
+			}
+			if b, err := strconv.ParseBool(val); err == nil {
+				*render = b
+			} else {
+				*render = true
+			}
 		case "external":
 			val := "true"
 			if len(parts) == 2 {
