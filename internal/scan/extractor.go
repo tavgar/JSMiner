@@ -87,9 +87,9 @@ var defaultPatterns = map[string]string{
 // powerPatterns provide additional regexes enabled by default.
 var powerPatterns = map[string]string{
 	"phone": `\d{3}-\d{3}-\d{4}`,
-	// simple IPv6 pattern requiring at least one colon to avoid matching
-	// plain decimal numbers
-	"ipv6": `[0-9a-fA-F]*:[0-9a-fA-F:]+`,
+	// loose IPv6 pattern used in conjunction with net.ParseIP validation
+	// to avoid noise from short hex sequences like "a:b".
+	"ipv6": `[0-9a-fA-F:]+`,
 	// crude file path detection for Unix and Windows paths. Requires a
 	// leading whitespace or start of line to avoid matching fragments in
 	// secrets.
@@ -112,7 +112,20 @@ func NewExtractor(safe bool, longSecret bool) *Extractor {
 		}
 	}
 	for name, pat := range powerPatterns {
-		e.rules = append(e.rules, RegexRule{Name: name, RE: regexp.MustCompile(pat), Severity: "info"})
+		re := regexp.MustCompile(pat)
+		if name == "ipv6" {
+			e.rules = append(e.rules, FilterRegexRule{
+				Name:     name,
+				RE:       re,
+				Severity: "info",
+				Filter: func(s string) bool {
+					ip := net.ParseIP(strings.TrimSpace(s))
+					return ip != nil && strings.Contains(s, ":") && ip.To4() == nil
+				},
+			})
+			continue
+		}
+		e.rules = append(e.rules, RegexRule{Name: name, RE: re, Severity: "info"})
 	}
 	e.rules = append(e.rules, getRegisteredRules()...)
 	return e

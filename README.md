@@ -55,7 +55,8 @@ Using `-render` requires Chrome or Chromium to be installed on your system.
 
 The binary includes a small set of **power rules** enabled by default. These
 rules detect common items such as phone numbers, IPv6 addresses and generic
-file paths. Supplying a file with `-rules` adds to this default set.
+file paths. IPv6 matches are validated with Go's `net.ParseIP` to reduce false
+positives. Supplying a file with `-rules` adds to this default set.
 
 ### Rule file format
 
