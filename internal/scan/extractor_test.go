@@ -261,3 +261,21 @@ func TestLongSecretMatch(t *testing.T) {
 		t.Fatalf("expected long_secret match, got %+v", matches)
 	}
 }
+func TestLongSecretConcat(t *testing.T) {
+	js := `var a = "?app_secret=".concat("sheiswspoke7467384638746mm5465ds45")`
+	e := NewExtractor(true, true)
+	matches, err := e.ScanReader("file.js", strings.NewReader(js))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range matches {
+		if m.Pattern == "long_secret" && m.Value == "sheiswspoke7467384638746mm5465ds45" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected long_secret match, got %+v", matches)
+	}
+}
