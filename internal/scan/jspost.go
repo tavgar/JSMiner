@@ -614,16 +614,9 @@ func parseJSPostRequests(data []byte) []jsEndpoint {
 		}
 	}
 
-	// deduplicate by endpoint value keeping the entry with the longest params
-	final := make(map[string]jsEndpoint)
+	// convert map to slice of unique endpoint+params combinations
+	out := make([]jsEndpoint, 0, len(uniq))
 	for _, ep := range uniq {
-		cur, ok := final[ep.Value]
-		if !ok || len(ep.Params) > len(cur.Params) {
-			final[ep.Value] = ep
-		}
-	}
-	out := make([]jsEndpoint, 0, len(final))
-	for _, ep := range final {
 		out = append(out, ep)
 	}
 	return out
