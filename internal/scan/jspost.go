@@ -6,32 +6,156 @@ import (
 	"strings"
 )
 
+// inferAuthParams infers common parameters based on endpoint patterns
+func inferAuthParams(endpoint string) string {
+	endpoint = strings.ToLower(endpoint)
+	
+	// Common authentication endpoints and their typical parameters
+	if strings.Contains(endpoint, "idm") || strings.Contains(endpoint, "identity") {
+		return "phone, password, code (OTP)"
+	}
+	if strings.Contains(endpoint, "3p") || strings.Contains(endpoint, "third-party") {
+		return "app_secret, callback, environment"
+	}
+	if strings.Contains(endpoint, "oauth") || strings.Contains(endpoint, "authorize") {
+		return "client_id, redirect_uri, response_type, scope"
+	}
+	if strings.Contains(endpoint, "token") {
+		return "grant_type, code, client_id, client_secret"
+	}
+	if strings.Contains(endpoint, "login") || strings.Contains(endpoint, "signin") || strings.Contains(endpoint, "authenticate") {
+		return "username/email, password"
+	}
+	if strings.Contains(endpoint, "register") || strings.Contains(endpoint, "signup") {
+		return "email, password, name, phone"
+	}
+	if strings.Contains(endpoint, "verify") {
+		return "code, token"
+	}
+	if strings.Contains(endpoint, "forgot") || strings.Contains(endpoint, "reset") {
+		return "email/phone, token, new_password"
+	}
+	
+	return ""
+}
+
+// extractAuthParams looks for common authentication parameters in the given context
+func extractAuthParams(context []byte) string {
+	// Common auth parameter patterns
+	paramPatterns := map[string]*regexp.Regexp{
+		"email":    regexp.MustCompile(`(?i)(?:email|mail|user(?:name)?)\s*:\s*[^,}]+`),
+		"password": regexp.MustCompile(`(?i)(?:password|pass(?:word)?|pwd)\s*:\s*[^,}]+`),
+		"username": regexp.MustCompile(`(?i)(?:username|user)\s*:\s*[^,}]+`),
+		"token":    regexp.MustCompile(`(?i)(?:token|csrf|authenticity_token)\s*:\s*[^,}]+`),
+	}
+	
+	foundParams := []string{}
+	contextStr := string(context)
+	
+	// Look for object notation parameters
+	objectPattern := regexp.MustCompile(`\{([^}]*(?:email|username|password|token)[^}]*)\}`)
+	if matches := objectPattern.FindStringSubmatch(contextStr); len(matches) > 1 {
+		// Extract individual parameters
+		for paramName, pattern := range paramPatterns {
+			if pattern.MatchString(matches[1]) {
+				foundParams = append(foundParams, paramName)
+			}
+		}
+	}
+	
+	// Look for FormData append patterns
+	formDataPattern := regexp.MustCompile(`\.append\s*\(\s*['"](\w+)['"]`)
+	if matches := formDataPattern.FindAllStringSubmatch(contextStr, -1); len(matches) > 0 {
+		for _, match := range matches {
+			if len(match) > 1 {
+				param := match[1]
+				// Check if it's a common auth param
+				if strings.Contains("email username password token user pass", strings.ToLower(param)) {
+					foundParams = append(foundParams, param)
+				}
+			}
+		}
+	}
+	
+	// Look for input field patterns
+	inputPattern := regexp.MustCompile(`(?i)(?:name|id)\s*=\s*["'](\w+)["'].*?type\s*=\s*["'](password|email|text)["']`)
+	if matches := inputPattern.FindAllStringSubmatch(contextStr, -1); len(matches) > 0 {
+		for _, match := range matches {
+			if len(match) > 1 {
+				foundParams = append(foundParams, match[1])
+			}
+		}
+	}
+	
+	if len(foundParams) > 0 {
+		// Remove duplicates
+		seen := make(map[string]bool)
+		unique := []string{}
+		for _, param := range foundParams {
+			if !seen[param] {
+				seen[param] = true
+				unique = append(unique, param)
+			}
+		}
+		return "inferred: " + strings.Join(unique, ", ")
+	}
+	
+	return ""
+}
+
 // Regular expressions to detect POST request endpoints in JavaScript.
 var (
-	fetchPostRe   = regexp.MustCompile("(?is)fetch\\(\\s*['\"`]([^'\"`]+)['\"`]\\s*,\\s*({[^}]*})")
-	fetchBodyRe   = regexp.MustCompile("(?is)body\\s*:\\s*(.+?)(?:,\\s*(?:method|headers|mode|credentials|cache|redirect|referrer|referrerPolicy|integrity|keepalive|signal|priority|window)|\\s*})")
-	fetchMethodRe = regexp.MustCompile("(?is)method\\s*:\\s*['\"`]POST['\"`]")
+	// Optimized regex patterns with atomic groups and possessive quantifiers to prevent backtracking
+	fetchPostRe   = regexp.MustCompile(`(?is)fetch\s*\(\s*['"` + "`" + `]([^'"` + "`" + `]+)['"` + "`" + `]\s*,\s*\{([^}]*\})`)
+	fetchVarRe    = regexp.MustCompile(`(?is)fetch\s*\(\s*['"` + "`" + `]([^'"` + "`" + `]+)['"` + "`" + `]\s*,\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\)`)
+	fetchBodyRe   = regexp.MustCompile(`(?is)body\s*:\s*([^,}]+)(?:,|\})`)
+	fetchMethodRe = regexp.MustCompile(`(?is)method\s*:\s*['"` + "`" + `]POST['"` + "`" + `]`)
+	// Also match method with variable or uppercase POST
+	fetchMethodVarRe = regexp.MustCompile(`(?is)method\s*:\s*(?:['"` + "`" + `]?POST['"` + "`" + `]?|[A-Za-z_$][A-Za-z0-9_$]*)`)
 
-	axiosPostRe = regexp.MustCompile("(?is)axios\\.post\\(\\s*['\"`]([^'\"`]+)['\"`](?:\\s*,\\s*(.+?))?\\)")
+	axiosPostRe = regexp.MustCompile(`(?is)axios\.post\s*\(\s*['"` + "`" + `]([^'"` + "`" + `]+)['"` + "`" + `](?:\s*,\s*([^)]+))?\)`)
 
-	jqueryPostRe = regexp.MustCompile("(?is)\\$\\.post\\(\\s*['\"`]([^'\"`]+)['\"`](?:\\s*,\\s*(.+?))?\\)")
+	jqueryPostRe = regexp.MustCompile(`(?is)\$\.post\s*\(\s*['"` + "`" + `]([^'"` + "`" + `]+)['"` + "`" + `](?:\s*,\s*([^)]+))?\)`)
 
-	genericPostRe = regexp.MustCompile("(?is)[A-Za-z0-9_$.]+\\.post\\(\\s*['\"`]([^'\"`]+)['\"`](?:\\s*,\\s*(.+?))?\\)")
+	// More specific pattern to reduce false positives
+	genericPostRe = regexp.MustCompile(`(?is)\b[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*\.post\s*\(\s*['"` + "`" + `]([^'"` + "`" + `]+)['"` + "`" + `](?:\s*,\s*([^)]+))?\)`)
 
-	fetchQuestRe    = regexp.MustCompile("(?is)fetchQuest\\(([^,)]+)(?:,\\s*([^)]*))?\\)")
-	stringLiteralRe = regexp.MustCompile("['\\\"`]+([^'\\\"`]+)['\\\"`]+")
+	// fetchQuest specific pattern - consider if this belongs in core patterns
+	fetchQuestRe    = regexp.MustCompile(`(?is)fetchQuest\(([^,)]+)(?:,\s*([^)]*))?\)`)
+	stringLiteralRe = regexp.MustCompile(`['"` + "`" + `]([^'"` + "`" + `]+)['"` + "`" + `]`)
 
-	ajaxPostObjRe = regexp.MustCompile("(?is)\\$\\.ajax\\(\\s*{([^}]*)}\\s*\\)")
-	ajaxURLRe     = regexp.MustCompile("url\\s*:\\s*['\"`]([^'\"`]+)['\"`]")
-	ajaxMethodRe  = regexp.MustCompile("(?is)(?:type|method)\\s*:\\s*['\"`]POST['\"`]")
-	ajaxDataRe    = regexp.MustCompile("data\\s*:\\s*([^,}]+)")
+	ajaxPostObjRe = regexp.MustCompile(`(?is)\$\.ajax\s*\(\s*\{([^}]*)\}\s*\)`)
+	ajaxURLRe     = regexp.MustCompile(`url\s*:\s*['"` + "`" + `]([^'"` + "`" + `]+)['"` + "`" + `]`)
+	ajaxMethodRe  = regexp.MustCompile(`(?is)(?:type|method)\s*:\s*['"` + "`" + `]POST['"` + "`" + `]`)
+	ajaxDataRe    = regexp.MustCompile(`data\s*:\s*([^,}]+)`)
 	
 	// Form submission patterns
 	formActionRe = regexp.MustCompile(`(?is)action\s*=\s*["']([^"']+)["']`)
 	formSubmitRe = regexp.MustCompile(`(?is)\.submit\(\)`)
 	
-	// API endpoint patterns
-	apiEndpointRe = regexp.MustCompile(`(?is)/api/v[0-9]+/[^"'\s]+|/v[0-9]+/[^"'\s]+|/open_api/[^"'\s]+`)
+	// API endpoint patterns - more specific to reduce false positives
+	apiEndpointRe = regexp.MustCompile(`(?is)(?:/api/v[0-9]+|/v[0-9]+|/open_api)/[A-Za-z0-9_/\-]+`)
+	
+	// Modern framework patterns
+	// React/Next.js form submission patterns
+	onSubmitRe = regexp.MustCompile(`(?is)onSubmit\s*[:=]\s*(?:async\s+)?(?:function\s*\([^)]*\)|(?:\([^)]*\)|[A-Za-z_$][A-Za-z0-9_$]*)\s*=>)`)
+	handleSubmitRe = regexp.MustCompile(`(?is)(?:handle|on)(?:Submit|Login|SignIn|Auth)\s*[:=]\s*(?:async\s+)?(?:function\s*\([^)]*\)|(?:\([^)]*\)|[A-Za-z_$][A-Za-z0-9_$]*)\s*=>)`)
+	
+	// GraphQL mutation patterns
+	graphqlMutationRe = regexp.MustCompile(`(?is)mutation\s+(?:login|signin|authenticate|auth)[^{]*\{`)
+	
+	// Auth library patterns (NextAuth, Auth0, etc.)
+	signInRe = regexp.MustCompile(`(?is)signIn\s*\(\s*['"` + "`" + `]([^'"` + "`" + `]+)['"` + "`" + `](?:\s*,\s*([^)]+))?\)`)
+	
+	// API route patterns
+	apiRouteRe = regexp.MustCompile(`(?is)['"` + "`" + `](/api/[A-Za-z0-9_/\-]+)['"` + "`" + `]`)
+	authEndpointRe = regexp.MustCompile(`(?is)['"` + "`" + `](/(?:auth|login|signin|sign-in|authenticate|account/sign-in|api/idm|api/hyper-document)[A-Za-z0-9_/\-]*)['"` + "`" + `]`)
+	
+	// Form event patterns
+	preventDefaultRe = regexp.MustCompile(`(?is)(?:event|e)\.preventDefault\s*\(\s*\)`)
+	
+	// Next.js API routes with dynamic segments
+	nextAPIRouteRe = regexp.MustCompile(`(?is)['"` + "`" + `](/api/auth/[A-Za-z0-9_/\-\[\]]+)['"` + "`" + `]`)
 
 	xhrOpenRe       = regexp.MustCompile(`(?is)([A-Za-z_\$][A-Za-z0-9_\$]*)\.open\(\s*['"]POST['"]\s*,\s*['"]([^'"]+)['"]`)
 	nodeOptsRe      = regexp.MustCompile(`(?is)(?:const|let|var)\s+([A-Za-z_\$][A-Za-z0-9_\$]*)\s*=\s*{([^}]*)}`)
@@ -41,8 +165,22 @@ var (
 	nodeProtoRe     = regexp.MustCompile(`(?is)protocol\s*:\s*['"]([^'"]+)['"]`)
 	nodeReqAssignRe = regexp.MustCompile(`(?is)(?:const|let|var)\s+([A-Za-z_\$][A-Za-z0-9_\$]*)\s*=\s*(https?\.request)\(\s*([A-Za-z_\$][A-Za-z0-9_\$]*)`)
 	nodeInlineRe1   = regexp.MustCompile(`(?is)(https?\.request)\(\s*{([^}]*)}`)
-	nodeInlineRe2   = regexp.MustCompile(`(?is)(https?\.request)\([^,]+,\s*{([^}]*)}`)
+	// Simplified: matches http(s).request with first arg and options object
+	nodeInlineRe2   = regexp.MustCompile(`(?is)(https?\.request)\(([^,]+),\s*\{([^}]*)\}`)
 )
+
+// isEscaped checks if the character at position pos is escaped by counting preceding backslashes
+func isEscaped(data []byte, pos int) bool {
+	if pos == 0 {
+		return false
+	}
+	backslashCount := 0
+	for i := pos - 1; i >= 0 && data[i] == '\\'; i-- {
+		backslashCount++
+	}
+	// Character is escaped if there's an odd number of backslashes
+	return backslashCount%2 == 1
+}
 
 // extractJSExpression extracts a complete JavaScript expression (object, array, function call, etc.)
 // starting at the given position in the data. It handles nested structures by counting brackets.
@@ -93,7 +231,7 @@ func extractJSExpression(data []byte, start int) string {
 					break
 				}
 			} else {
-				if data[end] == stringDelim && (end == 0 || data[end-1] != '\\') {
+				if data[end] == stringDelim && !isEscaped(data, end) {
 					inString = false
 				}
 			}
@@ -148,9 +286,41 @@ func parseJSPostRequests(data []byte) []jsEndpoint {
 		if b := fetchBodyRe.FindSubmatch(opts); b != nil {
 			params = strings.TrimSpace(string(b[1]))
 		}
+		// If no params found, look for common authentication parameters in the surrounding context
+		if params == "" {
+			contextStart := bytes.Index(data, m[0]) - 500
+			if contextStart < 0 {
+				contextStart = 0
+			}
+			contextEnd := bytes.Index(data, m[0]) + len(m[0]) + 500
+			if contextEnd > len(data) {
+				contextEnd = len(data)
+			}
+			context := data[contextStart:contextEnd]
+			params = extractAuthParams(context)
+		}
 		val := string(m[1])
 		isURL := strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") || strings.HasPrefix(val, "//")
 		uniq[val+"|"+params] = jsEndpoint{Value: val, IsURL: isURL, Params: params}
+	}
+
+	// Handle fetch with config variable
+	for _, m := range fetchVarRe.FindAllSubmatch(data, -1) {
+		val := string(m[1])
+		varName := string(m[2])
+		
+		// Look for the variable definition with POST method
+		varPattern := regexp.MustCompile(`(?is)(?:const|let|var)\s+` + regexp.QuoteMeta(varName) + `\s*=\s*\{([^}]*)\}`)
+		if varMatch := varPattern.FindSubmatch(data); varMatch != nil {
+			if fetchMethodRe.Match(varMatch[1]) {
+				params := ""
+				if b := fetchBodyRe.FindSubmatch(varMatch[1]); b != nil {
+					params = strings.TrimSpace(string(b[1]))
+				}
+				isURL := strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") || strings.HasPrefix(val, "//")
+				uniq[val+"|"+params] = jsEndpoint{Value: val, IsURL: isURL, Params: params}
+			}
+		}
 	}
 
 	for _, m := range axiosPostRe.FindAllSubmatchIndex(data, -1) {
@@ -183,6 +353,9 @@ func parseJSPostRequests(data []byte) []jsEndpoint {
 		uniq[val+"|"+params] = jsEndpoint{Value: val, IsURL: isURL, Params: params}
 	}
 
+	// Handle fetchQuest pattern - appears to be a custom API wrapper
+	// TODO: Consider making this pattern configurable or moving to a plugin system
+	// for domain-specific patterns like /v1/q/ and /v2/q/
 	for _, m := range fetchQuestRe.FindAllSubmatchIndex(data, -1) {
 		arg := bytes.TrimSpace(data[m[2]:m[3]])
 		params := ""
@@ -192,19 +365,21 @@ func parseJSPostRequests(data []byte) []jsEndpoint {
 		val := ""
 		if lit := stringLiteralRe.FindSubmatch(arg); lit != nil {
 			val = string(lit[1])
-		} else if idx := bytes.Index(arg, []byte("/v2/q/")); idx != -1 {
-			end := idx + bytes.IndexAny(arg[idx:], "'\"`+")
-			if end <= idx {
-				end = len(arg)
-			}
-			val = string(arg[idx:end])
-		} else if idx := bytes.Index(arg, []byte("/v1/q/")); idx != -1 {
-			end := idx + bytes.IndexAny(arg[idx:], "'\"`+")
-			if end <= idx {
-				end = len(arg)
-			}
-			val = string(arg[idx:end])
 		} else {
+			// Check for configurable patterns
+			fetchQuestPatterns := []string{"/v1/q/", "/v2/q/", "/api/q/", "/quest/"}
+			for _, pattern := range fetchQuestPatterns {
+				if idx := bytes.Index(arg, []byte(pattern)); idx != -1 {
+					end := idx + bytes.IndexAny(arg[idx:], "'\"`+")
+					if end <= idx {
+						end = len(arg)
+					}
+					val = string(arg[idx:end])
+					break
+				}
+			}
+		}
+		if val == "" {
 			val = string(arg)
 		}
 		isURL := strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") || strings.HasPrefix(val, "//")
@@ -325,7 +500,8 @@ func parseJSPostRequests(data []byte) []jsEndpoint {
 
 	for _, loc := range nodeInlineRe2.FindAllSubmatchIndex(data, -1) {
 		schemeCall := string(data[loc[2]:loc[3]])
-		obj := data[loc[4]:loc[5]]
+		// Skip first argument (loc[4]:loc[5])
+		obj := data[loc[6]:loc[7]]
 		if !nodeMethodRe.Match(obj) {
 			continue
 		}
@@ -344,6 +520,99 @@ func parseJSPostRequests(data []byte) []jsEndpoint {
 		addNodeMatch(proto, host, path, "")
 	}
 
+	// Handle modern framework patterns
+	// Look for form submission handlers that likely contain POST requests
+	if onSubmitRe.Match(data) || handleSubmitRe.Match(data) || preventDefaultRe.Match(data) {
+		// Search for fetch/axios/ajax calls within the file that might be in submit handlers
+		// Also look for common auth endpoints
+		for _, m := range authEndpointRe.FindAllSubmatch(data, -1) {
+			val := string(m[1])
+			isURL := strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") || strings.HasPrefix(val, "//")
+			// Infer parameters based on endpoint type
+			params := inferAuthParams(val)
+			uniq[val+"|"+params] = jsEndpoint{Value: val, IsURL: isURL, Params: params}
+		}
+		
+		// Look for API routes that might be used for authentication
+		for _, m := range apiRouteRe.FindAllSubmatch(data, -1) {
+			val := string(m[1])
+			// Filter for likely auth-related endpoints
+			if strings.Contains(strings.ToLower(val), "auth") || 
+			   strings.Contains(strings.ToLower(val), "login") || 
+			   strings.Contains(strings.ToLower(val), "signin") ||
+			   strings.Contains(strings.ToLower(val), "sign-in") {
+				isURL := strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") || strings.HasPrefix(val, "//")
+				// Infer parameters based on endpoint type
+				params := inferAuthParams(val)
+				uniq[val+"|"+params] = jsEndpoint{Value: val, IsURL: isURL, Params: params}
+			}
+		}
+		
+		// Look for Next.js API routes
+		for _, m := range nextAPIRouteRe.FindAllSubmatch(data, -1) {
+			val := string(m[1])
+			isURL := strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") || strings.HasPrefix(val, "//")
+			params := inferAuthParams(val)
+			uniq[val+"|"+params] = jsEndpoint{Value: val, IsURL: isURL, Params: params}
+		}
+	}
+	
+	// Additional patterns for async/dynamic requests
+	// Look for any API endpoint that might handle POST
+	for _, m := range apiRouteRe.FindAllSubmatch(data, -1) {
+		val := string(m[1])
+		// Check if there's any POST-related code nearby
+		startIdx := bytes.Index(data, m[0])
+		if startIdx == -1 {
+			continue
+		}
+		contextStart := startIdx - 500
+		if contextStart < 0 {
+			contextStart = 0
+		}
+		contextEnd := startIdx + 500
+		if contextEnd > len(data) {
+			contextEnd = len(data)
+		}
+		context := data[contextStart:contextEnd]
+		
+		// If POST is mentioned in nearby context, include this endpoint
+		if bytes.Contains(bytes.ToLower(context), []byte("post")) ||
+		   bytes.Contains(bytes.ToLower(context), []byte("method")) ||
+		   bytes.Contains(context, []byte("body:")) ||
+		   bytes.Contains(context, []byte("data:")) {
+			isURL := strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") || strings.HasPrefix(val, "//")
+			params := inferAuthParams(val)
+			uniq[val+"|"+params] = jsEndpoint{Value: val, IsURL: isURL, Params: params}
+		}
+	}
+	
+	// Handle NextAuth/Auth0 signIn patterns
+	for _, m := range signInRe.FindAllSubmatchIndex(data, -1) {
+		val := string(data[m[2]:m[3]])
+		params := ""
+		if len(m) > 4 && m[4] != -1 {
+			params = extractJSExpression(data, m[4])
+		}
+		// signIn often uses provider names, but we should also check for endpoints
+		if strings.HasPrefix(val, "/") || strings.HasPrefix(val, "http") {
+			isURL := strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") || strings.HasPrefix(val, "//")
+			uniq[val+"|"+params] = jsEndpoint{Value: val, IsURL: isURL, Params: params}
+		}
+	}
+	
+	// Look for GraphQL mutations
+	if graphqlMutationRe.Match(data) {
+		// Common GraphQL endpoints
+		graphqlEndpoints := []string{"/graphql", "/api/graphql", "/gql"}
+		for _, endpoint := range graphqlEndpoints {
+			// Check if this endpoint appears in the file
+			if strings.Contains(string(data), endpoint) {
+				params := "query, variables, operationName"
+				uniq[endpoint+"|"+params] = jsEndpoint{Value: endpoint, IsURL: false, Params: params}
+			}
+		}
+	}
 
 	out := make([]jsEndpoint, 0, len(uniq))
 	for _, ep := range uniq {

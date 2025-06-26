@@ -145,3 +145,150 @@ func TestParseJSPostRequestsGeneric(t *testing.T) {
 		t.Fatalf("missing endpoints %v", expected)
 	}
 }
+
+func TestParseJSPostRequestsTemplateLiterals(t *testing.T) {
+	js := "const endpoint = 'users';\n" +
+		"const version = 'v2';\n" +
+		"fetch(`/api/${version}/${endpoint}`, {\n" +
+		"	method: 'POST',\n" +
+		"	body: JSON.stringify(userData)\n" +
+		"});\n" +
+		"\n" +
+		"// Dynamic endpoint with template literal\n" +
+		"const id = 123;\n" +
+		"axios.post(`/api/v1/users/${id}/profile`, profileData);\n" +
+		"\n" +
+		"// Complex nested template literal\n" +
+		"const baseURL = 'https://api.example.com';\n" +
+		"const resource = 'orders';\n" +
+		"fetch(`${baseURL}/${resource}/${orderId}`, {\n" +
+		"	method: \"POST\",\n" +
+		"	body: `{\"status\": \"${newStatus}\"}`\n" +
+		"});"
+	
+	eps := parseJSPostRequests([]byte(js))
+	if len(eps) != 3 {
+		t.Fatalf("expected 3 endpoints, got %d", len(eps))
+	}
+	
+	// Check that template literal expressions are captured
+	found := make(map[string]bool)
+	for _, ep := range eps {
+		if strings.Contains(ep.Value, "${") {
+			found[ep.Value] = true
+		}
+	}
+	
+	if len(found) != 3 {
+		t.Fatalf("expected 3 template literal endpoints, found %d", len(found))
+	}
+}
+
+func TestParseJSPostRequestsComplexObjects(t *testing.T) {
+	js := `// Complex nested object as parameter
+	const config = {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			'Authorization': 'Bearer ' + token
+		},
+		body: JSON.stringify({
+			user: {
+				name: userName,
+				email: userEmail,
+				preferences: {
+					notifications: true,
+					theme: 'dark'
+				}
+			},
+			timestamp: Date.now()
+		})
+	};
+	fetch('/api/users', config);
+	
+	// Spread operator with complex object
+	const baseConfig = {auth: token, version: 1};
+	axios.post('/api/data', {
+		...baseConfig,
+		data: {
+			items: items.map(i => ({id: i.id, value: i.value})),
+			meta: {...metadata, processed: true}
+		}
+	});
+	
+	// Function call as parameter
+	$.post('/api/transform', processData({
+		input: rawData,
+		options: {
+			format: 'json',
+			compress: true
+		}
+	}));`
+	
+	eps := parseJSPostRequests([]byte(js))
+	if len(eps) != 3 {
+		t.Logf("Endpoints found: %+v", eps)
+		t.Fatalf("expected 3 endpoints, got %d", len(eps))
+	}
+	
+	// Verify complex parameters are captured
+	hasComplexParams := false
+	for _, ep := range eps {
+		if strings.Contains(ep.Params, "...") || strings.Contains(ep.Params, "JSON.stringify") || strings.Contains(ep.Params, "processData") {
+			hasComplexParams = true
+			break
+		}
+	}
+	
+	if !hasComplexParams {
+		t.Fatal("expected to find complex parameters with spread operator or function calls")
+	}
+}
+
+func TestExtractJSExpressionEdgeCases(t *testing.T) {
+	testCases := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "nested arrays and objects",
+			input:    `post('/api', {data: [{id: 1, items: [1,2,3]}, {id: 2, items: [4,5,6]}]})`,
+			expected: "{data: [{id: 1, items: [1,2,3]}, {id: 2, items: [4,5,6]}]}",
+		},
+		{
+			name:     "string with escaped quotes",
+			input:    `post('/api', "{\\\"key\\\": \\\"value\\\"}")`,
+			expected: `"{\\\"key\\\": \\\"value\\\"}"`,
+		},
+		{
+			name:     "function call with multiple parameters",
+			input:    `post('/api', transform(data, options), callback)`,
+			expected: "transform(data, options)",
+		},
+		{
+			name:     "empty parameters",
+			input:    `post('/api')`,
+			expected: "",
+		},
+	}
+	
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Extract the parameter part after the URL
+			start := strings.Index(tc.input, ", ")
+			if start == -1 {
+				if tc.expected != "" {
+					t.Fatalf("expected to find parameter, got none")
+				}
+				return
+			}
+			start += 2 // skip ", "
+			
+			result := extractJSExpression([]byte(tc.input), start)
+			if result != tc.expected {
+				t.Fatalf("expected %q, got %q", tc.expected, result)
+			}
+		})
+	}
+}
