@@ -27,7 +27,7 @@ func fetchURLResponse(u string) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", defaultUserAgent)
+	applyHeaders(req)
 	return client.Do(req)
 }
 

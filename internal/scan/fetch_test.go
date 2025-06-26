@@ -16,6 +16,7 @@ func TestFetchURLSetsUserAgent(t *testing.T) {
 	}))
 	defer ts.Close()
 
+	SetExtraHeaders(nil)
 	rc, err := FetchURL(ts.URL)
 	if err != nil {
 		t.Fatalf("FetchURL returned error: %v", err)
@@ -24,5 +25,28 @@ func TestFetchURLSetsUserAgent(t *testing.T) {
 
 	if ua != defaultUserAgent {
 		t.Fatalf("expected User-Agent %q, got %q", defaultUserAgent, ua)
+	}
+}
+
+// Test that FetchURL uses extra headers provided via SetExtraHeaders
+func TestFetchURLExtraHeaders(t *testing.T) {
+	var hv string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hv = r.Header.Get("X-Test")
+		io.WriteString(w, "ok")
+	}))
+	defer ts.Close()
+
+	h := http.Header{}
+	h.Set("X-Test", "yes")
+	SetExtraHeaders(h)
+	rc, err := FetchURL(ts.URL)
+	if err != nil {
+		t.Fatalf("FetchURL returned error: %v", err)
+	}
+	rc.Close()
+
+	if hv != "yes" {
+		t.Fatalf("expected header X-Test yes, got %q", hv)
 	}
 }
