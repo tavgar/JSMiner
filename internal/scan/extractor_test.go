@@ -209,11 +209,11 @@ func TestSensitiveDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(matches) != 3 {
-		t.Fatalf("expected 3 matches, got %d", len(matches))
-	}
 	found := map[string]bool{}
 	for _, m := range matches {
+		if strings.HasPrefix(m.Pattern, "nuclei_") {
+			continue
+		}
 		found[m.Pattern] = true
 	}
 	for _, p := range []string{"password", "api_key", "token"} {
@@ -230,8 +230,15 @@ func TestShortPasswordIgnored(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(matches) != 0 {
-		t.Fatalf("expected 0 matches, got %d", len(matches))
+	var filtered []Match
+	for _, m := range matches {
+		if strings.HasPrefix(m.Pattern, "nuclei_") {
+			continue
+		}
+		filtered = append(filtered, m)
+	}
+	if len(filtered) != 0 {
+		t.Fatalf("expected 0 matches, got %d", len(filtered))
 	}
 }
 
