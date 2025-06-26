@@ -61,7 +61,9 @@ func parseSimpleYAML(data []byte) (map[string]string, error) {
 var jsExts = []string{".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".wasm"}
 
 var jsRules = map[string]bool{
-	"jwt": true,
+	"jwt":         true,
+	"google_api":  true,
+	"long_secret": true,
 }
 
 // default patterns (simplified)
@@ -78,6 +80,8 @@ var defaultPatterns = map[string]string{
 	"token": `(?i)(?:access|auth)?_?token\s*[:=]\s*["']?[A-Za-z0-9-_]{10,}`,
 	// passwords with at least 4 non-space characters
 	"password": `(?i)password\s*[:=]\s*["']?\S{4,}`,
+	// long alphanumeric strings that might be secrets
+	"long_secret": `[A-Za-z0-9_-]{32,}`,
 }
 
 // powerPatterns provide additional regexes enabled by default.

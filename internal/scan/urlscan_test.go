@@ -147,3 +147,30 @@ func TestScanURLEndpointsOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestScanURLInlineScript(t *testing.T) {
+	key := "AIzaSyD1ad_UKyHFErfLeO_3aoBoNrX1W4bsmac"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		io.WriteString(w, `<html><script>var apiKey="`+key+`";</script></html>`)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	e := NewExtractor(true)
+	matches, err := e.ScanURL(ts.URL, false, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range matches {
+		if m.Pattern == "google_api" && strings.Contains(m.Value, key) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected google_api match in inline script, got %+v", matches)
+	}
+}
