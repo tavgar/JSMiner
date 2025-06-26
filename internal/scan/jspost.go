@@ -165,8 +165,22 @@ var (
 	nodeProtoRe     = regexp.MustCompile(`(?is)protocol\s*:\s*['"]([^'"]+)['"]`)
 	nodeReqAssignRe = regexp.MustCompile(`(?is)(?:const|let|var)\s+([A-Za-z_\$][A-Za-z0-9_\$]*)\s*=\s*(https?\.request)\(\s*([A-Za-z_\$][A-Za-z0-9_\$]*)`)
 	nodeInlineRe1   = regexp.MustCompile(`(?is)(https?\.request)\(\s*{([^}]*)}`)
-	nodeInlineRe2   = regexp.MustCompile(`(?is)(https?\.request)\([^,]+,\s*{([^}]*)}`)
+	// Simplified: matches http(s).request with first arg and options object
+	nodeInlineRe2   = regexp.MustCompile(`(?is)(https?\.request)\(([^,]+),\s*\{([^}]*)\}`)
 )
+
+// isEscaped checks if the character at position pos is escaped by counting preceding backslashes
+func isEscaped(data []byte, pos int) bool {
+	if pos == 0 {
+		return false
+	}
+	backslashCount := 0
+	for i := pos - 1; i >= 0 && data[i] == '\\'; i-- {
+		backslashCount++
+	}
+	// Character is escaped if there's an odd number of backslashes
+	return backslashCount%2 == 1
+}
 
 // extractJSExpression extracts a complete JavaScript expression (object, array, function call, etc.)
 // starting at the given position in the data. It handles nested structures by counting brackets.
@@ -217,7 +231,7 @@ func extractJSExpression(data []byte, start int) string {
 					break
 				}
 			} else {
-				if data[end] == stringDelim && (end == 0 || data[end-1] != '\\') {
+				if data[end] == stringDelim && !isEscaped(data, end) {
 					inString = false
 				}
 			}
@@ -351,19 +365,21 @@ func parseJSPostRequests(data []byte) []jsEndpoint {
 		val := ""
 		if lit := stringLiteralRe.FindSubmatch(arg); lit != nil {
 			val = string(lit[1])
-		} else if idx := bytes.Index(arg, []byte("/v2/q/")); idx != -1 {
-			end := idx + bytes.IndexAny(arg[idx:], "'\"`+")
-			if end <= idx {
-				end = len(arg)
-			}
-			val = string(arg[idx:end])
-		} else if idx := bytes.Index(arg, []byte("/v1/q/")); idx != -1 {
-			end := idx + bytes.IndexAny(arg[idx:], "'\"`+")
-			if end <= idx {
-				end = len(arg)
-			}
-			val = string(arg[idx:end])
 		} else {
+			// Check for configurable patterns
+			fetchQuestPatterns := []string{"/v1/q/", "/v2/q/", "/api/q/", "/quest/"}
+			for _, pattern := range fetchQuestPatterns {
+				if idx := bytes.Index(arg, []byte(pattern)); idx != -1 {
+					end := idx + bytes.IndexAny(arg[idx:], "'\"`+")
+					if end <= idx {
+						end = len(arg)
+					}
+					val = string(arg[idx:end])
+					break
+				}
+			}
+		}
+		if val == "" {
 			val = string(arg)
 		}
 		isURL := strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") || strings.HasPrefix(val, "//")
@@ -484,7 +500,8 @@ func parseJSPostRequests(data []byte) []jsEndpoint {
 
 	for _, loc := range nodeInlineRe2.FindAllSubmatchIndex(data, -1) {
 		schemeCall := string(data[loc[2]:loc[3]])
-		obj := data[loc[4]:loc[5]]
+		// Skip first argument (loc[4]:loc[5])
+		obj := data[loc[6]:loc[7]]
 		if !nodeMethodRe.Match(obj) {
 			continue
 		}
