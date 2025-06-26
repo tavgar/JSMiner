@@ -37,7 +37,7 @@ Flags may appear before or after the input path or URL.
 Flags:
 
 - `-format` output format, `pretty` or `json` (default `json`).
-- `-safe` safe mode - ignore non-JS files and patterns that aren't JavaScript specific (default `true`).
+- `-safe` safe mode - ignore non-JS files and patterns that aren't JavaScript specific (default `false`).
 - `-allow` allowlist file. Sources whose names end with any suffix listed in this file are ignored.
 - `-rules` extra regex rules YAML file.
 - `-endpoints` return only HTTP endpoints (default includes all matches)

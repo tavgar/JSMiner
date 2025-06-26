@@ -19,7 +19,7 @@ const version = "0.01v"
 
 func main() {
 	format := flag.String("format", "json", "output format: pretty or json")
-	safe := flag.Bool("safe", true, "safe mode - only scan JS")
+	safe := flag.Bool("safe", false, "safe mode - only scan JS")
 	allowFile := flag.String("allow", "", "allowlist file")
 	rulesFile := flag.String("rules", "", "extra regex rules YAML")
 	endpoints := flag.Bool("endpoints", false, "only return HTTP endpoints")
