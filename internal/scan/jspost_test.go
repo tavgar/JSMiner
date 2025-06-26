@@ -226,9 +226,9 @@ func TestParseJSPostRequestsComplexObjects(t *testing.T) {
 	}));`
 
 	eps := parseJSPostRequests([]byte(js))
-	if len(eps) != 3 {
+	if len(eps) != 5 {
 		t.Logf("Endpoints found: %+v", eps)
-		t.Fatalf("expected 3 endpoints, got %d", len(eps))
+		t.Fatalf("expected 5 endpoints, got %d", len(eps))
 	}
 
 	// Verify complex parameters are captured

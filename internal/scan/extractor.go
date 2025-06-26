@@ -80,8 +80,9 @@ var defaultPatterns = map[string]string{
 	"token": `(?i)(?:access|auth)?_?token\s*[:=]\s*["']?[A-Za-z0-9-_]{10,}`,
 	// passwords with at least 4 non-space characters
 	"password": `(?i)password\s*[:=]\s*["']?\S{4,}`,
-	// long alphanumeric strings that might be secrets
-	"long_secret": `[A-Za-z0-9_-]{32,}`,
+	// long alphanumeric strings that might be secrets. Allow common
+	// prefixes like "key" or "secret" for additional context.
+	"long_secret": `(?:(?i)(?:key|secret|token|api)[_-]?[:=]\s*)?[A-Za-z0-9_-]{32,}`,
 }
 
 // powerPatterns provide additional regexes enabled by default.
