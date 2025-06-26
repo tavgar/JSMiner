@@ -29,6 +29,7 @@ type Extractor struct {
 	rules     []Rule
 	safeMode  bool
 	allowlist []string
+	jsRules   map[string]bool
 }
 
 // parseSimpleYAML is a very small YAML parser that supports the subset used in
@@ -60,10 +61,9 @@ func parseSimpleYAML(data []byte) (map[string]string, error) {
 
 var jsExts = []string{".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".wasm"}
 
-var jsRules = map[string]bool{
-	"jwt":         true,
-	"google_api":  true,
-	"long_secret": true,
+var baseJSRules = map[string]bool{
+	"jwt":        true,
+	"google_api": true,
 }
 
 // default patterns (simplified)
@@ -97,10 +97,19 @@ var powerPatterns = map[string]string{
 }
 
 // NewExtractor creates an Extractor
-func NewExtractor(safe bool) *Extractor {
-	e := &Extractor{safeMode: safe}
+func NewExtractor(safe bool, longSecret bool) *Extractor {
+	e := &Extractor{safeMode: safe, jsRules: make(map[string]bool)}
+	for k, v := range baseJSRules {
+		e.jsRules[k] = v
+	}
 	for name, pat := range defaultPatterns {
+		if name == "long_secret" && !longSecret {
+			continue
+		}
 		e.rules = append(e.rules, RegexRule{Name: name, RE: regexp.MustCompile(pat), Severity: "info"})
+		if name == "long_secret" {
+			e.jsRules[name] = true
+		}
 	}
 	for name, pat := range powerPatterns {
 		e.rules = append(e.rules, RegexRule{Name: name, RE: regexp.MustCompile(pat), Severity: "info"})
@@ -159,8 +168,8 @@ func isJSFile(path string) bool {
 	return false
 }
 
-func isJSRule(name string) bool {
-	return jsRules[name]
+func (e *Extractor) isJSRule(name string) bool {
+	return e.jsRules[name]
 }
 
 func (e *Extractor) isAllowed(source string) bool {
@@ -188,7 +197,7 @@ func (e *Extractor) ScanReader(source string, r io.Reader) ([]Match, error) {
 	for buf.Scan() {
 		line := []byte(buf.Text())
 		for _, rule := range e.rules {
-			if e.safeMode && !isJSRule(rule.MatchName()) {
+			if e.safeMode && !e.isJSRule(rule.MatchName()) {
 				continue
 			}
 			for _, m := range rule.Find(line) {
@@ -336,7 +345,7 @@ func (e *Extractor) ScanReaderAST(source string, r io.Reader) ([]Match, error) {
 	for _, val := range jsast.ExtractValues(data) {
 		b := []byte(val)
 		for _, rule := range e.rules {
-			if e.safeMode && !isJSRule(rule.MatchName()) {
+			if e.safeMode && !e.isJSRule(rule.MatchName()) {
 				continue
 			}
 			for _, m := range rule.Find(b) {

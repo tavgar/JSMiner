@@ -27,7 +27,7 @@ func TestScanDir(t *testing.T) {
 	jarPath := filepath.Join(dir, "d.jar")
 	createZip(jarPath, "d.js", "9.8.7.6")
 
-	e := NewExtractor(false)
+	e := NewExtractor(false, false)
 	matches, err := e.ScanDir(dir, 2)
 	if err != nil {
 		t.Fatal(err)

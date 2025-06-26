@@ -27,7 +27,7 @@ func TestScanURL(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	e := NewExtractor(true)
+	e := NewExtractor(true, false)
 	matches, err := e.ScanURL(ts.URL, false, false, false)
 	if err != nil {
 		t.Fatal(err)
@@ -68,7 +68,7 @@ func TestScanURLExternal(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	e := NewExtractor(true)
+	e := NewExtractor(true, false)
 	matches, err := e.ScanURL(ts.URL, false, true, false)
 	if err != nil {
 		t.Fatal(err)
@@ -102,7 +102,7 @@ func TestScanURLRender(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	e := NewExtractor(true)
+	e := NewExtractor(true, false)
 	matches, err := e.ScanURL(ts.URL, false, false, true)
 	if err != nil {
 		t.Fatal(err)
@@ -133,7 +133,7 @@ func TestScanURLEndpointsOnly(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	e := NewExtractor(true)
+	e := NewExtractor(true, false)
 	matches, err := e.ScanURL(ts.URL, true, false, false)
 	if err != nil {
 		t.Fatal(err)
@@ -158,7 +158,7 @@ func TestScanURLInlineScript(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	e := NewExtractor(true)
+	e := NewExtractor(true, false)
 	matches, err := e.ScanURL(ts.URL, false, false, false)
 	if err != nil {
 		t.Fatal(err)

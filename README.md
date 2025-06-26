@@ -44,6 +44,8 @@ Flags:
 - `-posts` return HTTP POST request endpoints with any parameters
 - `-external` follow external scripts and imports (default `true`)
 - `-render` render pages with headless Chrome (default `true`, set `-render=false` to disable; Chrome/Chromium must be installed)
+- `-longsecret` detect generic long secrets (disabled by default). Enable to
+  search for high-entropy strings that may represent API keys.
 - `-output` write output to file instead of stdout.
 - `-quiet` suppress startup banner.
 - `-targets` file with additional URLs/paths to scan, one per line.

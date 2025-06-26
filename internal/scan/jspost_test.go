@@ -42,7 +42,7 @@ func TestParseJSPostRequests(t *testing.T) {
 
 func TestScanReaderPostRequests(t *testing.T) {
 	js := `fetch("https://ex.com/api", {method:'POST', body:req}); axios.post('/submit', data);`
-	e := NewExtractor(true)
+	e := NewExtractor(true, false)
 	matches, err := e.ScanReaderPostRequests("script.js", strings.NewReader(js))
 	if err != nil {
 		t.Fatal(err)
@@ -64,7 +64,7 @@ func TestScanReaderPostRequests(t *testing.T) {
 
 func TestScanReaderPostRequestsNonJS(t *testing.T) {
 	js := `fetch('/ignore', {method:'POST'})`
-	e := NewExtractor(true)
+	e := NewExtractor(true, false)
 	matches, err := e.ScanReaderPostRequests("file.txt", strings.NewReader(js))
 	if err != nil {
 		t.Fatal(err)
@@ -165,12 +165,12 @@ func TestParseJSPostRequestsTemplateLiterals(t *testing.T) {
 		"	method: \"POST\",\n" +
 		"	body: `{\"status\": \"${newStatus}\"}`\n" +
 		"});"
-	
+
 	eps := parseJSPostRequests([]byte(js))
 	if len(eps) != 3 {
 		t.Fatalf("expected 3 endpoints, got %d", len(eps))
 	}
-	
+
 	// Check that template literal expressions are captured
 	found := make(map[string]bool)
 	for _, ep := range eps {
@@ -178,7 +178,7 @@ func TestParseJSPostRequestsTemplateLiterals(t *testing.T) {
 			found[ep.Value] = true
 		}
 	}
-	
+
 	if len(found) != 3 {
 		t.Fatalf("expected 3 template literal endpoints, found %d", len(found))
 	}
@@ -224,13 +224,13 @@ func TestParseJSPostRequestsComplexObjects(t *testing.T) {
 			compress: true
 		}
 	}));`
-	
+
 	eps := parseJSPostRequests([]byte(js))
 	if len(eps) != 3 {
 		t.Logf("Endpoints found: %+v", eps)
 		t.Fatalf("expected 3 endpoints, got %d", len(eps))
 	}
-	
+
 	// Verify complex parameters are captured
 	hasComplexParams := false
 	for _, ep := range eps {
@@ -239,7 +239,7 @@ func TestParseJSPostRequestsComplexObjects(t *testing.T) {
 			break
 		}
 	}
-	
+
 	if !hasComplexParams {
 		t.Fatal("expected to find complex parameters with spread operator or function calls")
 	}
@@ -272,7 +272,7 @@ func TestExtractJSExpressionEdgeCases(t *testing.T) {
 			expected: "",
 		},
 	}
-	
+
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Extract the parameter part after the URL
@@ -284,7 +284,7 @@ func TestExtractJSExpressionEdgeCases(t *testing.T) {
 				return
 			}
 			start += 2 // skip ", "
-			
+
 			result := extractJSExpression([]byte(tc.input), start)
 			if result != tc.expected {
 				t.Fatalf("expected %q, got %q", tc.expected, result)
