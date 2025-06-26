@@ -39,7 +39,7 @@ func TestParseJSEndpoints(t *testing.T) {
 
 func TestScanReaderWithEndpoints(t *testing.T) {
 	js := `fetch("https://ex.com/api"); axios.get('/v2/data');`
-	e := NewExtractor(true)
+	e := NewExtractor(true, false)
 	matches, err := e.ScanReaderWithEndpoints("script.js", strings.NewReader(js))
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +60,7 @@ func TestScanReaderWithEndpoints(t *testing.T) {
 
 func TestScanReaderWithEndpointsNonJS(t *testing.T) {
 	js := `fetch("/should/ignore")`
-	e := NewExtractor(true)
+	e := NewExtractor(true, false)
 	matches, err := e.ScanReaderWithEndpoints("file.txt", strings.NewReader(js))
 	if err != nil {
 		t.Fatal(err)
@@ -74,7 +74,7 @@ func TestScanReaderWithEndpointsNonJS(t *testing.T) {
 
 func TestScanReaderFiltersInvalidEndpoints(t *testing.T) {
 	js := `fetch("http://a"); fetch('/./'); fetch('//'); fetch('/$'); fetch('https://valid.com/api');`
-	e := NewExtractor(true)
+	e := NewExtractor(true, false)
 	matches, err := e.ScanReaderWithEndpoints("script.js", strings.NewReader(js))
 	if err != nil {
 		t.Fatal(err)

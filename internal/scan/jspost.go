@@ -9,7 +9,7 @@ import (
 // inferAuthParams infers common parameters based on endpoint patterns
 func inferAuthParams(endpoint string) string {
 	endpoint = strings.ToLower(endpoint)
-	
+
 	// Common authentication endpoints and their typical parameters
 	if strings.Contains(endpoint, "idm") || strings.Contains(endpoint, "identity") {
 		return "phone, password, code (OTP)"
@@ -35,7 +35,7 @@ func inferAuthParams(endpoint string) string {
 	if strings.Contains(endpoint, "forgot") || strings.Contains(endpoint, "reset") {
 		return "email/phone, token, new_password"
 	}
-	
+
 	return ""
 }
 
@@ -48,10 +48,10 @@ func extractAuthParams(context []byte) string {
 		"username": regexp.MustCompile(`(?i)(?:username|user)\s*:\s*[^,}]+`),
 		"token":    regexp.MustCompile(`(?i)(?:token|csrf|authenticity_token)\s*:\s*[^,}]+`),
 	}
-	
+
 	foundParams := []string{}
 	contextStr := string(context)
-	
+
 	// Look for object notation parameters
 	objectPattern := regexp.MustCompile(`\{([^}]*(?:email|username|password|token)[^}]*)\}`)
 	if matches := objectPattern.FindStringSubmatch(contextStr); len(matches) > 1 {
@@ -62,7 +62,7 @@ func extractAuthParams(context []byte) string {
 			}
 		}
 	}
-	
+
 	// Look for FormData append patterns
 	formDataPattern := regexp.MustCompile(`\.append\s*\(\s*['"](\w+)['"]`)
 	if matches := formDataPattern.FindAllStringSubmatch(contextStr, -1); len(matches) > 0 {
@@ -76,7 +76,7 @@ func extractAuthParams(context []byte) string {
 			}
 		}
 	}
-	
+
 	// Look for input field patterns
 	inputPattern := regexp.MustCompile(`(?i)(?:name|id)\s*=\s*["'](\w+)["'].*?type\s*=\s*["'](password|email|text)["']`)
 	if matches := inputPattern.FindAllStringSubmatch(contextStr, -1); len(matches) > 0 {
@@ -86,7 +86,7 @@ func extractAuthParams(context []byte) string {
 			}
 		}
 	}
-	
+
 	if len(foundParams) > 0 {
 		// Remove duplicates
 		seen := make(map[string]bool)
@@ -99,7 +99,7 @@ func extractAuthParams(context []byte) string {
 		}
 		return "inferred: " + strings.Join(unique, ", ")
 	}
-	
+
 	return ""
 }
 
@@ -128,32 +128,32 @@ var (
 	ajaxURLRe     = regexp.MustCompile(`url\s*:\s*['"` + "`" + `]([^'"` + "`" + `]+)['"` + "`" + `]`)
 	ajaxMethodRe  = regexp.MustCompile(`(?is)(?:type|method)\s*:\s*['"` + "`" + `]POST['"` + "`" + `]`)
 	ajaxDataRe    = regexp.MustCompile(`data\s*:\s*([^,}]+)`)
-	
+
 	// Form submission patterns
 	formActionRe = regexp.MustCompile(`(?is)action\s*=\s*["']([^"']+)["']`)
 	formSubmitRe = regexp.MustCompile(`(?is)\.submit\(\)`)
-	
+
 	// API endpoint patterns - more specific to reduce false positives
 	apiEndpointRe = regexp.MustCompile(`(?is)(?:/api/v[0-9]+|/v[0-9]+|/open_api)/[A-Za-z0-9_/\-]+`)
-	
+
 	// Modern framework patterns
 	// React/Next.js form submission patterns
-	onSubmitRe = regexp.MustCompile(`(?is)onSubmit\s*[:=]\s*(?:async\s+)?(?:function\s*\([^)]*\)|(?:\([^)]*\)|[A-Za-z_$][A-Za-z0-9_$]*)\s*=>)`)
+	onSubmitRe     = regexp.MustCompile(`(?is)onSubmit\s*[:=]\s*(?:async\s+)?(?:function\s*\([^)]*\)|(?:\([^)]*\)|[A-Za-z_$][A-Za-z0-9_$]*)\s*=>)`)
 	handleSubmitRe = regexp.MustCompile(`(?is)(?:handle|on)(?:Submit|Login|SignIn|Auth)\s*[:=]\s*(?:async\s+)?(?:function\s*\([^)]*\)|(?:\([^)]*\)|[A-Za-z_$][A-Za-z0-9_$]*)\s*=>)`)
-	
+
 	// GraphQL mutation patterns
 	graphqlMutationRe = regexp.MustCompile(`(?is)mutation\s+(?:login|signin|authenticate|auth)[^{]*\{`)
-	
+
 	// Auth library patterns (NextAuth, Auth0, etc.)
 	signInRe = regexp.MustCompile(`(?is)signIn\s*\(\s*['"` + "`" + `]([^'"` + "`" + `]+)['"` + "`" + `](?:\s*,\s*([^)]+))?\)`)
-	
+
 	// API route patterns
-	apiRouteRe = regexp.MustCompile(`(?is)['"` + "`" + `](/api/[A-Za-z0-9_/\-]+)['"` + "`" + `]`)
+	apiRouteRe     = regexp.MustCompile(`(?is)['"` + "`" + `](/api/[A-Za-z0-9_/\-]+)['"` + "`" + `]`)
 	authEndpointRe = regexp.MustCompile(`(?is)['"` + "`" + `](/(?:auth|login|signin|sign-in|authenticate|account/sign-in|api/idm|api/hyper-document)[A-Za-z0-9_/\-]*)['"` + "`" + `]`)
-	
+
 	// Form event patterns
 	preventDefaultRe = regexp.MustCompile(`(?is)(?:event|e)\.preventDefault\s*\(\s*\)`)
-	
+
 	// Next.js API routes with dynamic segments
 	nextAPIRouteRe = regexp.MustCompile(`(?is)['"` + "`" + `](/api/auth/[A-Za-z0-9_/\-\[\]]+)['"` + "`" + `]`)
 
@@ -166,7 +166,7 @@ var (
 	nodeReqAssignRe = regexp.MustCompile(`(?is)(?:const|let|var)\s+([A-Za-z_\$][A-Za-z0-9_\$]*)\s*=\s*(https?\.request)\(\s*([A-Za-z_\$][A-Za-z0-9_\$]*)`)
 	nodeInlineRe1   = regexp.MustCompile(`(?is)(https?\.request)\(\s*{([^}]*)}`)
 	// Simplified: matches http(s).request with first arg and options object
-	nodeInlineRe2   = regexp.MustCompile(`(?is)(https?\.request)\(([^,]+),\s*\{([^}]*)\}`)
+	nodeInlineRe2 = regexp.MustCompile(`(?is)(https?\.request)\(([^,]+),\s*\{([^}]*)\}`)
 )
 
 // isEscaped checks if the character at position pos is escaped by counting preceding backslashes
@@ -188,19 +188,19 @@ func extractJSExpression(data []byte, start int) string {
 	if start >= len(data) {
 		return ""
 	}
-	
+
 	// Skip whitespace
 	for start < len(data) && (data[start] == ' ' || data[start] == '\t' || data[start] == '\n' || data[start] == '\r') {
 		start++
 	}
-	
+
 	if start >= len(data) {
 		return ""
 	}
-	
+
 	openDelim := data[start]
 	var closeDelim byte
-	
+
 	switch openDelim {
 	case '{':
 		closeDelim = '}'
@@ -214,7 +214,7 @@ func extractJSExpression(data []byte, start int) string {
 		parenDepth := 0
 		inString := false
 		var stringDelim byte
-		
+
 		for end < len(data) {
 			if !inString {
 				if data[end] == '"' || data[end] == '\'' || data[end] == '`' {
@@ -237,16 +237,16 @@ func extractJSExpression(data []byte, start int) string {
 			}
 			end++
 		}
-		
+
 		return strings.TrimSpace(string(data[start:end]))
 	}
-	
+
 	// Extract nested structure
 	depth := 1
 	end := start + 1
 	inString := false
 	var stringDelim byte
-	
+
 	for end < len(data) && depth > 0 {
 		if !inString {
 			if data[end] == '"' || data[end] == '\'' || data[end] == '`' {
@@ -264,11 +264,11 @@ func extractJSExpression(data []byte, start int) string {
 		}
 		end++
 	}
-	
+
 	if depth == 0 && end <= len(data) {
 		return strings.TrimSpace(string(data[start:end]))
 	}
-	
+
 	return strings.TrimSpace(string(data[start:]))
 }
 
@@ -308,7 +308,7 @@ func parseJSPostRequests(data []byte) []jsEndpoint {
 	for _, m := range fetchVarRe.FindAllSubmatch(data, -1) {
 		val := string(m[1])
 		varName := string(m[2])
-		
+
 		// Look for the variable definition with POST method
 		varPattern := regexp.MustCompile(`(?is)(?:const|let|var)\s+` + regexp.QuoteMeta(varName) + `\s*=\s*\{([^}]*)\}`)
 		if varMatch := varPattern.FindSubmatch(data); varMatch != nil {
@@ -532,22 +532,22 @@ func parseJSPostRequests(data []byte) []jsEndpoint {
 			params := inferAuthParams(val)
 			uniq[val+"|"+params] = jsEndpoint{Value: val, IsURL: isURL, Params: params}
 		}
-		
+
 		// Look for API routes that might be used for authentication
 		for _, m := range apiRouteRe.FindAllSubmatch(data, -1) {
 			val := string(m[1])
 			// Filter for likely auth-related endpoints
-			if strings.Contains(strings.ToLower(val), "auth") || 
-			   strings.Contains(strings.ToLower(val), "login") || 
-			   strings.Contains(strings.ToLower(val), "signin") ||
-			   strings.Contains(strings.ToLower(val), "sign-in") {
+			if strings.Contains(strings.ToLower(val), "auth") ||
+				strings.Contains(strings.ToLower(val), "login") ||
+				strings.Contains(strings.ToLower(val), "signin") ||
+				strings.Contains(strings.ToLower(val), "sign-in") {
 				isURL := strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") || strings.HasPrefix(val, "//")
 				// Infer parameters based on endpoint type
 				params := inferAuthParams(val)
 				uniq[val+"|"+params] = jsEndpoint{Value: val, IsURL: isURL, Params: params}
 			}
 		}
-		
+
 		// Look for Next.js API routes
 		for _, m := range nextAPIRouteRe.FindAllSubmatch(data, -1) {
 			val := string(m[1])
@@ -556,7 +556,7 @@ func parseJSPostRequests(data []byte) []jsEndpoint {
 			uniq[val+"|"+params] = jsEndpoint{Value: val, IsURL: isURL, Params: params}
 		}
 	}
-	
+
 	// Additional patterns for async/dynamic requests
 	// Look for any API endpoint that might handle POST
 	for _, m := range apiRouteRe.FindAllSubmatch(data, -1) {
@@ -575,18 +575,18 @@ func parseJSPostRequests(data []byte) []jsEndpoint {
 			contextEnd = len(data)
 		}
 		context := data[contextStart:contextEnd]
-		
+
 		// If POST is mentioned in nearby context, include this endpoint
 		if bytes.Contains(bytes.ToLower(context), []byte("post")) ||
-		   bytes.Contains(bytes.ToLower(context), []byte("method")) ||
-		   bytes.Contains(context, []byte("body:")) ||
-		   bytes.Contains(context, []byte("data:")) {
+			bytes.Contains(bytes.ToLower(context), []byte("method")) ||
+			bytes.Contains(context, []byte("body:")) ||
+			bytes.Contains(context, []byte("data:")) {
 			isURL := strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") || strings.HasPrefix(val, "//")
 			params := inferAuthParams(val)
 			uniq[val+"|"+params] = jsEndpoint{Value: val, IsURL: isURL, Params: params}
 		}
 	}
-	
+
 	// Handle NextAuth/Auth0 signIn patterns
 	for _, m := range signInRe.FindAllSubmatchIndex(data, -1) {
 		val := string(data[m[2]:m[3]])
@@ -600,7 +600,7 @@ func parseJSPostRequests(data []byte) []jsEndpoint {
 			uniq[val+"|"+params] = jsEndpoint{Value: val, IsURL: isURL, Params: params}
 		}
 	}
-	
+
 	// Look for GraphQL mutations
 	if graphqlMutationRe.Match(data) {
 		// Common GraphQL endpoints
@@ -614,8 +614,16 @@ func parseJSPostRequests(data []byte) []jsEndpoint {
 		}
 	}
 
-	out := make([]jsEndpoint, 0, len(uniq))
+	// deduplicate by endpoint value keeping the entry with the longest params
+	final := make(map[string]jsEndpoint)
 	for _, ep := range uniq {
+		cur, ok := final[ep.Value]
+		if !ok || len(ep.Params) > len(cur.Params) {
+			final[ep.Value] = ep
+		}
+	}
+	out := make([]jsEndpoint, 0, len(final))
+	for _, ep := range final {
 		out = append(out, ep)
 	}
 	return out

@@ -27,7 +27,7 @@ func TestScanURL(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	e := NewExtractor(true)
+	e := NewExtractor(true, false)
 	matches, err := e.ScanURL(ts.URL, false, false, false)
 	if err != nil {
 		t.Fatal(err)
@@ -68,7 +68,7 @@ func TestScanURLExternal(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	e := NewExtractor(true)
+	e := NewExtractor(true, false)
 	matches, err := e.ScanURL(ts.URL, false, true, false)
 	if err != nil {
 		t.Fatal(err)
@@ -102,7 +102,7 @@ func TestScanURLRender(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	e := NewExtractor(true)
+	e := NewExtractor(true, false)
 	matches, err := e.ScanURL(ts.URL, false, false, true)
 	if err != nil {
 		t.Fatal(err)
@@ -133,7 +133,7 @@ func TestScanURLEndpointsOnly(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	e := NewExtractor(true)
+	e := NewExtractor(true, false)
 	matches, err := e.ScanURL(ts.URL, true, false, false)
 	if err != nil {
 		t.Fatal(err)
@@ -145,5 +145,32 @@ func TestScanURLEndpointsOnly(t *testing.T) {
 		if !strings.HasPrefix(m.Pattern, "endpoint_") {
 			t.Fatalf("unexpected non-endpoint pattern %s", m.Pattern)
 		}
+	}
+}
+
+func TestScanURLInlineScript(t *testing.T) {
+	key := "AIzaSyD1ad_UKyHFErfLeO_3aoBoNrX1W4bsmac"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		io.WriteString(w, `<html><script>var apiKey="`+key+`";</script></html>`)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	e := NewExtractor(true, false)
+	matches, err := e.ScanURL(ts.URL, false, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range matches {
+		if m.Pattern == "google_api" && strings.Contains(m.Value, key) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected google_api match in inline script, got %+v", matches)
 	}
 }

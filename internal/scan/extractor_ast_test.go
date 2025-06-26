@@ -7,7 +7,7 @@ import (
 
 func TestScanReaderASTVar(t *testing.T) {
 	src := `const t = "eyJabc.def.ghi"`
-	e := NewExtractor(true)
+	e := NewExtractor(true, false)
 	matches, err := e.ScanReaderAST("script.js", strings.NewReader(src))
 	if err != nil {
 		t.Fatal(err)
@@ -19,7 +19,7 @@ func TestScanReaderASTVar(t *testing.T) {
 
 func TestScanReaderASTConcat(t *testing.T) {
 	src := `const t = "eyJabc." + "def.ghi"`
-	e := NewExtractor(true)
+	e := NewExtractor(true, false)
 	matches, err := e.ScanReaderAST("script.js", strings.NewReader(src))
 	if err != nil {
 		t.Fatal(err)

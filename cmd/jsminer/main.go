@@ -19,13 +19,14 @@ const version = "0.01v"
 
 func main() {
 	format := flag.String("format", "json", "output format: pretty or json")
-	safe := flag.Bool("safe", true, "safe mode - only scan JS")
+	safe := flag.Bool("safe", false, "safe mode - only scan JS")
 	allowFile := flag.String("allow", "", "allowlist file")
 	rulesFile := flag.String("rules", "", "extra regex rules YAML")
 	endpoints := flag.Bool("endpoints", false, "only return HTTP endpoints")
 	posts := flag.Bool("posts", false, "only return HTTP POST request endpoints")
 	external := flag.Bool("external", true, "follow external scripts and imports")
 	render := flag.Bool("render", true, "render pages in headless Chrome")
+	longSecret := flag.Bool("longsecret", false, "detect generic long secrets")
 	outFile := flag.String("output", "", "output file (stdout default)")
 	quiet := flag.Bool("quiet", false, "suppress banner")
 	targetsFile := flag.String("targets", "", "file with list of targets")
@@ -77,6 +78,8 @@ func main() {
 			}
 		case "safe":
 			*safe = true
+		case "longsecret":
+			*longSecret = true
 		case "quiet":
 			*quiet = true
 		case "format", "allow", "rules", "output", "targets", "plugins":
@@ -143,7 +146,7 @@ func main() {
 		}
 	}
 
-	extractor := scan.NewExtractor(*safe)
+	extractor := scan.NewExtractor(*safe, *longSecret)
 	if *rulesFile != "" {
 		if err := extractor.LoadRulesFile(*rulesFile); err != nil {
 			log.Fatal(err)

@@ -32,9 +32,19 @@ func fetchURLResponse(u string) (*http.Response, error) {
 }
 
 var scriptSrcRe = regexp.MustCompile(`(?is)<script[^>]+src=["']([^"']+)['"]`)
+var inlineScriptRe = regexp.MustCompile(`(?is)<script[^>]*>(.*?)</script>`)
 
 func extractScriptSrcs(data []byte) []string {
 	ms := scriptSrcRe.FindAllSubmatch(data, -1)
+	out := make([]string, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, string(m[1]))
+	}
+	return out
+}
+
+func extractInlineScripts(data []byte) []string {
+	ms := inlineScriptRe.FindAllSubmatch(data, -1)
 	out := make([]string, 0, len(ms))
 	for _, m := range ms {
 		out = append(out, string(m[1]))
@@ -161,6 +171,16 @@ func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited map
 		}
 		sources := extractScriptSrcs(data)
 		sources = append(sources, dynamic...)
+		inline := extractInlineScripts(data)
+		for _, src := range inline {
+			ms, err := e.ScanReaderWithEndpoints("inline.js", bytes.NewReader([]byte(src)))
+			if err == nil {
+				if endpoints {
+					ms = FilterEndpointMatches(ms)
+				}
+				matches = append(matches, ms...)
+			}
+		}
 		for _, src := range sources {
 			abs := resolveURL(finalURL, src)
 			u, err := url.Parse(abs)
@@ -271,7 +291,6 @@ func (e *Extractor) scanURLPosts(urlStr, baseHost string, visited map[string]str
 		return nil, err
 	}
 	matches = append(matches, ms...)
-
 
 	for _, imp := range extractJSImports(data) {
 		abs := resolveURL(finalURL, imp)
