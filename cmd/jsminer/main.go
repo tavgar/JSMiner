@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"plugin"
@@ -14,6 +15,14 @@ import (
 	"github.com/tavgar/JSMiner/internal/output"
 	"github.com/tavgar/JSMiner/internal/scan"
 )
+
+type headerSlice []string
+
+func (h *headerSlice) String() string { return strings.Join(*h, ",") }
+func (h *headerSlice) Set(v string) error {
+	*h = append(*h, v)
+	return nil
+}
 
 const version = "0.01v"
 
@@ -31,6 +40,8 @@ func main() {
 	quiet := flag.Bool("quiet", false, "suppress banner")
 	targetsFile := flag.String("targets", "", "file with list of targets")
 	pluginsFlag := flag.String("plugins", "", "comma-separated plugin files")
+	var headerFlags headerSlice
+	flag.Var(&headerFlags, "header", "HTTP header in 'Key: Value' format. May be repeated")
 	flag.Parse()
 
 	// handle flags placed after positional arguments
@@ -82,6 +93,17 @@ func main() {
 			*longSecret = true
 		case "quiet":
 			*quiet = true
+		case "header":
+			val := ""
+			if len(parts) == 2 {
+				val = parts[1]
+			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				val = args[i+1]
+				i++
+			}
+			if val != "" {
+				headerFlags = append(headerFlags, val)
+			}
 		case "format", "allow", "rules", "output", "targets", "plugins":
 			if i+1 < len(args) {
 				val := args[i+1]
@@ -144,6 +166,22 @@ func main() {
 				log.Fatal(err)
 			}
 		}
+	}
+
+	if len(headerFlags) > 0 {
+		h := http.Header{}
+		for _, hv := range headerFlags {
+			parts := strings.SplitN(hv, ":", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			key := strings.TrimSpace(parts[0])
+			val := strings.TrimSpace(parts[1])
+			if key != "" {
+				h.Add(key, val)
+			}
+		}
+		scan.SetExtraHeaders(h)
 	}
 
 	extractor := scan.NewExtractor(*safe, *longSecret)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 
+	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 )
@@ -31,6 +32,17 @@ func RenderURL(urlStr string) ([]byte, []string, error) {
 	ctx, cancelTimeout := context.WithTimeout(ctx, RenderTimeout)
 	defer cancelTimeout()
 
+	headers := map[string]interface{}{"User-Agent": defaultUserAgent}
+	if vals := extraHeaders.Values("User-Agent"); len(vals) > 0 {
+		headers["User-Agent"] = vals[len(vals)-1]
+	}
+	for k, vals := range extraHeaders {
+		if strings.EqualFold(k, "User-Agent") || len(vals) == 0 {
+			continue
+		}
+		headers[k] = vals[len(vals)-1]
+	}
+
 	scriptSet := make(map[string]struct{})
 	chromedp.ListenTarget(ctx, func(ev interface{}) {
 		if e, ok := ev.(*network.EventResponseReceived); ok {
@@ -43,13 +55,20 @@ func RenderURL(urlStr string) ([]byte, []string, error) {
 	})
 
 	var html string
-	err := chromedp.Run(ctx,
-		network.Enable(),
+	actions := []chromedp.Action{network.Enable()}
+	if len(headers) > 0 {
+		actions = append(actions,
+			network.SetExtraHTTPHeaders(network.Headers(headers)),
+			emulation.SetUserAgentOverride(headers["User-Agent"].(string)),
+		)
+	}
+	actions = append(actions,
 		chromedp.Navigate(urlStr),
 		chromedp.WaitReady("body", chromedp.ByQuery),
 		chromedp.Sleep(RenderSleepDuration),
 		chromedp.OuterHTML("html", &html, chromedp.ByQuery),
 	)
+	err := chromedp.Run(ctx, actions...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -77,6 +96,17 @@ func RenderURLWithRequests(urlStr string) ([]byte, []string, []HTTPRequest, erro
 
 	ctx, cancelTimeout := context.WithTimeout(ctx, RenderTimeout)
 	defer cancelTimeout()
+
+	headers := map[string]interface{}{"User-Agent": defaultUserAgent}
+	if vals := extraHeaders.Values("User-Agent"); len(vals) > 0 {
+		headers["User-Agent"] = vals[len(vals)-1]
+	}
+	for k, vals := range extraHeaders {
+		if strings.EqualFold(k, "User-Agent") || len(vals) == 0 {
+			continue
+		}
+		headers[k] = vals[len(vals)-1]
+	}
 
 	scriptSet := make(map[string]struct{})
 	reqMap := make(map[network.RequestID]*HTTPRequest)
@@ -106,7 +136,7 @@ func RenderURLWithRequests(urlStr string) ([]byte, []string, []HTTPRequest, erro
 				if contentType, ok := e.Headers["Content-Type"]; ok {
 					if ct, ok := contentType.(string); ok {
 						if strings.Contains(ct, "application/x-www-form-urlencoded") ||
-						   strings.Contains(ct, "multipart/form-data") {
+							strings.Contains(ct, "multipart/form-data") {
 							// Mark that this is likely a form submission
 							req.Body = "[Form data captured via headers]"
 						}
@@ -229,12 +259,19 @@ func RenderURLWithRequests(urlStr string) ([]byte, []string, []HTTPRequest, erro
 		}, true);
 	})();
 	`
-	
+
 	var html string
 	var interceptedPosts []HTTPRequest
 	var formFields map[string]interface{}
-	err := chromedp.Run(ctx,
-		network.Enable().WithMaxPostDataSize(MaxPostDataSize),
+
+	actions := []chromedp.Action{network.Enable().WithMaxPostDataSize(MaxPostDataSize)}
+	if len(headers) > 0 {
+		actions = append(actions,
+			network.SetExtraHTTPHeaders(network.Headers(headers)),
+			emulation.SetUserAgentOverride(headers["User-Agent"].(string)),
+		)
+	}
+	actions = append(actions,
 		chromedp.Navigate(urlStr),
 		chromedp.Evaluate(interceptScript, nil),
 		chromedp.WaitReady("body", chromedp.ByQuery),
@@ -243,6 +280,7 @@ func RenderURLWithRequests(urlStr string) ([]byte, []string, []HTTPRequest, erro
 		chromedp.Evaluate(`window.__formFields || {}`, &formFields),
 		chromedp.OuterHTML("html", &html, chromedp.ByQuery),
 	)
+	err := chromedp.Run(ctx, actions...)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -257,7 +295,7 @@ func RenderURLWithRequests(urlStr string) ([]byte, []string, []HTTPRequest, erro
 		}
 		posts = append(posts, *r)
 	}
-	
+
 	// Add intercepted posts from JavaScript
 	for _, p := range interceptedPosts {
 		// Check if we already have this request (avoid duplicates)
@@ -276,7 +314,7 @@ func RenderURLWithRequests(urlStr string) ([]byte, []string, []HTTPRequest, erro
 			posts = append(posts, p)
 		}
 	}
-	
+
 	// For POST endpoints without body, try to infer parameters from forms
 	for i := range posts {
 		if posts[i].Body == "" || posts[i].Body == "[Form data captured via headers]" {

@@ -50,6 +50,7 @@ Flags:
 - `-quiet` suppress startup banner.
 - `-targets` file with additional URLs/paths to scan, one per line.
 - `-plugins` comma-separated list of Go plugins providing custom rules.
+- `-header` HTTP header in `Key: Value` form. May be specified multiple times.
 
 Using `-render` requires Chrome or Chromium to be installed on your system.
 
