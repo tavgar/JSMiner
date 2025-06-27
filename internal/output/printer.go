@@ -11,10 +11,11 @@ import (
 
 // Printer handles output rendering
 type Printer struct {
-	format     string
-	banner     bool
-	showSource bool
-	version    string
+	format        string
+	banner        bool
+	showSource    bool
+	version       string
+	printedBanner bool
 }
 
 // NewPrinter creates a printer
@@ -24,8 +25,9 @@ func NewPrinter(format string, banner bool, showSource bool, version string) *Pr
 
 // Print writes matches to w
 func (p *Printer) Print(w io.Writer, matches []scan.Match) error {
-	if p.banner {
+	if p.banner && !p.printedBanner {
 		fmt.Fprintln(w, Banner(p.version))
+		p.printedBanner = true
 	}
 
 	if p.format == "pretty" {
