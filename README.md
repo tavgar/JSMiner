@@ -48,6 +48,7 @@ Flags:
   search for high-entropy strings that may represent API keys.
 - `-output` write output to file instead of stdout.
 - `-quiet` suppress startup banner.
+- `-proxy` run as HTTP/HTTPS proxy on the specified address (e.g. `:8080`).
 - `-targets` file with additional URLs/paths to scan, one per line.
 - `-plugins` comma-separated list of Go plugins providing custom rules.
 - `-header` HTTP header in `Key: Value` form. May be specified multiple times.
@@ -105,6 +106,30 @@ jsminer -plugins entropy.so file.js
 ```
 
 See `examples/entropy` for a simple entropy based rule.
+
+### Proxy mode
+
+Running with `-proxy` starts an HTTP/HTTPS proxy that scans traffic as you
+browse. Configure your browser to use the proxy address and trust the proxy's
+certificate to intercept HTTPS responses.
+
+1. Download the CA certificate used by [goproxy](https://github.com/elazarl/goproxy) with:
+
+   ```bash
+   curl -L https://raw.githubusercontent.com/elazarl/goproxy/v1.7.2/ca.pem -o goproxy-ca.pem
+   ```
+
+   Alternatively, generate your own CA and replace this file.
+2. Import `goproxy-ca.pem` into your browser's **Authorities** certificate store.
+   - **Firefox:** Settings → Certificates → View Certificates… → Authorities → Import.
+   - **Chrome:** Settings → Privacy and Security → Security → Manage certificates → Authorities → Import.
+3. Start the proxy:
+
+   ```bash
+   jsminer -proxy :8080
+   ```
+
+Matches will stream to stdout or to the file specified with `-output`.
 
 ## Testing
 
