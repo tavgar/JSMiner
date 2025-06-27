@@ -2,15 +2,18 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"plugin"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/tavgar/JSMiner/internal/output"
 	"github.com/tavgar/JSMiner/internal/proxy"
@@ -95,15 +98,6 @@ func main() {
 			*longSecret = true
 		case "quiet":
 			*quiet = true
-		case "proxy":
-			val := ""
-			if len(parts) == 2 {
-				val = parts[1]
-			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				val = args[i+1]
-				i++
-			}
-			*proxyAddr = val
 		case "header":
 			val := ""
 			if len(parts) == 2 {
@@ -220,7 +214,9 @@ func main() {
 			out = f
 		}
 		printer := output.NewPrinter(*format, !*quiet, true, version)
-		if err := proxy.Run(*proxyAddr, extractor, printer, out, *endpoints); err != nil {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := proxy.Run(ctx, *proxyAddr, extractor, printer, out, *endpoints); err != nil {
 			log.Fatal(err)
 		}
 		return

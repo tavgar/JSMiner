@@ -2,9 +2,12 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"time"
 
 	"github.com/elazarl/goproxy"
 	"github.com/tavgar/JSMiner/internal/output"
@@ -13,7 +16,7 @@ import (
 
 // Run starts an HTTP proxy server that scans all HTTP responses using the
 // provided Extractor. Matches are printed live with the given Printer.
-func Run(addr string, ext *scan.Extractor, printer *output.Printer, out io.Writer, endpoints bool) error {
+func Run(ctx context.Context, addr string, ext *scan.Extractor, printer *output.Printer, out io.Writer, endpoints bool) error {
 	prx := goproxy.NewProxyHttpServer()
 	prx.Verbose = false
 	// Enable MITM for HTTPS so response bodies can be inspected.
@@ -36,12 +39,31 @@ func Run(addr string, ext *scan.Extractor, printer *output.Printer, out io.Write
 				ms = scan.FilterEndpointMatches(ms)
 			}
 			if len(ms) > 0 {
-				_ = printer.Print(out, ms)
+				if err := printer.Print(out, ms); err != nil {
+					log.Printf("printer error: %v", err)
+				}
 			}
 		}
 		return resp
 	})
 
-	log.Printf("Proxy listening on %s", addr)
-	return http.ListenAndServe(addr, prx)
+	srv := &http.Server{Handler: prx}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	log.Printf("Proxy listening on %s", ln.Addr().String())
+
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+		defer cancel()
+		srv.Shutdown(shutdownCtx)
+	}()
+
+	err = srv.Serve(ln)
+	if err == http.ErrServerClosed {
+		return nil
+	}
+	return err
 }
