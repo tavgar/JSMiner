@@ -40,6 +40,7 @@ func main() {
 	quiet := flag.Bool("quiet", false, "suppress banner")
 	targetsFile := flag.String("targets", "", "file with list of targets")
 	pluginsFlag := flag.String("plugins", "", "comma-separated plugin files")
+	showSourceFlag := flag.Bool("show-source", false, "show source of each record (auto-enabled for multiple targets)")
 	var headerFlags headerSlice
 	flag.Var(&headerFlags, "header", "HTTP header in 'Key: Value' format. May be repeated")
 	flag.Parse()
@@ -93,6 +94,8 @@ func main() {
 			*longSecret = true
 		case "quiet":
 			*quiet = true
+		case "show-source":
+			*showSourceFlag = true
 		case "header":
 			val := ""
 			if len(parts) == 2 {
@@ -272,7 +275,7 @@ func main() {
 		out = f
 	}
 
-	showSource := len(targets) > 1
+	showSource := *showSourceFlag || len(targets) > 1
 	printer := output.NewPrinter(*format, !*quiet, showSource, version)
 	if err := printer.Print(out, allMatches); err != nil {
 		log.Fatal(err)
@@ -284,5 +287,5 @@ func main() {
 }
 
 func isURL(s string) bool {
-	return len(s) > 4 && (s[:7] == "http://" || s[:8] == "https://")
+	return (len(s) > 7 && s[:7] == "http://") || (len(s) > 8 && s[:8] == "https://")
 }
