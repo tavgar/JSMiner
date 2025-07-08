@@ -2,17 +2,21 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"plugin"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/tavgar/JSMiner/internal/output"
+	"github.com/tavgar/JSMiner/internal/proxy"
 	"github.com/tavgar/JSMiner/internal/scan"
 )
 
@@ -38,6 +42,7 @@ func main() {
 	longSecret := flag.Bool("longsecret", false, "detect generic long secrets")
 	outFile := flag.String("output", "", "output file (stdout default)")
 	quiet := flag.Bool("quiet", false, "suppress banner")
+	proxyAddr := flag.String("proxy", "", "run as proxy on address (e.g., :8080)")
 	targetsFile := flag.String("targets", "", "file with list of targets")
 	pluginsFlag := flag.String("plugins", "", "comma-separated plugin files")
 	showSourceFlag := flag.Bool("show-source", false, "show source of each record (auto-enabled for multiple targets)")
@@ -132,7 +137,7 @@ func main() {
 	}
 
 	var targets []string
-	if *targetsFile != "" {
+	if *proxyAddr == "" && *targetsFile != "" {
 		f, err := os.Open(*targetsFile)
 		if err != nil {
 			log.Fatal(err)
@@ -150,8 +155,10 @@ func main() {
 		}
 		f.Close()
 	}
-	targets = append(targets, leftover...)
-	if len(targets) == 0 {
+	if *proxyAddr == "" {
+		targets = append(targets, leftover...)
+	}
+	if *proxyAddr == "" && len(targets) == 0 {
 		if !*quiet {
 			fmt.Fprintln(os.Stderr, output.Banner(version))
 		}
@@ -197,6 +204,25 @@ func main() {
 		if err := extractor.LoadAllowlist(*allowFile); err != nil {
 			log.Fatal(err)
 		}
+	}
+
+	if *proxyAddr != "" {
+		var out *os.File = os.Stdout
+		if *outFile != "" {
+			f, err := os.Create(*outFile)
+			if err != nil {
+				log.Fatal(err)
+			}
+			defer f.Close()
+			out = f
+		}
+		printer := output.NewPrinter(*format, !*quiet, true, version)
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := proxy.Run(ctx, *proxyAddr, extractor, printer, out, *endpoints); err != nil {
+			log.Fatal(err)
+		}
+		return
 	}
 
 	var allMatches []scan.Match
