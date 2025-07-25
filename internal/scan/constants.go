@@ -15,7 +15,7 @@ const (
 )
 
 // Timeouts and delays
-const (
+var (
 	// RenderTimeout is the timeout for page rendering operations
 	RenderTimeout = 15 * time.Second
 
@@ -25,6 +25,11 @@ const (
 	// HTTPClientTimeout is the timeout for HTTP requests
 	HTTPClientTimeout = 10 * time.Second
 )
+
+// SetRenderSleepDuration allows customizing the sleep duration for page rendering
+func SetRenderSleepDuration(seconds int) {
+	RenderSleepDuration = time.Duration(seconds) * time.Second
+}
 
 // Other limits
 const (
