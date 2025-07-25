@@ -41,6 +41,7 @@ func main() {
 	targetsFile := flag.String("targets", "", "file with list of targets")
 	pluginsFlag := flag.String("plugins", "", "comma-separated plugin files")
 	showSourceFlag := flag.Bool("show-source", false, "show source of each record (auto-enabled for multiple targets)")
+	timeout := flag.Int("timeout", 8, "wait time in seconds for dynamic content to load when rendering pages (default: 8)")
 	var headerFlags headerSlice
 	flag.Var(&headerFlags, "header", "HTTP header in 'Key: Value' format. May be repeated")
 	flag.Parse()
@@ -96,6 +97,17 @@ func main() {
 			*quiet = true
 		case "show-source":
 			*showSourceFlag = true
+		case "timeout":
+			val := ""
+			if len(parts) == 2 {
+				val = parts[1]
+			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				val = args[i+1]
+				i++
+			}
+			if t, err := strconv.Atoi(val); err == nil {
+				*timeout = t
+			}
 		case "header":
 			val := ""
 			if len(parts) == 2 {
@@ -185,6 +197,11 @@ func main() {
 			}
 		}
 		scan.SetExtraHeaders(h)
+	}
+
+	// Set the render timeout if specified
+	if *timeout > 0 {
+		scan.SetRenderSleepDuration(*timeout)
 	}
 
 	extractor := scan.NewExtractor(*safe, *longSecret)
