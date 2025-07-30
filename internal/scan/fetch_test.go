@@ -50,3 +50,24 @@ func TestFetchURLExtraHeaders(t *testing.T) {
 		t.Fatalf("expected header X-Test yes, got %q", hv)
 	}
 }
+
+// Test that FetchURL can skip TLS verification when configured
+func TestFetchURLSkipTLSVerify(t *testing.T) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "ok")
+	}))
+	defer ts.Close()
+
+	SetSkipTLSVerification(false)
+	if _, err := FetchURL(ts.URL); err == nil {
+		t.Fatalf("expected TLS error when verification enabled")
+	}
+
+	SetSkipTLSVerification(true)
+	rc, err := FetchURL(ts.URL)
+	if err != nil {
+		t.Fatalf("FetchURL returned error with skip verify: %v", err)
+	}
+	rc.Close()
+	SetSkipTLSVerification(true)
+}

@@ -23,6 +23,9 @@ func RenderURL(urlStr string) ([]byte, []string, error) {
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("no-sandbox", true),
 	)
+	if SkipTLSVerification {
+		opts = append(opts, chromedp.Flag("ignore-certificate-errors", true))
+	}
 	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
 	defer cancel()
 
@@ -88,6 +91,9 @@ func RenderURLWithRequests(urlStr string) ([]byte, []string, []HTTPRequest, erro
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("no-sandbox", true),
 	)
+	if SkipTLSVerification {
+		opts = append(opts, chromedp.Flag("ignore-certificate-errors", true))
+	}
 	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
 	defer cancel()
 

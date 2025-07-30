@@ -2,6 +2,7 @@ package scan
 
 import (
 	"bytes"
+	"crypto/tls"
 	"io"
 	"net/http"
 	"net/url"
@@ -14,8 +15,17 @@ import (
 // fetchURLResponse retrieves a URL and returns the http.Response
 // with limited redirects and a default User-Agent.
 func fetchURLResponse(u string) (*http.Response, error) {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if SkipTLSVerification {
+		if transport.TLSClientConfig == nil {
+			transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		} else {
+			transport.TLSClientConfig.InsecureSkipVerify = true
+		}
+	}
 	client := http.Client{
-		Timeout: 10 * time.Second,
+		Transport: transport,
+		Timeout:   10 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 5 {
 				return http.ErrUseLastResponse

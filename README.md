@@ -51,6 +51,7 @@ Flags:
 - `-proxy` run as HTTP/HTTPS proxy on the specified address (e.g. `:8080`).
 - `-targets` file with additional URLs/paths to scan, one per line.
 - `-plugins` comma-separated list of Go plugins providing custom rules.
+- `-insecure` skip TLS certificate verification for HTTPS requests (default `true`).
 - `-header` HTTP header in `Key: Value` form. May be specified multiple times.
 
 Using `-render` requires Chrome or Chromium to be installed on your system.

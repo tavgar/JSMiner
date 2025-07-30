@@ -39,6 +39,7 @@ func main() {
 	posts := flag.Bool("posts", false, "only return HTTP POST request endpoints")
 	external := flag.Bool("external", true, "follow external scripts and imports")
 	render := flag.Bool("render", true, "render pages in headless Chrome")
+	insecure := flag.Bool("insecure", true, "skip TLS certificate verification")
 	longSecret := flag.Bool("longsecret", false, "detect generic long secrets")
 	outFile := flag.String("output", "", "output file (stdout default)")
 	quiet := flag.Bool("quiet", false, "suppress banner")
@@ -102,6 +103,19 @@ func main() {
 			*quiet = true
 		case "show-source":
 			*showSourceFlag = true
+		case "insecure":
+			val := "true"
+			if len(parts) == 2 {
+				val = parts[1]
+			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				val = args[i+1]
+				i++
+			}
+			if b, err := strconv.ParseBool(val); err == nil {
+				*insecure = b
+			} else {
+				*insecure = true
+			}
 		case "timeout":
 			val := ""
 			if len(parts) == 2 {
@@ -210,6 +224,7 @@ func main() {
 	if *timeout > 0 {
 		scan.SetRenderSleepDuration(*timeout)
 	}
+	scan.SetSkipTLSVerification(*insecure)
 
 	extractor := scan.NewExtractor(*safe, *longSecret)
 	if *rulesFile != "" {
