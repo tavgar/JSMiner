@@ -24,11 +24,20 @@ var (
 
 	// HTTPClientTimeout is the timeout for HTTP requests
 	HTTPClientTimeout = 10 * time.Second
+
+	// SkipTLSVerification controls whether HTTPS certificate verification is skipped
+	// Defaults to true so invalid certificates are accepted unless explicitly disabled
+	SkipTLSVerification = true
 )
 
 // SetRenderSleepDuration allows customizing the sleep duration for page rendering
 func SetRenderSleepDuration(seconds int) {
 	RenderSleepDuration = time.Duration(seconds) * time.Second
+}
+
+// SetSkipTLSVerification configures whether HTTPS certificate verification should be skipped
+func SetSkipTLSVerification(skip bool) {
+	SkipTLSVerification = skip
 }
 
 // Other limits

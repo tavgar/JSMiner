@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"crypto/tls"
 	"io"
 	"net/http"
 	"strings"
@@ -43,8 +44,17 @@ func applyHeaders(req *http.Request) {
 
 // FetchURL retrieves the content at url with timeouts and limited redirects
 func FetchURL(url string) (io.ReadCloser, error) {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if SkipTLSVerification {
+		if transport.TLSClientConfig == nil {
+			transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		} else {
+			transport.TLSClientConfig.InsecureSkipVerify = true
+		}
+	}
 	client := http.Client{
-		Timeout: 10 * time.Second,
+		Transport: transport,
+		Timeout:   10 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 5 {
 				return http.ErrUseLastResponse
