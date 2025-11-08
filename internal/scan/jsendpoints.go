@@ -8,7 +8,12 @@ import (
 // endpointRe matches endpoint-like strings inside quotes or backticks. It
 // captures absolute URLs, protocol-relative URLs and relative paths beginning
 // with `/`, `./` or `../`.
-var endpointRe = regexp.MustCompile("(?i)[\"'`](((?:https?:)?//[^\"'`\\s]+|\\.?\\.?/[^\"'`\\s]+))[\"'`]")
+// Updated regex: allow any number of `${...}` interpolation segments before the actual
+// endpoint so that template literals like `${base}/api/login` are matched. We keep the
+// core capture group (the endpoint) unchanged to preserve downstream behaviour.
+// The optional non-capturing prefix `(?:\$\{[^}]+\})*` consumes one or more interpolation
+// segments without including them in the final capture value.
+var endpointRe = regexp.MustCompile("(?i)[\"'`](?:\\$\\{[^}]+\\})*((?:https?:)?//[^\"'`\\s]+|\\.?\\.?/[^\"'`\\s]+)[\"'`]")
 
 // jsEndpoint holds an endpoint string and whether it is an absolute URL.
 // jsEndpoint holds an endpoint string, whether it is an absolute URL and any
