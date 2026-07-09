@@ -8,10 +8,15 @@ const (
 	MaxPostDataSize = 64 * 1024 // 64KB
 
 	// InitialBufferSize is the initial size for scanner buffers
-	InitialBufferSize = 1024 // 1KB
+	InitialBufferSize = 64 * 1024 // 64KB
 
-	// MaxBufferSize is the maximum size for scanner buffers
-	MaxBufferSize = 1024 * 1024 // 1MB
+	// MaxBufferSize is the maximum size for scanner buffers.
+	// Minified JS bundles are frequently emitted as a single multi-megabyte
+	// line, so this must be large enough to hold an entire bundle as one token;
+	// otherwise bufio.Scanner aborts with ErrTooLong and the whole file is
+	// skipped. The scanner grows the buffer on demand up to this cap, so the
+	// value is a ceiling, not a pre-allocation.
+	MaxBufferSize = 64 * 1024 * 1024 // 64MB
 )
 
 // Timeouts and delays

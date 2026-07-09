@@ -2,7 +2,6 @@ package scan
 
 import (
 	"fmt"
-	"regexp"
 )
 
 var nucleiRegexes = []string{
@@ -737,8 +736,7 @@ var nucleiRegexes = []string{
 
 func init() {
 	for i, pat := range nucleiRegexes {
-		r := regexp.MustCompile(pat)
 		name := fmt.Sprintf("nuclei_%d", i)
-		RegisterRule(RegexRule{Name: name, RE: r, Severity: "info"})
+		RegisterRule(newRegexRule(name, pat, "info"))
 	}
 }

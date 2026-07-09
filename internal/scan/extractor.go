@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/tavgar/JSMiner/internal/scan/jsast"
 )
@@ -107,7 +109,7 @@ func NewExtractor(safe bool, longSecret bool) *Extractor {
 		if name == "long_secret" && !longSecret {
 			continue
 		}
-		e.rules = append(e.rules, RegexRule{Name: name, RE: regexp.MustCompile(pat), Severity: "info"})
+		e.rules = append(e.rules, newRegexRule(name, pat, "info"))
 		if name == "long_secret" {
 			e.jsRules[name] = true
 		}
@@ -126,7 +128,7 @@ func NewExtractor(safe bool, longSecret bool) *Extractor {
 			})
 			continue
 		}
-		e.rules = append(e.rules, RegexRule{Name: name, RE: re, Severity: "info"})
+		e.rules = append(e.rules, newRegexRule(name, pat, "info"))
 	}
 	e.rules = append(e.rules, getRegisteredRules()...)
 	return e
@@ -210,17 +212,75 @@ func (e *Extractor) ScanReader(source string, r io.Reader) ([]Match, error) {
 	buf.Buffer(make([]byte, 0, InitialBufferSize), MaxBufferSize)
 	for buf.Scan() {
 		line := []byte(buf.Text())
+		matches = append(matches, e.scanRules(source, line)...)
+	}
+	return matches, buf.Err()
+}
+
+// parallelScanThreshold is the line size above which rule evaluation is spread
+// across CPU cores. Minified bundles arrive as a single multi-MB line, and each
+// rule scans the whole line independently, so parallelizing across rules gives
+// a near-linear speedup. Small lines run sequentially to avoid goroutine churn.
+const parallelScanThreshold = 128 * 1024
+
+// scanRules applies every applicable rule to line and returns the matches in
+// deterministic rule order. For large lines the rules run concurrently; results
+// are written into per-rule slots so the merged output is identical to a
+// sequential scan.
+func (e *Extractor) scanRules(source string, line []byte) []Match {
+	applicable := func(rule Rule) bool {
+		return !e.safeMode || e.isJSRule(rule.MatchName())
+	}
+
+	if len(line) < parallelScanThreshold {
+		var out []Match
 		for _, rule := range e.rules {
-			if e.safeMode && !e.isJSRule(rule.MatchName()) {
+			if !applicable(rule) {
 				continue
 			}
 			for _, m := range rule.Find(line) {
 				m.Source = source
-				matches = append(matches, m)
+				out = append(out, m)
 			}
 		}
+		return out
 	}
-	return matches, buf.Err()
+
+	workers := runtime.GOMAXPROCS(0)
+	if workers > len(e.rules) {
+		workers = len(e.rules)
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	results := make([][]Match, len(e.rules))
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(start int) {
+			defer wg.Done()
+			for i := start; i < len(e.rules); i += workers {
+				rule := e.rules[i]
+				if !applicable(rule) {
+					continue
+				}
+				var local []Match
+				for _, m := range rule.Find(line) {
+					m.Source = source
+					local = append(local, m)
+				}
+				results[i] = local
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	var out []Match
+	for _, r := range results {
+		out = append(out, r...)
+	}
+	return out
 }
 
 // ScanReaderWithEndpoints scans r like ScanReader and also extracts HTTP
