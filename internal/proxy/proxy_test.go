@@ -23,7 +23,7 @@ func TestProxyScansResponses(t *testing.T) {
 
 	e := scan.NewExtractor(false, false)
 	buf := &bytes.Buffer{}
-	printer := output.NewPrinter("json", false, true, "test")
+	printer := output.NewPrinter("json", false, true, false, "test")
 
 	// Choose an available port
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

@@ -24,6 +24,12 @@ type Match struct {
 	Value    string `json:"value"`
 	Params   string `json:"params,omitempty"`
 	Severity string `json:"severity"`
+
+	// Snippet holds a raw source window surrounding the matched value. It is
+	// only populated when snippet capture is enabled (see SetSnippet) and is
+	// consumed by the output layer to render a prettified, highlighted code
+	// excerpt. It is intentionally excluded from the default JSON encoding.
+	Snippet string `json:"-"`
 }
 
 // Extractor holds compiled regex patterns
@@ -32,7 +38,13 @@ type Extractor struct {
 	safeMode  bool
 	allowlist []string
 	jsRules   map[string]bool
+	snippet   bool
 }
+
+// SetSnippet toggles capture of a raw source window around each match so the
+// output layer can render a code excerpt. It is disabled by default because
+// locating every value in the source adds work proportional to the input size.
+func (e *Extractor) SetSnippet(on bool) { e.snippet = on }
 
 // parseSimpleYAML is a very small YAML parser that supports the subset used in
 // the tests: a mapping of string keys to string values. It ignores blank lines
@@ -316,6 +328,9 @@ func (e *Extractor) ScanReaderWithEndpoints(source string, r io.Reader) ([]Match
 			matches = append(matches, Match{Source: source, Pattern: p, Value: val, Severity: "info"})
 		}
 	}
+	if e.snippet {
+		attachSnippets(data, matches)
+	}
 	return matches, nil
 }
 
@@ -352,6 +367,9 @@ func (e *Extractor) ScanReaderPostRequests(source string, r io.Reader) ([]Match,
 		}
 		seen[key] = struct{}{}
 		matches = append(matches, Match{Source: source, Pattern: p, Value: val, Params: params, Severity: "info"})
+	}
+	if e.snippet {
+		attachSnippets(data, matches)
 	}
 	return matches, nil
 }
@@ -427,6 +445,9 @@ func (e *Extractor) ScanReaderAST(source string, r io.Reader) ([]Match, error) {
 				matches = append(matches, m)
 			}
 		}
+	}
+	if e.snippet {
+		attachSnippets(data, matches)
 	}
 	return matches, nil
 }

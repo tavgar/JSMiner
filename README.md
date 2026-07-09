@@ -47,6 +47,10 @@ Flags:
 - `-longsecret` detect generic long secrets (disabled by default). Enable to
   search for high-entropy strings that may represent API keys.
 - `-output` write output to file instead of stdout.
+- `-snippet` show a JS-prettified, syntax-highlighted code snippet around each
+  finding. In `pretty` output the excerpt is beautified, colored and the matched
+  value is emphasized (color is used only when writing to a terminal). In `json`
+  output each record gains a beautified `snippet` field.
 - `-quiet` suppress startup banner.
 - `-proxy` run as HTTP/HTTPS proxy on the specified address (e.g. `:8080`).
 - `-targets` file with additional URLs/paths to scan, one per line.
@@ -55,6 +59,29 @@ Flags:
 - `-header` HTTP header in `Key: Value` form. May be specified multiple times.
 
 Using `-render` requires Chrome or Chromium to be installed on your system.
+
+### Code snippets
+
+Pass `-snippet` to show where each finding lives in the source. Minified or
+single-line bundles are beautified into readable, indented lines, JavaScript
+syntax is colored, and the matched value is highlighted:
+
+```
+$ jsminer -format pretty -snippet app.min.js
+[google_api] (info) AIzaSyA1234567890abcdefghijklmnopqrstuvw
+    ┌─ snippet ─────────────────────────────
+     1 │ function initApp(cfg){
+     2 │   const apiKey="AIzaSyA1234567890abcdefghijklmnopqrstuvw";
+     3 │   fetch("/api/v1/login",{
+     4 │     headers:{Authorization:"Bearer …"}
+     5 │   }).then(r=>r.json());
+     6 │ }
+    └────────────────────────────────────────
+```
+
+Colors are emitted only when writing to a terminal, so redirected or piped
+output stays plain. In `json` mode the beautified excerpt is added as a
+`snippet` field on each record instead.
 
 The binary includes a small set of **power rules** enabled by default. These
 rules detect common items such as phone numbers, IPv6 addresses and generic

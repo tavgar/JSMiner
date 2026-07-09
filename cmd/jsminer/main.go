@@ -47,6 +47,7 @@ func main() {
 	targetsFile := flag.String("targets", "", "file with list of targets")
 	pluginsFlag := flag.String("plugins", "", "comma-separated plugin files")
 	showSourceFlag := flag.Bool("show-source", false, "show source of each record (auto-enabled for multiple targets)")
+	snippet := flag.Bool("snippet", false, "show a JS-prettified, syntax-highlighted code snippet around each finding")
 	timeout := flag.Int("timeout", 8, "wait time in seconds for dynamic content to load when rendering pages (default: 8)")
 	var headerFlags headerSlice
 	flag.Var(&headerFlags, "header", "HTTP header in 'Key: Value' format. May be repeated")
@@ -103,6 +104,8 @@ func main() {
 			*quiet = true
 		case "show-source":
 			*showSourceFlag = true
+		case "snippet":
+			*snippet = true
 		case "insecure":
 			val := "true"
 			if len(parts) == 2 {
@@ -227,6 +230,7 @@ func main() {
 	scan.SetSkipTLSVerification(*insecure)
 
 	extractor := scan.NewExtractor(*safe, *longSecret)
+	extractor.SetSnippet(*snippet)
 	if *rulesFile != "" {
 		if err := extractor.LoadRulesFile(*rulesFile); err != nil {
 			log.Fatal(err)
@@ -248,7 +252,7 @@ func main() {
 			defer f.Close()
 			out = f
 		}
-		printer := output.NewPrinter(*format, !*quiet, true, version)
+		printer := output.NewPrinter(*format, !*quiet, true, *snippet, version)
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		if err := proxy.Run(ctx, *proxyAddr, extractor, printer, out, *endpoints); err != nil {
@@ -334,7 +338,7 @@ func main() {
 	}
 
 	showSource := *showSourceFlag || len(targets) > 1
-	printer := output.NewPrinter(*format, !*quiet, showSource, version)
+	printer := output.NewPrinter(*format, !*quiet, showSource, *snippet, version)
 	if err := printer.Print(out, allMatches); err != nil {
 		log.Fatal(err)
 	}
