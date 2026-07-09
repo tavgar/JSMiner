@@ -83,7 +83,6 @@ var baseJSRules = map[string]bool{
 // default patterns (simplified)
 var defaultPatterns = map[string]string{
 	"email":      `[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}`,
-	"ipv4":       `\b(?:\d{1,3}\.){3}\d{1,3}\b`,
 	"jwt":        `eyJ[a-zA-Z0-9_-]+?\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+`,
 	"aws_secret": `(?i)aws_secret_access_key\s*[:=]\s*[A-Za-z0-9/+=]{40}`,
 	"google_api": `AIza[0-9A-Za-z-_]{35}`,
@@ -99,16 +98,31 @@ var defaultPatterns = map[string]string{
 	"long_secret": `(?:(?i)(?:key|secret|token|api)[_-]?[:=]\s*)?[A-Za-z0-9_-]{32,}`,
 }
 
+// defaultFilters attaches a post-match validation to specific default rules to
+// suppress the false positives they generate on minified/bundled JavaScript.
+// (ipv4 is handled by the dedicated, context-aware ipv4Rule instead.)
+var defaultFilters = map[string]func(string) bool{
+	"api_key":  credentialValueFilter,
+	"token":    credentialValueFilter,
+	"password": credentialValueFilter,
+}
+
 // powerPatterns provide additional regexes enabled by default.
 var powerPatterns = map[string]string{
 	"phone": `\d{3}-\d{3}-\d{4}`,
-	// loose IPv6 pattern used in conjunction with net.ParseIP validation
-	// to avoid noise from short hex sequences like "a:b".
-	"ipv6": `[0-9a-fA-F:]+`,
+	// Require at least two colons so bare "a:b" object literals are ignored;
+	// validIPv6Match then enforces a parseable, multi-group address.
+	"ipv6": `(?:[0-9a-fA-F]*:){2,}[0-9a-fA-F]*`,
 	// crude file path detection for Unix and Windows paths. Requires a
 	// leading whitespace or start of line to avoid matching fragments in
 	// secrets.
 	"path": `(?:^|\s)(/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*)|[A-Za-z]:\\\\(?:[^\\\\\s]+\\\\)*[^\\\\\s]+`,
+}
+
+// powerFilters attaches a post-match validation to specific power rules.
+var powerFilters = map[string]func(string) bool{
+	"ipv6": validIPv6Match,
+	"path": validPathMatch,
 }
 
 // NewExtractor creates an Extractor
@@ -121,27 +135,24 @@ func NewExtractor(safe bool, longSecret bool) *Extractor {
 		if name == "long_secret" && !longSecret {
 			continue
 		}
-		e.rules = append(e.rules, newRegexRule(name, pat, "info"))
+		r := newRegexRule(name, pat, "info")
+		if f, ok := defaultFilters[name]; ok {
+			r.Filter = f
+		}
+		e.rules = append(e.rules, r)
 		if name == "long_secret" {
 			e.jsRules[name] = true
 		}
 	}
 	for name, pat := range powerPatterns {
-		re := regexp.MustCompile(pat)
-		if name == "ipv6" {
-			e.rules = append(e.rules, FilterRegexRule{
-				Name:     name,
-				RE:       re,
-				Severity: "info",
-				Filter: func(s string) bool {
-					ip := net.ParseIP(strings.TrimSpace(s))
-					return ip != nil && strings.Contains(s, ":") && ip.To4() == nil
-				},
-			})
-			continue
+		r := newRegexRule(name, pat, "info")
+		if f, ok := powerFilters[name]; ok {
+			r.Filter = f
 		}
-		e.rules = append(e.rules, newRegexRule(name, pat, "info"))
+		e.rules = append(e.rules, r)
 	}
+	// ipv4 uses a dedicated context-aware rule to reject SVG/coordinate streams.
+	e.rules = append(e.rules, newIPv4Rule())
 	e.rules = append(e.rules, getRegisteredRules()...)
 	return e
 }
@@ -399,22 +410,118 @@ func FilterEndpointMatches(ms []Match) []Match {
 
 func validEndpoint(pattern, val string) bool {
 	if pattern == "endpoint_url" {
-		u, err := url.Parse(val)
-		if err != nil || u.Hostname() == "" {
+		return validEndpointURL(val)
+	}
+	return validEndpointPath(val)
+}
+
+// noiseHostSuffixes lists documentation, library and framework domains that are
+// routinely embedded in JS bundles as references but are never the target's own
+// endpoints. Matching hosts are dropped from endpoint output as noise.
+var noiseHostSuffixes = []string{
+	"w3.org", "react.dev", "reactjs.org", "vuejs.org", "angular.io",
+	"github.com", "githubusercontent.com", "github.io", "gitlab.com",
+	"npmjs.com", "nodejs.org", "jquery.com", "lodash.com", "momentjs.com",
+	"quilljs.com", "mozilla.org", "schema.org", "json-schema.org",
+	"gnu.org", "apache.org", "opensource.org", "creativecommons.org",
+}
+
+// validEndpointURL keeps only absolute/protocol-relative URLs that point at a
+// plausible, non-library host. Placeholder URLs, loopback hosts and known
+// documentation/library domains are rejected.
+func validEndpointURL(val string) bool {
+	if val == "" || val == "//" || strings.Contains(val, "...") {
+		return false
+	}
+	u, err := url.Parse(val)
+	if err != nil || u.Hostname() == "" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if ip := net.ParseIP(host); ip != nil {
+		return !ip.IsLoopback() && !ip.IsUnspecified()
+	}
+	if host == "localhost" || strings.HasSuffix(host, ".local") {
+		return false
+	}
+	if !validHostName(host) {
+		return false
+	}
+	for _, s := range noiseHostSuffixes {
+		if host == s || strings.HasSuffix(host, "."+s) {
 			return false
 		}
-		host := strings.ToLower(u.Hostname())
-		if strings.HasSuffix(host, "w3.org") {
+	}
+	return true
+}
+
+// validHostName reports whether host is a syntactically sane DNS name: at least
+// two dot-separated labels, no empty labels, and an alphabetic TLD. This rejects
+// captured fragments such as "..." or single-token hosts like "a".
+func validHostName(host string) bool {
+	if !strings.Contains(host, ".") {
+		return false
+	}
+	labels := strings.Split(host, ".")
+	for _, l := range labels {
+		if l == "" {
 			return false
 		}
-		if !strings.Contains(host, ".") && net.ParseIP(host) == nil && host != "localhost" {
+		for i := 0; i < len(l); i++ {
+			c := l[i]
+			if !(c >= 'a' && c <= 'z') && !(c >= '0' && c <= '9') && c != '-' {
+				return false
+			}
+		}
+	}
+	tld := labels[len(labels)-1]
+	if len(tld) < 2 {
+		return false
+	}
+	for i := 0; i < len(tld); i++ {
+		if c := tld[i]; !(c >= 'a' && c <= 'z') {
 			return false
 		}
-		if val == "//" {
-			return false
-		}
-	} else {
-		if val == "" || val == "/" || val == "//" || val == "/./" || val == "/$" || val == "/*" || val == "./" || val == "../" {
+	}
+	return true
+}
+
+// validEndpointPath keeps only relative paths that look like real request
+// paths. Regex fragments (`/([^\/]+)`), HTML/SVG (`/></svg>`) and code snippets
+// (`/g,`, `/&`) captured from string literals are rejected. Leading `./` and
+// `../` relative prefixes are permitted (e.g. `./b.js`, `../parent/api`).
+func validEndpointPath(val string) bool {
+	if val == "" {
+		return false
+	}
+	// Metacharacters that indicate a regex, HTML tag or code fragment rather
+	// than a path.
+	if strings.ContainsAny(val, "<>()[]{}\\*,&|^$`\"' \t") {
+		return false
+	}
+	// A trailing bare dot is a regex `.`, not a file extension.
+	if strings.HasSuffix(val, ".") {
+		return false
+	}
+	// Strip a single relative prefix so the remainder is rooted at '/'.
+	rest := val
+	switch {
+	case strings.HasPrefix(rest, "../"):
+		rest = rest[2:]
+	case strings.HasPrefix(rest, "./"):
+		rest = rest[1:]
+	}
+	if len(rest) < 2 || rest[0] != '/' {
+		return false
+	}
+	// The first character of the first segment must be a normal path character.
+	if c := rest[1]; !(c >= 'a' && c <= 'z') && !(c >= 'A' && c <= 'Z') &&
+		!(c >= '0' && c <= '9') && c != '_' && c != '-' && c != '~' {
+		return false
+	}
+	// Reject empty or dot-only path segments (`/..`, `/./`).
+	for _, seg := range strings.Split(strings.Trim(rest, "/"), "/") {
+		if seg == "" || seg == "." || seg == ".." {
 			return false
 		}
 	}

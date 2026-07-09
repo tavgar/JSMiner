@@ -88,6 +88,32 @@ rules detect common items such as phone numbers, IPv6 addresses and generic
 file paths. IPv6 matches are validated with Go's `net.ParseIP` to reduce false
 positives. Supplying a file with `-rules` adds to this default set.
 
+### False-positive filtering
+
+Minified JavaScript bundles are dense with short identifiers, object literals,
+SVG path data and CSS pseudo-selectors that superficially resemble secrets,
+addresses and endpoints. To keep the output actionable, matches from the broad
+built-in rules are validated before being reported:
+
+- **Credential/keyword rules** (`password`, `token`, `api_key` and the generic
+  nuclei `keyword: value` patterns) require the value to look like a real secret
+  — long enough and not a minified identifier, boolean flag (`!0`), language
+  keyword (`function`), kebab-case config name (`css-var-root`) or built-in
+  (`Object`). Strict, self-describing formats (AWS keys, GitHub PATs, JWTs,
+  bearer tokens, …) are matched unchanged.
+- **IPv4** uses a strict dotted-quad (octets 0–255, no leading zeros) and is
+  rejected when it sits inside a longer decimal stream, which is how SVG
+  coordinates and version arrays appear (`38.13.44.25.57…`, `1.11.16.2 57.17…`).
+- **IPv6** must parse as a real, non-loopback address with at least three hextet
+  groups, discarding CSS fragments such as `::before` → `::bef`.
+- **Endpoints** drop regex/HTML fragments (`/([^/]+)`, `/></svg>`), placeholder
+  and loopback URLs (`https://...`, `http://localhost`) and well-known
+  documentation/library domains (react.dev, github.com, …) that are references
+  rather than the target's own endpoints.
+
+The net effect is a ~95% reduction in noise from the broad rules on typical
+minified sites while genuine keys, tokens, addresses and API paths are retained.
+
 ### Rule file format
 
 The file supplied via `-rules` must be a YAML mapping where each key is the

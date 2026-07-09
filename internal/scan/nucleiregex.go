@@ -737,6 +737,14 @@ var nucleiRegexes = []string{
 func init() {
 	for i, pat := range nucleiRegexes {
 		name := fmt.Sprintf("nuclei_%d", i)
-		RegisterRule(newRegexRule(name, pat, "info"))
+		r := newRegexRule(name, pat, "info")
+		// The broad "keyword <sep> value" rules match any identifier on the
+		// value side and are the dominant source of false positives on minified
+		// bundles (e.g. `token:e`, `"password":"text"`). Require the value to
+		// look like a real secret. Strict self-describing formats are left as-is.
+		if isKeywordValuePattern(pat) {
+			r.Filter = credentialValueFilter
+		}
+		RegisterRule(r)
 	}
 }

@@ -19,6 +19,12 @@ type RegexRule struct {
 	RE       *regexp.Regexp
 	Severity string
 
+	// Filter, when non-nil, is applied to every regex hit. Returning false drops
+	// the match. It is used to reject the large volume of false positives that
+	// broad keyword/credential patterns produce on minified bundles (e.g.
+	// `token:e`, `password:!0`) without weakening the patterns themselves.
+	Filter func(string) bool
+
 	// prefilters holds literal substrings that must all be present in the input
 	// for RE to have any chance of matching. They are cheap byte scans used to
 	// skip the far more expensive regex pass on inputs that obviously can't
@@ -36,7 +42,11 @@ func (r RegexRule) Find(data []byte) []Match {
 	}
 	var matches []Match
 	for _, m := range r.RE.FindAll(data, -1) {
-		matches = append(matches, Match{Pattern: r.Name, Value: string(m), Severity: r.Severity})
+		s := string(m)
+		if r.Filter != nil && !r.Filter(s) {
+			continue
+		}
+		matches = append(matches, Match{Pattern: r.Name, Value: s, Severity: r.Severity})
 	}
 	return matches
 }
