@@ -34,12 +34,18 @@ type Match struct {
 
 // Extractor holds compiled regex patterns
 type Extractor struct {
-	rules     []Rule
-	safeMode  bool
-	allowlist []string
-	jsRules   map[string]bool
-	snippet   bool
+	rules      []Rule
+	safeMode   bool
+	allowlist  []string
+	jsRules    map[string]bool
+	snippet    bool
+	calibrator *autoCalibrator
 }
+
+// SetCalibrator installs (or clears, when nil) an auto-calibrator used during
+// crawls to skip catch-all/soft-404 and duplicate pages. It is nil by default,
+// leaving non-crawl scans unaffected.
+func (e *Extractor) SetCalibrator(c *autoCalibrator) { e.calibrator = c }
 
 // SetSnippet toggles capture of a raw source window around each match so the
 // output layer can render a code excerpt. It is disabled by default because

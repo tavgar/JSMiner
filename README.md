@@ -53,6 +53,12 @@ Flags:
   `0` scans only the seed).
 - `-crawl-max-pages` max pages to fetch during a crawl (default `200`, `0` for
   unlimited).
+- `-ac` auto-calibrate the crawl (requires `-crawl`). Modeled on `ffuf -ac`:
+  before crawling, JSMiner probes the target with a few random, non-existent
+  paths to learn what its catch-all / soft-404 pages look like, then skips any
+  crawled page that matches that fingerprint or byte-for-byte duplicates a page
+  already scanned. This keeps single-page-app shells and soft-404 responses from
+  flooding the output with duplicate, low-value findings.
 - `-render` render pages with headless Chrome (default `true`, set `-render=false` to disable; Chrome/Chromium must be installed)
 - `-longsecret` detect generic long secrets (disabled by default). Enable to
   search for high-entropy strings that may represent API keys.
@@ -88,6 +94,19 @@ resource at most once, and stops at `-crawl-depth` hops or `-crawl-max-pages`
 pages. Progress is printed to stderr unless `-quiet` is set, and all findings are
 deduplicated before output. Crawling issues real GET requests to discovered
 endpoints, so use it only against targets you are authorized to test.
+
+Many sites answer every unknown path with the same catch-all page — a
+single-page-app shell or a soft-404 that returns `200`. Left unchecked, a crawl
+follows all of them and reports the same findings over and over. Add `-ac` to
+auto-calibrate against that behaviour:
+
+```
+jsminer -crawl -ac -endpoints https://example.com/
+```
+
+JSMiner first probes the host with random paths to fingerprint its catch-all
+response, then skips crawled pages that match the fingerprint or duplicate a
+page already scanned, so only unique, useful pages are mined.
 
 ### Code snippets
 

@@ -159,6 +159,9 @@ func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited map
 	var matches []Match
 
 	if isHTMLContent(finalURL, resp.Header.Get("Content-Type")) {
+		if e.calibrator != nil && e.calibrator.skipPage(resp.StatusCode, data) {
+			return matches, nil
+		}
 		var dynamic []string
 		if render {
 			if rhtml, scripts, posts, err := RenderURLWithRequests(finalURL); err == nil {
@@ -263,6 +266,9 @@ func (e *Extractor) scanURLPosts(urlStr, baseHost string, visited map[string]str
 	var matches []Match
 
 	if isHTMLContent(finalURL, resp.Header.Get("Content-Type")) {
+		if e.calibrator != nil && e.calibrator.skipPage(resp.StatusCode, data) {
+			return matches, nil
+		}
 		var dynamic []string
 		if render {
 			if rhtml, scripts, posts, err := RenderURLWithRequests(finalURL); err == nil {

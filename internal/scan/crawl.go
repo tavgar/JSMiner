@@ -31,11 +31,21 @@ type CrawlOptions struct {
 	// user asked to follow discovered URLs only when they match the host.
 	SameScopeOnly bool
 
+	// AutoCalibrate turns on ffuf-style auto-calibration: before crawling, the
+	// target is probed with random paths to learn its catch-all/soft-404
+	// fingerprint, and pages matching that fingerprint — or duplicating a page
+	// already scanned — are skipped so the crawl stays on unique, useful pages.
+	AutoCalibrate bool
+
 	// Progress, when non-nil, is invoked once per fetched page with the page
 	// URL, its depth from the seed and the running page count. It lets the CLI
 	// surface crawl progress without the scan package depending on the output
 	// layer.
 	Progress func(pageURL string, depth, pageNum int)
+
+	// OnCalibrated, when non-nil, is invoked once after auto-calibration with
+	// the number of wildcard signatures learned.
+	OnCalibrated func(wildcardSigs int)
 }
 
 // DefaultCrawlOptions returns sensible defaults for interactive use: follow two
@@ -84,6 +94,16 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 		return nil, err
 	}
 	baseHost := seed.Hostname()
+
+	if opts.AutoCalibrate {
+		c := newAutoCalibrator()
+		n := c.calibrate(seed.String())
+		e.SetCalibrator(c)
+		defer e.SetCalibrator(nil)
+		if opts.OnCalibrated != nil {
+			opts.OnCalibrated(n)
+		}
+	}
 
 	visited := make(map[string]struct{})
 	enqueued := make(map[string]struct{})
