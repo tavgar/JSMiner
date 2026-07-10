@@ -80,13 +80,23 @@ func TestIPv6Filter(t *testing.T) {
 }
 
 func TestPathFilter(t *testing.T) {
-	keep := []string{"/tmp/data", " /vc-ap-vercel-marketing/_next/image", "/usr/local/bin"}
+	keep := []string{
+		"/tmp/data", " /vc-ap-vercel-marketing/_next/image", "/usr/local/bin",
+		// Real single-word routes and dotfiles/assets must survive the
+		// member-fragment filter; multi-segment routes are never checked.
+		"/test", "/api", "/.env", "/app.js", "/users.list", "/main.js.map",
+		"/api/test", "/v1/exec",
+	}
 	for _, s := range keep {
 		if !validPathMatch(s) {
 			t.Errorf("expected keep path %q", s)
 		}
 	}
-	drop := []string{"/_", "/___", "/_/_/_", "/g", "/i", `t:\s*([\w-]+)`, "/404"}
+	drop := []string{
+		"/_", "/___", "/_/_/_", "/g", "/i", `t:\s*([\w-]+)`, "/404",
+		// Minified JS member-access fragments captured with a stray slash.
+		"/.exec", "/.test", "/i.test", "/g.exec", "/re.replace",
+	}
 	for _, s := range drop {
 		if validPathMatch(s) {
 			t.Errorf("expected drop path %q", s)

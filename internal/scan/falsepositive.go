@@ -192,12 +192,51 @@ func validIPv6Match(s string) bool {
 	return groups >= 3
 }
 
+// jsMemberSuffixes lists JavaScript String/Array/Object/Function/RegExp method
+// and property names that commonly appear after a '.' in minified code. A
+// single-segment "path" whose name ends in one of these (e.g. `/.test`,
+// `/i.test`, `/.exec`) is a member-access fragment such as `re.test(x)` captured
+// with a stray leading slash, not a real request path. File extensions that
+// double as method names (notably `map` for source maps) are deliberately
+// excluded so real assets like `/main.js.map` survive.
+var jsMemberSuffixes = map[string]bool{
+	"test": true, "exec": true, "call": true, "apply": true, "bind": true,
+	"then": true, "catch": true, "finally": true, "join": true, "split": true,
+	"match": true, "matchall": true, "replace": true, "replaceall": true,
+	"slice": true, "splice": true, "substr": true, "substring": true,
+	"push": true, "pop": true, "shift": true, "unshift": true, "concat": true,
+	"indexof": true, "lastindexof": true, "includes": true, "foreach": true,
+	"filter": true, "reduce": true, "reduceright": true, "keys": true,
+	"values": true, "entries": true, "find": true, "findindex": true,
+	"findlast": true, "some": true, "every": true, "sort": true, "reverse": true,
+	"flat": true, "flatmap": true, "fill": true, "copywithin": true,
+	"trim": true, "trimstart": true, "trimend": true, "padstart": true,
+	"padend": true, "repeat": true, "normalize": true, "charat": true,
+	"charcodeat": true, "codepointat": true, "startswith": true,
+	"endswith": true, "tolowercase": true, "touppercase": true,
+	"tostring": true, "valueof": true, "hasownproperty": true,
+	"isprototypeof": true, "tofixed": true, "toprecision": true,
+	"prototype": true, "constructor": true,
+}
+
+// isJSMemberFragment reports whether seg looks like a JavaScript property/method
+// access (`i.test`, `.exec`) rather than a real path segment. It matches only
+// when the text after the final '.' is a known member name, so genuine dotfiles
+// (`.env`), assets (`app.js`) and RPC-style names (`users.list`) are preserved.
+func isJSMemberFragment(seg string) bool {
+	dot := strings.LastIndexByte(seg, '.')
+	if dot < 0 {
+		return false
+	}
+	return jsMemberSuffixes[strings.ToLower(seg[dot+1:])]
+}
+
 // validPathMatch validates a filesystem-path candidate from the `path` rule,
 // rejecting regex/source fragments (e.g. `t:\s*([\w-]+)`) that contain quotes,
-// grouping or regex escape sequences, as well as content-free paths made only of
-// underscores/slashes (`/_/_`) or single-character regex flags (`/g`, `/i`). A
-// real path has at least one segment that is two or more characters and contains
-// a letter.
+// grouping or regex escape sequences, content-free paths made only of
+// underscores/slashes (`/_/_`) or single-character regex flags (`/g`, `/i`), and
+// lone JS member-access fragments (`/.exec`, `/i.test`). A real path has at
+// least one segment that is two or more characters and contains a letter.
 func validPathMatch(s string) bool {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -215,8 +254,20 @@ func validPathMatch(s string) bool {
 	if strings.Contains(s, `\`) {
 		sep = `\`
 	}
-	for _, seg := range strings.Split(s, sep) {
-		seg = strings.TrimSpace(seg)
+	segs := strings.Split(s, sep)
+	var nonEmpty []string
+	for _, seg := range segs {
+		if seg = strings.TrimSpace(seg); seg != "" {
+			nonEmpty = append(nonEmpty, seg)
+		}
+	}
+	// A path with a single segment that is a JS member-access fragment
+	// (`/.exec`, `/i.test`) is minified code, not a route. Multi-segment paths
+	// are left alone so real routes like `/api/test` are never dropped.
+	if len(nonEmpty) == 1 && isJSMemberFragment(nonEmpty[0]) {
+		return false
+	}
+	for _, seg := range nonEmpty {
 		if len(seg) < 2 {
 			continue
 		}

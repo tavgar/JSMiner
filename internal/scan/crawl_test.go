@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -112,11 +113,19 @@ func TestCrawlTargetsFromMatches(t *testing.T) {
 		{Pattern: "endpoint_url", Value: "https://evil.com/nope"},
 		{Pattern: "endpoint_path", Value: "/logo.png"},
 		{Pattern: "google_api", Value: "AIzaSyD1ad_UKyHFErfLeO_3aoBoNrX1W4bsmac"},
+		// A genuine `path` finding (with the rule's stray leading space) is a
+		// crawl target too; a Windows path is not a web URL and must fall out.
+		{Pattern: "path", Value: " /admin/panel"},
+		{Pattern: "path", Value: `C:\Windows\System32`},
 	}
 	page := "https://example.com/page"
 
 	scoped := crawlTargetsFromMatches(ms, page, "example.com", CrawlOptions{SameScopeOnly: true})
-	want := []string{"https://example.com/in/scope", "https://sub.example.com/also"}
+	want := []string{
+		"https://example.com/in/scope",
+		"https://sub.example.com/also",
+		"https://example.com/admin/panel",
+	}
 	if !equalStrings(scoped, want) {
 		t.Fatalf("same-scope targets = %v, want %v", scoped, want)
 	}
@@ -127,6 +136,11 @@ func TestCrawlTargetsFromMatches(t *testing.T) {
 	}
 	if contains(all, "https://example.com/logo.png") {
 		t.Fatalf("binary asset should never be a crawl target: %v", all)
+	}
+	for _, tgt := range all {
+		if strings.HasPrefix(tgt, "c:") || strings.Contains(tgt, "Windows") {
+			t.Fatalf("windows path leaked into crawl targets: %v", all)
+		}
 	}
 }
 

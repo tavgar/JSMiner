@@ -147,19 +147,28 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 }
 
 // crawlTargetsFromMatches derives the next set of crawlable page URLs from the
-// endpoint matches found on pageURL. Endpoint values are resolved against the
-// page URL, filtered to http(s), optionally constrained to the seed scope and
-// stripped of obvious binary assets that would waste a fetch.
+// matches found on pageURL. Endpoint, POST and `path` values are resolved
+// against the page URL, filtered to http(s), optionally constrained to the seed
+// scope and stripped of obvious binary assets that would waste a fetch. `path`
+// matches are included so that genuine paths surfaced by the power rule (not
+// just JS endpoints) are followed too; they have already passed validPathMatch,
+// and non-web values such as Windows paths fall out at the scheme check below.
 func crawlTargetsFromMatches(ms []Match, pageURL, baseHost string, opts CrawlOptions) []string {
 	seen := make(map[string]struct{})
 	var out []string
 	for _, m := range ms {
 		switch m.Pattern {
-		case "endpoint_url", "endpoint_path", "post_url", "post_path":
+		case "endpoint_url", "endpoint_path", "post_url", "post_path", "path":
 		default:
 			continue
 		}
-		abs := resolveURL(pageURL, m.Value)
+		// `path` values retain a leading space from the rule's `(?:^|\s)` anchor;
+		// trim before resolving so the reference parses correctly.
+		raw := strings.TrimSpace(m.Value)
+		if raw == "" {
+			continue
+		}
+		abs := resolveURL(pageURL, raw)
 		u, err := url.Parse(abs)
 		if err != nil {
 			continue
