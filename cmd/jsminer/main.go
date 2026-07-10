@@ -44,6 +44,9 @@ func main() {
 	outFile := flag.String("output", "", "output file (stdout default)")
 	quiet := flag.Bool("quiet", false, "suppress banner")
 	proxyAddr := flag.String("proxy", "", "run as proxy on address (e.g., :8080)")
+	crawl := flag.Bool("crawl", false, "crawl in-scope endpoints/paths discovered on each page to reach more JS and secrets")
+	crawlDepth := flag.Int("crawl-depth", 2, "max link hops to follow beyond the seed page when -crawl is set")
+	crawlMaxPages := flag.Int("crawl-max-pages", 200, "max pages to fetch during a crawl (0 = unlimited)")
 	targetsFile := flag.String("targets", "", "file with list of targets")
 	pluginsFlag := flag.String("plugins", "", "comma-separated plugin files")
 	showSourceFlag := flag.Bool("show-source", false, "show source of each record (auto-enabled for multiple targets)")
@@ -106,6 +109,23 @@ func main() {
 			*showSourceFlag = true
 		case "snippet":
 			*snippet = true
+		case "crawl":
+			*crawl = true
+		case "crawl-depth", "crawl-max-pages":
+			val := ""
+			if len(parts) == 2 {
+				val = parts[1]
+			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				val = args[i+1]
+				i++
+			}
+			if n, err := strconv.Atoi(val); err == nil {
+				if name == "crawl-depth" {
+					*crawlDepth = n
+				} else {
+					*crawlMaxPages = n
+				}
+			}
 		case "insecure":
 			val := "true"
 			if len(parts) == 2 {
@@ -280,7 +300,27 @@ func main() {
 				}
 			}
 		} else if isURL(target) {
-			if *posts {
+			if *crawl {
+				opts := scan.DefaultCrawlOptions()
+				opts.MaxDepth = *crawlDepth
+				opts.MaxPages = *crawlMaxPages
+				if !*quiet {
+					opts.Progress = func(pageURL string, depth, pageNum int) {
+						fmt.Fprintf(os.Stderr, "[crawl] (%d) depth %d %s\n", pageNum, depth, pageURL)
+					}
+				}
+				if *posts {
+					ms, err = extractor.ScanURLPostsCrawl(target, *external, *render, opts)
+					if err != nil {
+						err = fmt.Errorf("failed to crawl POST requests from URL %s: %w", target, err)
+					}
+				} else {
+					ms, err = extractor.ScanURLCrawl(target, *endpoints, *external, *render, opts)
+					if err != nil {
+						err = fmt.Errorf("failed to crawl endpoints from URL %s: %w", target, err)
+					}
+				}
+			} else if *posts {
 				ms, err = extractor.ScanURLPosts(target, *external, *render)
 				if err != nil {
 					err = fmt.Errorf("failed to scan POST requests from URL %s: %w", target, err)

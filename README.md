@@ -43,6 +43,16 @@ Flags:
 - `-endpoints` return only HTTP endpoints (default includes all matches)
 - `-posts` return HTTP POST request endpoints with any parameters
 - `-external` follow external scripts and imports (default `true`)
+- `-crawl` crawl the in-scope endpoints and paths discovered on each page to
+  reach more JavaScript files and secrets. Discovered `endpoint_url`,
+  `endpoint_path` (and, with `-posts`, `post_url`/`post_path`) values that match
+  the target host are fetched and scanned, and the endpoints they reveal are
+  followed in turn until the depth or page budget is reached. Off-scope URLs are
+  still reported but never crawled. Results are deduplicated before output.
+- `-crawl-depth` max link hops to follow beyond the seed page (default `2`;
+  `0` scans only the seed).
+- `-crawl-max-pages` max pages to fetch during a crawl (default `200`, `0` for
+  unlimited).
 - `-render` render pages with headless Chrome (default `true`, set `-render=false` to disable; Chrome/Chromium must be installed)
 - `-longsecret` detect generic long secrets (disabled by default). Enable to
   search for high-entropy strings that may represent API keys.
@@ -59,6 +69,25 @@ Flags:
 - `-header` HTTP header in `Key: Value` form. May be specified multiple times.
 
 Using `-render` requires Chrome or Chromium to be installed on your system.
+
+### Crawl mode
+
+A single page rarely links every JavaScript bundle a site ships. Pass `-crawl`
+to turn a one-page scan into a breadth-first crawl: JSMiner scans the seed,
+harvests the in-scope endpoints it finds, fetches those, and repeats — reaching
+bundles that are only linked from deeper pages or returned by API routes, and
+mining them for secrets too.
+
+```
+jsminer -crawl -crawl-depth 2 -endpoints https://example.com/
+```
+
+The crawl stays on the target host and its subdomains, skips binary assets
+(images, fonts, media, archives) that cannot yield secrets, fetches each
+resource at most once, and stops at `-crawl-depth` hops or `-crawl-max-pages`
+pages. Progress is printed to stderr unless `-quiet` is set, and all findings are
+deduplicated before output. Crawling issues real GET requests to discovered
+endpoints, so use it only against targets you are authorized to test.
 
 ### Code snippets
 
