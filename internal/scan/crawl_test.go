@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -241,6 +242,171 @@ func TestCrawlableTarget(t *testing.T) {
 			t.Errorf("crawlableTarget(%s)=%v want %v", raw, got, want)
 		}
 	}
+}
+
+// TestScanURLCrawlTemplateDedupURL verifies that templated URLs discovered on
+// the seed — /product/1 … /product/N, which differ only in an id — are
+// recognised as one class and only a representative few are fetched, so the
+// crawl never spends its budget on the whole family. Disabling template dedup
+// fetches every instance.
+func TestScanURLCrawlTemplateDedupURL(t *testing.T) {
+	var products productCounter
+	mux := http.NewServeMux()
+	// Seed links 40 product pages via inline fetch() calls (harvested as endpoints).
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		if r.URL.Path == "/" {
+			var b strings.Builder
+			b.WriteString(`<html><script>`)
+			for i := 1; i <= 40; i++ {
+				fmt.Fprintf(&b, "fetch('/product/%d');", i)
+			}
+			b.WriteString(`</script></html>`)
+			io.WriteString(w, b.String())
+			return
+		}
+		io.WriteString(w, `<html><body>short</body></html>`)
+	})
+	mux.HandleFunc("/product/", func(w http.ResponseWriter, r *http.Request) {
+		products.hit(r.URL.Path)
+		w.Header().Set("Content-Type", "text/html")
+		io.WriteString(w, `<html><body><h1>a product</h1><p>details</p></body></html>`)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	e := NewExtractor(true, false)
+
+	// Template dedup on: only TemplateSampleMax product instances are fetched.
+	// Auto-calibration/method probing are off to isolate the URL-template classer.
+	opts := CrawlOptions{MaxDepth: 2, SameScopeOnly: true, TemplateDedup: true, TemplateSampleMax: 3}
+	if _, err := e.ScanURLCrawl(ts.URL+"/", true, false, false, opts); err != nil {
+		t.Fatal(err)
+	}
+	if got := products.count(); got != 3 {
+		t.Fatalf("template dedup should fetch only 3 product instances, fetched %d", got)
+	}
+
+	// Template dedup off: every distinct product URL is fetched.
+	products.reset()
+	opts.TemplateDedup = false
+	if _, err := e.ScanURLCrawl(ts.URL+"/", true, false, false, opts); err != nil {
+		t.Fatal(err)
+	}
+	if got := products.count(); got != 40 {
+		t.Fatalf("without template dedup all 40 products should be fetched, fetched %d", got)
+	}
+}
+
+// TestScanURLCrawlTemplateDedupStructural verifies the post-fetch layer: pages
+// whose URLs give no hint they are templated (distinct slugs) but which share a
+// structure and differ only in data are collapsed by the structural body
+// signature, so only a representative few of their secrets are reported.
+func TestScanURLCrawlTemplateDedupStructural(t *testing.T) {
+	slugs := []string{"alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel"}
+	// A distinct, valid-looking google_api key per slug page.
+	keyFor := func(i int) string {
+		body := "D1ad_UKyHFErfLeO_3aoBoNrX1W4bsm" // 31 chars
+		return "AIza" + body + string(rune('a'+i)) + "xyz"
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		switch {
+		case r.URL.Path == "/":
+			var b strings.Builder
+			b.WriteString(`<html><script>`)
+			for _, s := range slugs {
+				fmt.Fprintf(&b, "fetch('/%s');", s)
+			}
+			b.WriteString(`</script></html>`)
+			io.WriteString(w, b.String())
+		default:
+			// A slug page: identical structure, data (the key) differs per slug.
+			idx := slugIndex(slugs, strings.TrimPrefix(r.URL.Path, "/"))
+			if idx < 0 {
+				// Unknown paths (including calibration probes) get a short 404 shell
+				// whose coarse shape (one word, one line) differs from the slug pages
+				// so the wildcard filter cannot be what suppresses them.
+				io.WriteString(w, `notfound`)
+				return
+			}
+			// Every slug page shares this multi-line, multi-word layout; only the
+			// embedded key differs, so structural dedup — not the coarse signature —
+			// must be what collapses them.
+			fmt.Fprintf(w, "<html>\n<body>\n<h1>the item title</h1>\n"+
+				"<p>a paragraph of description text goes here</p>\n"+
+				"<script>var k = \"%s\";</script>\n</body>\n</html>\n", keyFor(idx))
+		}
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	e := NewExtractor(true, false)
+
+	opts := CrawlOptions{MaxDepth: 2, SameScopeOnly: true, AutoCalibrate: true,
+		TemplateDedup: true, TemplateSampleMax: 3}
+	matches, err := e.ScanURLCrawl(ts.URL+"/", false, false, false, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := make(map[string]struct{})
+	for _, m := range matches {
+		if m.Pattern == "google_api" {
+			keys[m.Value] = struct{}{}
+		}
+	}
+	if len(keys) == 0 {
+		t.Fatal("expected at least one product secret to be reported")
+	}
+	if len(keys) > 3 {
+		t.Fatalf("structural dedup should keep at most 3 representatives, got %d distinct secrets", len(keys))
+	}
+}
+
+// slugIndex returns the position of name in slugs, or -1.
+func slugIndex(slugs []string, name string) int {
+	for i, s := range slugs {
+		if s == name {
+			return i
+		}
+	}
+	return -1
+}
+
+// productCounter counts fetches of numeric /product/<id> paths, ignoring
+// calibration probes that hit the same handler with non-numeric tokens.
+type productCounter struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (c *productCounter) hit(path string) {
+	last := path[strings.LastIndex(path, "/")+1:]
+	if last == "" {
+		return
+	}
+	for i := 0; i < len(last); i++ {
+		if last[i] < '0' || last[i] > '9' {
+			return
+		}
+	}
+	c.mu.Lock()
+	c.n++
+	c.mu.Unlock()
+}
+
+func (c *productCounter) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.n
+}
+
+func (c *productCounter) reset() {
+	c.mu.Lock()
+	c.n = 0
+	c.mu.Unlock()
 }
 
 func hasPattern(ms []Match, pat string) bool {

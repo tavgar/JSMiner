@@ -76,6 +76,25 @@ type CrawlOptions struct {
 	// ParamReplay is set. Zero means no cap (bounded only by scope and the crawl).
 	ParamReplayMax int
 
+	// TemplateDedup collapses templated duplicate pages — pages that are
+	// structurally the same and differ only in data, such as /product/1 vs
+	// /product/2, paginated listings and calendar/faceted URLs — so the crawl
+	// fetches only a representative few of each class instead of every instance,
+	// spending its page budget on genuinely distinct pages. It works on two
+	// levels: discovered URLs are grouped by a normalised URL template before they
+	// are fetched (see templateClasser), so a suppressed instance costs no request
+	// at all; and fetched pages are additionally grouped by a structural body
+	// signature (see structuralSig), catching templated pages whose URLs do not
+	// reveal the pattern. It defaults to on (see DefaultCrawlOptions) and is off in
+	// a zero-value CrawlOptions so library callers and existing tests are
+	// unaffected. TemplateSampleMax bounds how many representatives are kept.
+	TemplateDedup bool
+
+	// TemplateSampleMax caps how many representative pages are crawled from each
+	// template class when TemplateDedup is set. Zero selects a sensible default
+	// (defaultTemplateSampleMax).
+	TemplateSampleMax int
+
 	// Progress, when non-nil, is invoked once per fetched page with the page
 	// URL, its depth from the seed and the running page count. It lets the CLI
 	// surface crawl progress without the scan package depending on the output
@@ -95,7 +114,17 @@ func DefaultCrawlOptions() CrawlOptions {
 		MaxDepth: 2, MaxPages: 200, SameScopeOnly: true, AutoCalibrate: true,
 		ProbeMethods: true, RequestMethods: defaultRequestMethods(),
 		ParamReplay: true, ParamReplayMax: 500,
+		TemplateDedup: true, TemplateSampleMax: defaultTemplateSampleMax,
 	}
+}
+
+// templateSampleMax returns the per-class representative cap to use for a crawl,
+// falling back to the default when the option is left unset.
+func templateSampleMax(opts CrawlOptions) int {
+	if opts.TemplateSampleMax > 0 {
+		return opts.TemplateSampleMax
+	}
+	return defaultTemplateSampleMax
 }
 
 // crawlTarget is a queued page together with its distance from the seed.
@@ -155,6 +184,11 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 		cal.setBase(seed.String())
 	}
 	if opts.AutoCalibrate {
+		// Structural body dedup rides on the calibrator, which is only installed
+		// (and consulted by skipPage) when auto-calibration is active.
+		if opts.TemplateDedup {
+			cal.enableStructuralDedup(templateSampleMax(opts))
+		}
 		n := cal.calibrate(seed.String())
 		e.SetCalibrator(cal)
 		defer e.SetCalibrator(nil)
@@ -169,12 +203,22 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 		replay = newParamReplayer(origin, opts.ParamReplayMax)
 	}
 
+	// The template classer groups discovered URLs by page template and admits only
+	// a representative few of each, so /product/1…/product/N and paginated or
+	// faceted URLs do not each consume a fetch and a slot in the page budget.
+	var classer *templateClasser
+	if opts.TemplateDedup {
+		classer = newTemplateClasser(templateSampleMax(opts))
+	}
+
 	visited := make(map[string]struct{})
 	enqueued := make(map[string]struct{})
 
 	start := normalizeCrawlURL(seed.String())
 	queue := []crawlTarget{{url: start, depth: 0}}
 	enqueued[start] = struct{}{}
+	// The seed is always crawled; register it so it counts toward its own class.
+	classer.admit(start)
 
 	var all []Match
 	pages := 0
@@ -232,6 +276,9 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 			if _, ok := enqueued[next]; ok {
 				continue
 			}
+			if !classer.admit(next) {
+				continue
+			}
 			enqueued[next] = struct{}{}
 			queue = append(queue, crawlTarget{url: next, depth: t.depth + 1})
 		}
@@ -240,6 +287,9 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 		if perm != nil {
 			for _, next := range perm.observe(targets) {
 				if _, ok := enqueued[next]; ok {
+					continue
+				}
+				if !classer.admit(next) {
 					continue
 				}
 				enqueued[next] = struct{}{}

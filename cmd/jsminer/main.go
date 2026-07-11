@@ -53,6 +53,8 @@ func main() {
 	methods := flag.String("methods", "", "comma-separated HTTP methods to probe each crawled URL with (default: GET,POST,PUT,PATCH,DELETE,OPTIONS)")
 	noMethods := flag.Bool("no-methods", false, "disable multi-method probing / gathered-URL reporting during a crawl")
 	noParamReplay := flag.Bool("no-param-replay", false, "disable replaying discovered parameters across every directory level during a crawl")
+	noTemplateDedup := flag.Bool("no-template-dedup", false, "disable collapsing templated duplicate pages (/product/1 vs /product/2, paginated/faceted URLs) during a crawl")
+	templateSampleMax := flag.Int("template-sample-max", 3, "max representative pages to crawl per templated class when template dedup is on")
 	noSourceMaps := flag.Bool("no-source-maps", false, "disable recovering original source from JavaScript source maps advertised by scanned bundles")
 	targetsFile := flag.String("targets", "", "file with list of targets")
 	pluginsFlag := flag.String("plugins", "", "comma-separated plugin files")
@@ -126,6 +128,8 @@ func main() {
 			*noMethods = true
 		case "no-param-replay":
 			*noParamReplay = true
+		case "no-template-dedup":
+			*noTemplateDedup = true
 		case "no-source-maps":
 			*noSourceMaps = true
 		case "methods":
@@ -139,7 +143,7 @@ func main() {
 			if val != "" {
 				*methods = val
 			}
-		case "crawl-depth", "crawl-max-pages", "crawl-permute-max":
+		case "crawl-depth", "crawl-max-pages", "crawl-permute-max", "template-sample-max":
 			val := ""
 			if len(parts) == 2 {
 				val = parts[1]
@@ -153,6 +157,8 @@ func main() {
 					*crawlDepth = n
 				case "crawl-max-pages":
 					*crawlMaxPages = n
+				case "template-sample-max":
+					*templateSampleMax = n
 				default:
 					*crawlPermuteMax = n
 				}
@@ -349,6 +355,10 @@ func main() {
 				if *noParamReplay {
 					opts.ParamReplay = false
 				}
+				if *noTemplateDedup {
+					opts.TemplateDedup = false
+				}
+				opts.TemplateSampleMax = *templateSampleMax
 				if *methods != "" {
 					var ms []string
 					for _, m := range strings.Split(*methods, ",") {
