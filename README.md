@@ -51,6 +51,9 @@ Flags:
   still reported but never crawled. Results are deduplicated before output.
 - `-crawl-depth` max link hops to follow beyond the seed page (default `2`;
   `0` scans only the seed).
+- `-crawl-all` crawl to unlimited depth, following links until no new in-scope
+  pages remain. Still bounded by `-crawl-max-pages`; pair with
+  `-crawl-max-pages 0` to remove the page cap entirely. Overrides `-crawl-depth`.
 - `-crawl-max-pages` max pages to fetch during a crawl (default `200`, `0` for
   unlimited).
 - `-ac` auto-calibrate the crawl (requires `-crawl`). Modeled on `ffuf -ac`:

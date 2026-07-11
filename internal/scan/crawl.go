@@ -17,7 +17,9 @@ import (
 type CrawlOptions struct {
 	// MaxDepth is the number of link hops to follow beyond the seed page. A
 	// depth of 0 scans only the seed (matching a plain ScanURL); 1 also scans
-	// endpoints found on the seed, and so on.
+	// endpoints found on the seed, and so on. A negative value means unlimited
+	// depth: the crawl follows links until the link graph is exhausted (or the
+	// page budget/scope stops it), which is what -crawl-all requests.
 	MaxDepth int
 
 	// MaxPages caps the total number of pages fetched by the crawl, protecting
@@ -131,7 +133,9 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 		}
 		all = append(all, ms...)
 
-		if t.depth >= opts.MaxDepth {
+		// A negative MaxDepth means unlimited depth, so only the page budget and
+		// scope bound the crawl; otherwise stop harvesting once the cap is hit.
+		if opts.MaxDepth >= 0 && t.depth >= opts.MaxDepth {
 			continue
 		}
 		for _, next := range crawlTargetsFromMatches(ms, t.url, baseHost, opts) {

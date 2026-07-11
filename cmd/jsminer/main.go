@@ -46,6 +46,7 @@ func main() {
 	proxyAddr := flag.String("proxy", "", "run as proxy on address (e.g., :8080)")
 	crawl := flag.Bool("crawl", false, "crawl in-scope endpoints/paths discovered on each page to reach more JS and secrets")
 	crawlDepth := flag.Int("crawl-depth", 2, "max link hops to follow beyond the seed page when -crawl is set")
+	crawlAll := flag.Bool("crawl-all", false, "crawl to unlimited depth until no new in-scope pages remain (still bounded by -crawl-max-pages; pair with -crawl-max-pages 0 for no page cap)")
 	crawlMaxPages := flag.Int("crawl-max-pages", 200, "max pages to fetch during a crawl (0 = unlimited)")
 	ac := flag.Bool("ac", false, "auto-calibrate crawl: skip catch-all/soft-404 and duplicate pages (requires -crawl)")
 	targetsFile := flag.String("targets", "", "file with list of targets")
@@ -112,6 +113,8 @@ func main() {
 			*snippet = true
 		case "crawl":
 			*crawl = true
+		case "crawl-all":
+			*crawlAll = true
 		case "ac":
 			*ac = true
 		case "crawl-depth", "crawl-max-pages":
@@ -310,6 +313,9 @@ func main() {
 			if *crawl {
 				opts := scan.DefaultCrawlOptions()
 				opts.MaxDepth = *crawlDepth
+				if *crawlAll {
+					opts.MaxDepth = -1
+				}
 				opts.MaxPages = *crawlMaxPages
 				opts.AutoCalibrate = *ac
 				if !*quiet {
