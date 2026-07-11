@@ -2,7 +2,10 @@ package scan
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
+	"time"
 
 	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/cdproto/network"
@@ -15,9 +18,9 @@ type HTTPRequest struct {
 	Body string
 }
 
-// RenderURL loads the page at urlStr in headless Chrome and returns the
-// rendered HTML along with JavaScript URLs fetched during the page load.
-func RenderURL(urlStr string) ([]byte, []string, error) {
+// renderExecOptions builds the headless-Chrome allocator options shared by every
+// render helper.
+func renderExecOptions() []chromedp.ExecAllocatorOption {
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", true),
 		chromedp.Flag("disable-gpu", true),
@@ -26,15 +29,13 @@ func RenderURL(urlStr string) ([]byte, []string, error) {
 	if SkipTLSVerification {
 		opts = append(opts, chromedp.Flag("ignore-certificate-errors", true))
 	}
-	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
-	defer cancel()
+	return opts
+}
 
-	ctx, cancelCtx := chromedp.NewContext(allocCtx)
-	defer cancelCtx()
-
-	ctx, cancelTimeout := context.WithTimeout(ctx, RenderTimeout)
-	defer cancelTimeout()
-
+// renderHeaders returns the request headers to apply during rendering: the
+// default (or user-overridden) User-Agent plus any extra headers, matching the
+// headers used by the plain HTTP fetch path.
+func renderHeaders() map[string]interface{} {
 	headers := map[string]interface{}{"User-Agent": defaultUserAgent}
 	if vals := extraHeaders.Values("User-Agent"); len(vals) > 0 {
 		headers["User-Agent"] = vals[len(vals)-1]
@@ -45,6 +46,34 @@ func RenderURL(urlStr string) ([]byte, []string, error) {
 		}
 		headers[k] = vals[len(vals)-1]
 	}
+	return headers
+}
+
+// headerActions returns the chromedp actions that install the given headers and
+// matching User-Agent override, or nil when there are none.
+func headerActions(headers map[string]interface{}) []chromedp.Action {
+	if len(headers) == 0 {
+		return nil
+	}
+	return []chromedp.Action{
+		network.SetExtraHTTPHeaders(network.Headers(headers)),
+		emulation.SetUserAgentOverride(headers["User-Agent"].(string)),
+	}
+}
+
+// RenderURL loads the page at urlStr in headless Chrome and returns the
+// rendered HTML along with JavaScript URLs fetched during the page load.
+func RenderURL(urlStr string) ([]byte, []string, error) {
+	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), renderExecOptions()...)
+	defer cancel()
+
+	ctx, cancelCtx := chromedp.NewContext(allocCtx)
+	defer cancelCtx()
+
+	ctx, cancelTimeout := context.WithTimeout(ctx, RenderTimeout)
+	defer cancelTimeout()
+
+	headers := renderHeaders()
 
 	scriptSet := make(map[string]struct{})
 	chromedp.ListenTarget(ctx, func(ev interface{}) {
@@ -59,12 +88,7 @@ func RenderURL(urlStr string) ([]byte, []string, error) {
 
 	var html string
 	actions := []chromedp.Action{network.Enable()}
-	if len(headers) > 0 {
-		actions = append(actions,
-			network.SetExtraHTTPHeaders(network.Headers(headers)),
-			emulation.SetUserAgentOverride(headers["User-Agent"].(string)),
-		)
-	}
+	actions = append(actions, headerActions(headers)...)
 	actions = append(actions,
 		chromedp.Navigate(urlStr),
 		chromedp.WaitReady("body", chromedp.ByQuery),
@@ -76,47 +100,58 @@ func RenderURL(urlStr string) ([]byte, []string, error) {
 		return nil, nil, err
 	}
 
-	scripts := make([]string, 0, len(scriptSet))
-	for s := range scriptSet {
-		scripts = append(scripts, s)
-	}
-	return []byte(html), scripts, nil
+	return []byte(html), scriptKeys(scriptSet), nil
 }
 
 // RenderURLWithRequests loads the page and captures POST requests made during
 // rendering. It returns the rendered HTML, JavaScript URLs and POST requests.
 func RenderURLWithRequests(urlStr string) ([]byte, []string, []HTTPRequest, error) {
-	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.Flag("headless", true),
-		chromedp.Flag("disable-gpu", true),
-		chromedp.Flag("no-sandbox", true),
-	)
-	if SkipTLSVerification {
-		opts = append(opts, chromedp.Flag("ignore-certificate-errors", true))
+	states, scripts, posts, err := renderStates(urlStr, false)
+	if err != nil {
+		return nil, nil, nil, err
 	}
-	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
+	var html []byte
+	if len(states) > 0 {
+		html = states[0]
+	}
+	return html, scripts, posts, nil
+}
+
+// RenderURLWithStates loads the page and then explores application state that
+// only appears after interaction: it clicks client-side navigation controls and
+// fills forms with plausible valid values and submits them, snapshotting each
+// distinct DOM state it reaches. It returns those state snapshots (the initial
+// load first), the union of JavaScript URLs seen across all states, and the POST
+// requests captured throughout — so a single-page app whose surface lives behind
+// event handlers is scanned in every state, not just the shell it first renders.
+//
+// Interaction is bounded by MaxExploreStates; when that is zero the result is a
+// single state and this behaves like RenderURLWithRequests.
+func RenderURLWithStates(urlStr string) ([][]byte, []string, []HTTPRequest, error) {
+	return renderStates(urlStr, MaxExploreStates > 0)
+}
+
+// renderStates performs the initial render and, when explore is set, drives
+// interaction-based exploration of further states. It is the shared engine
+// behind RenderURLWithRequests (explore off) and RenderURLWithStates.
+func renderStates(urlStr string, explore bool) ([][]byte, []string, []HTTPRequest, error) {
+	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), renderExecOptions()...)
 	defer cancel()
 
 	ctx, cancelCtx := chromedp.NewContext(allocCtx)
 	defer cancelCtx()
 
-	ctx, cancelTimeout := context.WithTimeout(ctx, RenderTimeout)
+	timeout := RenderTimeout
+	if explore {
+		timeout += exploreBudget()
+	}
+	ctx, cancelTimeout := context.WithTimeout(ctx, timeout)
 	defer cancelTimeout()
 
-	headers := map[string]interface{}{"User-Agent": defaultUserAgent}
-	if vals := extraHeaders.Values("User-Agent"); len(vals) > 0 {
-		headers["User-Agent"] = vals[len(vals)-1]
-	}
-	for k, vals := range extraHeaders {
-		if strings.EqualFold(k, "User-Agent") || len(vals) == 0 {
-			continue
-		}
-		headers[k] = vals[len(vals)-1]
-	}
+	headers := renderHeaders()
 
 	scriptSet := make(map[string]struct{})
 	reqMap := make(map[network.RequestID]*HTTPRequest)
-
 	chromedp.ListenTarget(ctx, func(ev interface{}) {
 		switch e := ev.(type) {
 		case *network.EventResponseReceived:
@@ -126,174 +161,175 @@ func RenderURLWithRequests(urlStr string) ([]byte, []string, []HTTPRequest, erro
 				scriptSet[u] = struct{}{}
 			}
 		case *network.EventRequestWillBeSent:
+			// The CDP network listener captures request-bearing verbs even across
+			// the navigations a form submit or client-side route change triggers, so
+			// it is the reliable record of what the interactions fired.
 			if e.Request != nil && (e.Request.Method == "POST" || e.Request.Method == "PUT" || e.Request.Method == "PATCH") {
-				req := &HTTPRequest{URL: e.Request.URL}
-				// Try to get POST data immediately
-				if e.Request.HasPostData {
-					// PostData will be retrieved later
-					req.Body = ""
-				}
-				reqMap[e.RequestID] = req
-			}
-		case *network.EventRequestWillBeSentExtraInfo:
-			// Capture additional POST data that might not be in RequestWillBeSent
-			if req, ok := reqMap[e.RequestID]; ok && req.Body == "" {
-				// Headers might contain form data info
-				if contentType, ok := e.Headers["Content-Type"]; ok {
-					if ct, ok := contentType.(string); ok {
-						if strings.Contains(ct, "application/x-www-form-urlencoded") ||
-							strings.Contains(ct, "multipart/form-data") {
-							// Mark that this is likely a form submission
-							req.Body = "[Form data captured via headers]"
-						}
-					}
-				}
+				reqMap[e.RequestID] = &HTTPRequest{URL: e.Request.URL}
 			}
 		}
 	})
 
-	// JavaScript to inject for intercepting fetch/XHR and analyzing forms
-	interceptScript := `
-	(function() {
-		window.__interceptedPOSTs = [];
-		window.__formFields = {};
-		
-		// Helper to stringify body data
-		function stringifyBody(body) {
-			if (!body) return '';
-			if (typeof body === 'string') return body;
-			if (body instanceof FormData) {
-				const pairs = [];
-				for (const [key, value] of body) {
-					pairs.push(key + '=' + encodeURIComponent(value));
-				}
-				return pairs.join('&');
-			}
-			if (body instanceof URLSearchParams) {
-				return body.toString();
-			}
-			try {
-				return JSON.stringify(body);
-			} catch (e) {
-				return String(body);
-			}
-		}
-		
-		// Intercept fetch
-		const originalFetch = window.fetch;
-		window.fetch = function(...args) {
-			const [url, options = {}] = args;
-			if (options.method && ['POST', 'PUT', 'PATCH'].includes(options.method.toUpperCase())) {
-				const bodyStr = stringifyBody(options.body);
-				window.__interceptedPOSTs.push({
-					url: new URL(url, window.location.href).href,
-					body: bodyStr
-				});
-			}
-			return originalFetch.apply(this, args);
-		};
-		
-		// Intercept XMLHttpRequest
-		const XHR = XMLHttpRequest.prototype;
-		const originalOpen = XHR.open;
-		const originalSend = XHR.send;
-		
-		XHR.open = function(method, url, ...args) {
-			this._method = method;
-			this._url = url;
-			return originalOpen.apply(this, [method, url, ...args]);
-		};
-		
-		XHR.send = function(data) {
-			if (this._method && ['POST', 'PUT', 'PATCH'].includes(this._method.toUpperCase())) {
-				const bodyStr = stringifyBody(data);
-				window.__interceptedPOSTs.push({
-					url: new URL(this._url, window.location.href).href,
-					body: bodyStr
-				});
-			}
-			return originalSend.apply(this, arguments);
-		};
-		
-		// Analyze forms on the page
-		function analyzeForms() {
-			const forms = document.querySelectorAll('form');
-			forms.forEach((form, idx) => {
-				const formKey = form.action || 'form_' + idx;
-				window.__formFields[formKey] = {};
-				
-				const inputs = form.querySelectorAll('input, select, textarea');
-				inputs.forEach(input => {
-					const name = input.name || input.id || input.type;
-					if (name) {
-						window.__formFields[formKey][name] = {
-							type: input.type || 'text',
-							name: input.name,
-							id: input.id,
-							placeholder: input.placeholder,
-							required: input.required,
-							value: input.value || ''
-						};
-					}
-				});
-			});
-		}
-		
-		// Initial analysis
-		analyzeForms();
-		
-		// Re-analyze when DOM changes
-		const observer = new MutationObserver(analyzeForms);
-		observer.observe(document.body, { childList: true, subtree: true });
-		
-		// Intercept form submissions
-		document.addEventListener('submit', function(e) {
-			const form = e.target;
-			if (form.tagName === 'FORM') {
-				const formData = new FormData(form);
-				const params = {};
-				for (const [key, value] of formData) {
-					params[key] = value;
-				}
-				
-				const body = new URLSearchParams(formData).toString();
-				window.__interceptedPOSTs.push({
-					url: new URL(form.action || window.location.href, window.location.href).href,
-					body: body
-				});
-			}
-		}, true);
-	})();
-	`
-
-	var html string
-	var interceptedPosts []HTTPRequest
-	var formFields map[string]interface{}
-
+	var baseHTML string
 	actions := []chromedp.Action{network.Enable().WithMaxPostDataSize(MaxPostDataSize)}
-	if len(headers) > 0 {
-		actions = append(actions,
-			network.SetExtraHTTPHeaders(network.Headers(headers)),
-			emulation.SetUserAgentOverride(headers["User-Agent"].(string)),
-		)
-	}
+	actions = append(actions, headerActions(headers)...)
 	actions = append(actions,
 		chromedp.Navigate(urlStr),
-		chromedp.Evaluate(interceptScript, nil),
+		chromedp.Evaluate(interactionScript, nil),
 		chromedp.WaitReady("body", chromedp.ByQuery),
 		chromedp.Sleep(RenderSleepDuration),
-		chromedp.Evaluate(`window.__interceptedPOSTs || []`, &interceptedPosts),
-		chromedp.Evaluate(`window.__formFields || {}`, &formFields),
-		chromedp.OuterHTML("html", &html, chromedp.ByQuery),
+		chromedp.OuterHTML("html", &baseHTML, chromedp.ByQuery),
 	)
-	err := chromedp.Run(ctx, actions...)
-	if err != nil {
+	if err := chromedp.Run(ctx, actions...); err != nil {
 		return nil, nil, nil, err
 	}
 
+	states := [][]byte{[]byte(baseHTML)}
+	seen := map[string]struct{}{structuralSig([]byte(baseHTML)): {}}
+	winPosts := readWindowPosts(ctx, nil)
+
+	if explore {
+		states, winPosts = exploreStates(ctx, states, seen, winPosts)
+	}
+
+	return states, scriptKeys(scriptSet), mergePosts(ctx, reqMap, winPosts), nil
+}
+
+// exploreStates drives interaction-based state discovery against an already
+// loaded page. It fills and submits each form with plausible valid values, then
+// clicks each client-side navigation candidate, snapshotting every structurally
+// new DOM state it reaches and recording the request-bearing calls those
+// interactions fire.
+//
+// Exploration is sequential — each interaction builds on the state the previous
+// one left, so an app that reveals its surface progressively (tabs, wizards,
+// route changes) is followed inward rather than always from the shell. It does
+// not try to reset to the base between steps: in a headless context the history
+// begins at about:blank, so a naive back() would strand exploration there.
+// Candidates are re-tagged before every attempt, so indices stay valid after the
+// DOM is rebuilt by a route change or a submit navigates to a new page. It is
+// best-effort and defensive — a failed step is skipped, not fatal — and bounded
+// by MaxExploreStates and exploreMaxAttempts so a busy page cannot run away.
+func exploreStates(ctx context.Context, states [][]byte, seen map[string]struct{}, winPosts []HTTPRequest) ([][]byte, []HTTPRequest) {
+	maxAttempts := exploreMaxAttempts()
+
+	record := func(html string) {
+		winPosts = readWindowPosts(ctx, winPosts)
+		sig := structuralSig([]byte(html))
+		if _, ok := seen[sig]; ok {
+			return
+		}
+		seen[sig] = struct{}{}
+		states = append(states, []byte(html))
+	}
+
+	// Forms first, from the pristine base state: filling and submitting a form
+	// reveals what lives behind a submission handler (search results, filtered
+	// views, wizard steps) and captures the endpoint it posts to.
+	for idx := 0; len(states) <= MaxExploreStates && idx < maxAttempts; idx++ {
+		var forms []exploreForm
+		if err := chromedp.Run(ctx,
+			chromedp.Evaluate(interactionScript, nil),
+			chromedp.Evaluate("window.__jsm.tagForms()", &forms),
+		); err != nil {
+			break
+		}
+		if idx >= len(forms) {
+			break
+		}
+		valsJSON, err := json.Marshal(formValues(forms[idx]))
+		if err != nil {
+			continue
+		}
+		var submitted bool
+		var html string
+		if err := chromedp.Run(ctx,
+			chromedp.Evaluate(fmt.Sprintf("window.__jsm.fillAndSubmit(%d, %s)", idx, string(valsJSON)), &submitted),
+			chromedp.Sleep(ExploreSettleDuration),
+			chromedp.OuterHTML("html", &html, chromedp.ByQuery),
+		); err != nil {
+			continue
+		}
+		if submitted {
+			record(html)
+		}
+	}
+
+	// Client-side navigation: buttons and in-page/JS links that reveal state
+	// through event handlers rather than a fresh URL (real URL navigations are
+	// already covered by the crawl's link graph).
+	for idx := 0; len(states) <= MaxExploreStates && idx < maxAttempts; idx++ {
+		var n int
+		if err := chromedp.Run(ctx,
+			chromedp.Evaluate(interactionScript, nil),
+			chromedp.Evaluate("window.__jsm.tagClickables()", &n),
+		); err != nil {
+			break
+		}
+		if idx >= n {
+			break
+		}
+		var clicked bool
+		var html string
+		if err := chromedp.Run(ctx,
+			chromedp.Evaluate(fmt.Sprintf("window.__jsm.click(%d)", idx), &clicked),
+			chromedp.Sleep(ExploreSettleDuration),
+			chromedp.OuterHTML("html", &html, chromedp.ByQuery),
+		); err != nil {
+			continue
+		}
+		if clicked {
+			record(html)
+		}
+	}
+
+	return states, winPosts
+}
+
+// exploreMaxAttempts bounds how many interactions each exploration pass (forms,
+// then clicks) attempts, keeping the exploration time-bounded on pages with many
+// controls even when few of them yield a new state.
+func exploreMaxAttempts() int {
+	return MaxExploreStates * 3
+}
+
+// exploreBudget is the extra time granted to the render context to perform
+// interactions, sized from the two passes' attempt caps and the per-interaction
+// settle time.
+func exploreBudget() time.Duration {
+	return time.Duration(2*exploreMaxAttempts()) * ExploreSettleDuration
+}
+
+// readWindowPosts reads the POST/PUT/PATCH requests the injected hooks recorded
+// on window.__interceptedPOSTs and merges them into acc, deduplicating on
+// URL+body. It is called after each interaction so bodies are captured before a
+// subsequent navigation can clear the page's array.
+func readWindowPosts(ctx context.Context, acc []HTTPRequest) []HTTPRequest {
+	var got []HTTPRequest
+	if err := chromedp.Run(ctx, chromedp.Evaluate("window.__interceptedPOSTs || []", &got)); err != nil {
+		return acc
+	}
+	for _, p := range got {
+		dup := false
+		for _, e := range acc {
+			if e.URL == p.URL && e.Body == p.Body {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			acc = append(acc, p)
+		}
+	}
+	return acc
+}
+
+// mergePosts combines the CDP-captured requests (which survive navigations but
+// may lack a body) with the hook-captured window posts (which carry bodies),
+// filling in missing bodies and dropping duplicate URLs.
+func mergePosts(ctx context.Context, reqMap map[network.RequestID]*HTTPRequest, winPosts []HTTPRequest) []HTTPRequest {
 	var posts []HTTPRequest
 	for id, r := range reqMap {
-		// Try to get POST data if we don't have it yet
 		if r.Body == "" {
 			if data, err := network.GetRequestPostData(id).Do(ctx); err == nil && data != "" {
 				r.Body = data
@@ -301,60 +337,328 @@ func RenderURLWithRequests(urlStr string) ([]byte, []string, []HTTPRequest, erro
 		}
 		posts = append(posts, *r)
 	}
-
-	// Add intercepted posts from JavaScript
-	for _, p := range interceptedPosts {
-		// Check if we already have this request (avoid duplicates)
-		duplicate := false
-		for _, existing := range posts {
-			if existing.URL == p.URL {
-				duplicate = true
-				// If existing has no body but intercepted does, update it
-				if existing.Body == "" && p.Body != "" {
-					existing.Body = p.Body
+	for _, p := range winPosts {
+		dup := false
+		for i := range posts {
+			if posts[i].URL == p.URL {
+				dup = true
+				if posts[i].Body == "" && p.Body != "" {
+					posts[i].Body = p.Body
 				}
 				break
 			}
 		}
-		if !duplicate {
+		if !dup {
 			posts = append(posts, p)
 		}
 	}
+	return posts
+}
 
-	// For POST endpoints without body, try to infer parameters from forms
-	for i := range posts {
-		if posts[i].Body == "" || posts[i].Body == "[Form data captured via headers]" {
-			// Try to match URL with form actions
-			for formAction, fields := range formFields {
-				if strings.Contains(posts[i].URL, formAction) || formAction == "form_0" {
-					// Build parameter list from form fields
-					params := []string{}
-					if fieldsMap, ok := fields.(map[string]interface{}); ok {
-						for fieldName, fieldInfo := range fieldsMap {
-							if info, ok := fieldInfo.(map[string]interface{}); ok {
-								fieldType := "text"
-								if t, ok := info["type"].(string); ok {
-									fieldType = t
-								}
-								// Skip hidden submit buttons
-								if fieldType != "submit" && fieldType != "button" {
-									params = append(params, fieldName+"=["+fieldType+"]")
-								}
-							}
-						}
-					}
-					if len(params) > 0 {
-						posts[i].Body = "Form fields: " + strings.Join(params, "&")
-					}
-					break
-				}
-			}
-		}
-	}
-
-	scripts := make([]string, 0, len(scriptSet))
-	for s := range scriptSet {
+// scriptKeys returns the collected script URLs as a slice.
+func scriptKeys(set map[string]struct{}) []string {
+	scripts := make([]string, 0, len(set))
+	for s := range set {
 		scripts = append(scripts, s)
 	}
-	return []byte(html), scripts, posts, nil
+	return scripts
 }
+
+// exploreField describes a single form control discovered in the page, as
+// returned by the injected tagForms helper.
+type exploreField struct {
+	Tag         string `json:"tag"`
+	Type        string `json:"type"`
+	Name        string `json:"name"`
+	ID          string `json:"id"`
+	Placeholder string `json:"placeholder"`
+}
+
+// exploreForm is a form and its controls, tagged in the DOM so it can be filled
+// and submitted by index.
+type exploreForm struct {
+	Index  int            `json:"index"`
+	Fields []exploreField `json:"fields"`
+}
+
+// formValues chooses a plausible value for every fillable control of a form,
+// keyed by the control's name (falling back to its id) so the injected
+// fillAndSubmit helper can populate the form before submitting it. Controls that
+// carry no user value — hidden fields, buttons, file inputs, and checkable
+// inputs (handled by the helper directly) — are skipped.
+func formValues(f exploreForm) map[string]string {
+	vals := make(map[string]string)
+	for _, fld := range f.Fields {
+		key := fld.Name
+		if key == "" {
+			key = fld.ID
+		}
+		if key == "" {
+			continue
+		}
+		switch strings.ToLower(fld.Type) {
+		case "hidden", "submit", "button", "reset", "image", "file", "checkbox", "radio":
+			continue
+		}
+		vals[key] = plausibleFormValue(fld.Type, fld.Name, fld.ID, fld.Placeholder)
+	}
+	return vals
+}
+
+// plausibleFormValue returns a value likely to satisfy a form control's
+// client-side validation so the form actually submits and the state behind it is
+// revealed. It keys first off the HTML input type (email, number, date, …) and
+// then, for free-text controls, off hints in the field's name, id and
+// placeholder (an "email" text field still gets an address, a "phone" field a
+// number). It falls back to a generic non-empty token so required text fields
+// are never left blank.
+func plausibleFormValue(fieldType, name, id, placeholder string) string {
+	switch strings.ToLower(strings.TrimSpace(fieldType)) {
+	case "email":
+		return "test@example.com"
+	case "password":
+		return "Password123!"
+	case "number", "range":
+		return "42"
+	case "tel":
+		return "5555550123"
+	case "url":
+		return "https://example.com"
+	case "date":
+		return "2024-01-01"
+	case "datetime-local":
+		return "2024-01-01T12:00"
+	case "month":
+		return "2024-01"
+	case "week":
+		return "2024-W01"
+	case "time":
+		return "12:00"
+	case "color":
+		return "#3366cc"
+	case "search":
+		return "test"
+	}
+
+	hint := strings.ToLower(name + " " + id + " " + placeholder)
+	switch {
+	case containsAny(hint, "email", "e-mail"):
+		return "test@example.com"
+	case containsAny(hint, "password", "passwd", "pwd"):
+		return "Password123!"
+	case containsAny(hint, "phone", "tel", "mobile"):
+		return "5555550123"
+	case containsAny(hint, "zip", "postal"):
+		return "12345"
+	case containsAny(hint, "url", "website", "http"):
+		return "https://example.com"
+	case containsAny(hint, "first name", "firstname", "fname"):
+		return "Test"
+	case containsAny(hint, "last name", "lastname", "lname", "surname"):
+		return "User"
+	case containsAny(hint, "username", "user name", "login", "handle"):
+		return "testuser"
+	case containsAny(hint, "name"):
+		return "Test User"
+	case containsAny(hint, "city", "town"):
+		return "Springfield"
+	case containsAny(hint, "state", "province"):
+		return "CA"
+	case containsAny(hint, "country"):
+		return "US"
+	case containsAny(hint, "company", "organization", "organisation"):
+		return "Example Inc"
+	case containsAny(hint, "age"):
+		return "30"
+	case containsAny(hint, "amount", "price", "qty", "quantity", "number"):
+		return "1"
+	case containsAny(hint, "date", "dob", "birthday"):
+		return "2024-01-01"
+	case containsAny(hint, "message", "comment", "description", "bio", "about"):
+		return "test message"
+	case containsAny(hint, "search", "query", "keyword"):
+		return "test"
+	default:
+		return "test"
+	}
+}
+
+// containsAny reports whether s contains any of the given substrings.
+func containsAny(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// interactionScript is injected after navigation. It hooks fetch/XHR and form
+// submissions so request-bearing calls made from JavaScript are captured with
+// their bodies, analyses the page's forms, and installs the __jsm helpers used
+// to drive interaction (tagging, clicking and form filling) from Go. It is
+// idempotent: the hooks are installed once per document (guarded by
+// __jsmHooked) and the captured-posts array is preserved across re-injection, so
+// it can be re-run after each interaction — including after a navigation, where
+// a fresh document needs the hooks re-installed.
+const interactionScript = `
+(function() {
+	window.__interceptedPOSTs = window.__interceptedPOSTs || [];
+	window.__formFields = window.__formFields || {};
+
+	function stringifyBody(body) {
+		if (!body) return '';
+		if (typeof body === 'string') return body;
+		if (body instanceof FormData) {
+			var pairs = [];
+			for (var pair of body) { pairs.push(pair[0] + '=' + encodeURIComponent(pair[1])); }
+			return pairs.join('&');
+		}
+		if (body instanceof URLSearchParams) { return body.toString(); }
+		try { return JSON.stringify(body); } catch (e) { return String(body); }
+	}
+
+	function recordPost(url, body) {
+		try {
+			window.__interceptedPOSTs.push({ URL: new URL(url, window.location.href).href, Body: body || '' });
+		} catch (e) {}
+	}
+
+	if (!window.__jsmHooked) {
+		window.__jsmHooked = true;
+
+		var originalFetch = window.fetch;
+		window.fetch = function() {
+			var args = arguments;
+			var url = args[0];
+			var options = args[1] || {};
+			if (options.method && ['POST','PUT','PATCH'].indexOf(options.method.toUpperCase()) !== -1) {
+				recordPost(url, stringifyBody(options.body));
+			}
+			return originalFetch.apply(this, args);
+		};
+
+		var XHR = XMLHttpRequest.prototype;
+		var originalOpen = XHR.open;
+		var originalSend = XHR.send;
+		XHR.open = function(method, url) {
+			this._method = method;
+			this._url = url;
+			return originalOpen.apply(this, arguments);
+		};
+		XHR.send = function(data) {
+			if (this._method && ['POST','PUT','PATCH'].indexOf(this._method.toUpperCase()) !== -1) {
+				recordPost(this._url, stringifyBody(data));
+			}
+			return originalSend.apply(this, arguments);
+		};
+
+		document.addEventListener('submit', function(e) {
+			var form = e.target;
+			if (form && form.tagName === 'FORM') {
+				try {
+					var fd = new FormData(form);
+					recordPost(form.action || window.location.href, new URLSearchParams(fd).toString());
+				} catch (ex) {}
+			}
+		}, true);
+
+		function analyzeForms() {
+			var forms = document.querySelectorAll('form');
+			forms.forEach(function(form, idx) {
+				var key = form.action || 'form_' + idx;
+				window.__formFields[key] = {};
+				form.querySelectorAll('input, select, textarea').forEach(function(input) {
+					var name = input.name || input.id || input.type;
+					if (name) {
+						window.__formFields[key][name] = {
+							type: input.type || 'text', name: input.name, id: input.id,
+							placeholder: input.placeholder, required: input.required, value: input.value || ''
+						};
+					}
+				});
+			});
+		}
+		analyzeForms();
+		try {
+			var observer = new MutationObserver(analyzeForms);
+			if (document.body) { observer.observe(document.body, { childList: true, subtree: true }); }
+		} catch (e) {}
+	}
+
+	// Interaction helpers, (re)defined on every injection so they survive the DOM
+	// rebuild a client-side route change performs.
+	window.__jsm = {
+		// tagClickables tags and counts client-side navigation candidates: buttons
+		// (except form submit buttons, driven via forms) and in-page or javascript:
+		// anchors. Anchors to real URLs are excluded — the crawl already follows the
+		// link graph — so this focuses on surface hidden behind event handlers.
+		tagClickables: function() {
+			var sel = 'button, [role=button], [onclick], a[href^="#"], a[href^="javascript:"], a[href=""], [ng-click], [data-toggle], [data-target]';
+			var nodes = Array.prototype.slice.call(document.querySelectorAll(sel));
+			nodes = nodes.filter(function(el) {
+				if (el.tagName === 'A') {
+					var href = el.getAttribute('href') || '';
+					return href === '' || href.charAt(0) === '#' || href.toLowerCase().indexOf('javascript:') === 0;
+				}
+				if (el.tagName === 'BUTTON') {
+					return (el.getAttribute('type') || '').toLowerCase() !== 'submit';
+				}
+				return true;
+			});
+			nodes.forEach(function(el, i) { el.setAttribute('data-jsm-click', i); });
+			return nodes.length;
+		},
+		// tagForms tags every form and returns a descriptor of its controls so Go
+		// can choose plausible values to fill them with.
+		tagForms: function() {
+			var forms = Array.prototype.slice.call(document.querySelectorAll('form'));
+			return forms.map(function(f, i) {
+				f.setAttribute('data-jsm-form', i);
+				var fields = [];
+				f.querySelectorAll('input, select, textarea').forEach(function(inp) {
+					fields.push({
+						tag: inp.tagName.toLowerCase(), type: inp.type || 'text',
+						name: inp.name || '', id: inp.id || '', placeholder: inp.placeholder || ''
+					});
+				});
+				return { index: i, fields: fields };
+			});
+		},
+		click: function(i) {
+			var el = document.querySelector('[data-jsm-click="' + i + '"]');
+			if (!el) return false;
+			try { el.click(); return true; } catch (e) { return false; }
+		},
+		// fillAndSubmit populates form i from values (keyed by control name/id),
+		// checks checkable inputs, selects the first real option of any <select>,
+		// dispatches input/change so frameworks observe the change, then submits.
+		fillAndSubmit: function(i, values) {
+			var f = document.querySelector('[data-jsm-form="' + i + '"]');
+			if (!f) return false;
+			values = values || {};
+			f.querySelectorAll('input, select, textarea').forEach(function(inp) {
+				var type = (inp.type || 'text').toLowerCase();
+				if (type === 'checkbox' || type === 'radio') { inp.checked = true; return; }
+				if (['hidden','submit','button','reset','image','file'].indexOf(type) !== -1) { return; }
+				if (inp.tagName.toLowerCase() === 'select') {
+					var opt = Array.prototype.slice.call(inp.options).filter(function(o){ return o.value; })[0];
+					if (opt) { inp.value = opt.value; }
+				} else {
+					var key = inp.name || inp.id;
+					if (key && values[key] !== undefined) { inp.value = values[key]; }
+					else if (!inp.value) { inp.value = 'test'; }
+				}
+				try {
+					inp.dispatchEvent(new Event('input', { bubbles: true }));
+					inp.dispatchEvent(new Event('change', { bubbles: true }));
+				} catch (e) {}
+			});
+			try {
+				if (typeof f.requestSubmit === 'function') { f.requestSubmit(); } else { f.submit(); }
+				return true;
+			} catch (e) { return false; }
+		}
+	};
+})();
+`

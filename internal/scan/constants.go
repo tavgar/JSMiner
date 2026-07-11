@@ -27,6 +27,20 @@ var (
 	// RenderSleepDuration is the wait time for dynamic content to load
 	RenderSleepDuration = 8 * time.Second
 
+	// MaxExploreStates bounds how many additional application states the renderer
+	// reaches by interacting with a page — clicking client-side navigation
+	// controls and filling and submitting forms — beyond the initial load. A
+	// single-page app hides most of its surface behind event handlers, so without
+	// this the crawler sees only the shell it first rendered. Zero disables
+	// interaction and restores the plain "render once" behaviour.
+	MaxExploreStates = 12
+
+	// ExploreSettleDuration is how long to wait after each interaction for the
+	// resulting state to render (client-side route change, XHR-driven update or
+	// form submission) before it is snapshotted. It is deliberately much shorter
+	// than RenderSleepDuration, which is paid once for the initial load.
+	ExploreSettleDuration = 1500 * time.Millisecond
+
 	// HTTPClientTimeout is the timeout for HTTP requests
 	HTTPClientTimeout = 10 * time.Second
 
@@ -38,6 +52,16 @@ var (
 // SetRenderSleepDuration allows customizing the sleep duration for page rendering
 func SetRenderSleepDuration(seconds int) {
 	RenderSleepDuration = time.Duration(seconds) * time.Second
+}
+
+// SetMaxExploreStates configures how many additional application states the
+// renderer reaches through interaction. A non-positive value disables
+// interaction-based exploration, rendering each page exactly once.
+func SetMaxExploreStates(n int) {
+	if n < 0 {
+		n = 0
+	}
+	MaxExploreStates = n
 }
 
 // SetSkipTLSVerification configures whether HTTPS certificate verification should be skipped
