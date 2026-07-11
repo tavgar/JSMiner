@@ -34,13 +34,21 @@ type Match struct {
 
 // Extractor holds compiled regex patterns
 type Extractor struct {
-	rules      []Rule
-	safeMode   bool
-	allowlist  []string
-	jsRules    map[string]bool
-	snippet    bool
-	calibrator *autoCalibrator
+	rules             []Rule
+	safeMode          bool
+	allowlist         []string
+	jsRules           map[string]bool
+	snippet           bool
+	calibrator        *autoCalibrator
+	recoverSourceMaps bool
 }
+
+// SetRecoverSourceMaps toggles recovery of original source from JavaScript
+// source maps. When on (the default), a scanned JS bundle that advertises a
+// source map has its original, pre-bundled sources recovered and scanned so
+// their secrets and endpoints surface as ordinary matches. Disabling it skips
+// all source-map fetching and decoding.
+func (e *Extractor) SetRecoverSourceMaps(on bool) { e.recoverSourceMaps = on }
 
 // SetCalibrator installs (or clears, when nil) an auto-calibrator used during
 // crawls to skip catch-all/soft-404 and duplicate pages. It is nil by default,
@@ -133,7 +141,7 @@ var powerFilters = map[string]func(string) bool{
 
 // NewExtractor creates an Extractor
 func NewExtractor(safe bool, longSecret bool) *Extractor {
-	e := &Extractor{safeMode: safe, jsRules: make(map[string]bool)}
+	e := &Extractor{safeMode: safe, jsRules: make(map[string]bool), recoverSourceMaps: true}
 	for k, v := range baseJSRules {
 		e.jsRules[k] = v
 	}
