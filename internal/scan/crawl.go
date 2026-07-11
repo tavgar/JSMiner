@@ -52,6 +52,30 @@ type CrawlOptions struct {
 	// opt out.
 	AutoCalibrate bool
 
+	// ProbeMethods turns on multi-method probing: every page the crawl visits is
+	// requested with each verb in RequestMethods, and the verbs that work — judged
+	// against the per-method, per-level error logic learned by auto-calibration —
+	// are reported as a gathered-URL finding. It defaults to on (see
+	// DefaultCrawlOptions) and is off in a zero-value CrawlOptions so library
+	// callers and existing tests are unaffected.
+	ProbeMethods bool
+
+	// RequestMethods lists the HTTP methods used by ProbeMethods. Empty means the
+	// default set (GET, POST, PUT, PATCH, DELETE, OPTIONS).
+	RequestMethods []string
+
+	// ParamReplay turns on cross-level parameter replay: parameter bodies
+	// discovered on POST/PUT/PATCH endpoints are replayed against every directory
+	// level the crawl has seen, and replays that work against a level's learned
+	// per-method error logic are reported as gathered-URL findings. It requires
+	// ProbeMethods and defaults to on (see DefaultCrawlOptions); ParamReplayMax
+	// bounds it.
+	ParamReplay bool
+
+	// ParamReplayMax caps the number of (level, parameter) replays generated when
+	// ParamReplay is set. Zero means no cap (bounded only by scope and the crawl).
+	ParamReplayMax int
+
 	// Progress, when non-nil, is invoked once per fetched page with the page
 	// URL, its depth from the seed and the running page count. It lets the CLI
 	// surface crawl progress without the scan package depending on the output
@@ -67,7 +91,11 @@ type CrawlOptions struct {
 // hops beyond the seed, stay on the seed host, stop after 200 pages and
 // auto-calibrate to suppress catch-all/soft-404 and duplicate pages.
 func DefaultCrawlOptions() CrawlOptions {
-	return CrawlOptions{MaxDepth: 2, MaxPages: 200, SameScopeOnly: true, AutoCalibrate: true}
+	return CrawlOptions{
+		MaxDepth: 2, MaxPages: 200, SameScopeOnly: true, AutoCalibrate: true,
+		ProbeMethods: true, RequestMethods: defaultRequestMethods(),
+		ParamReplay: true, ParamReplayMax: 500,
+	}
 }
 
 // crawlTarget is a queued page together with its distance from the seed.
@@ -111,19 +139,34 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 	}
 	baseHost := seed.Hostname()
 
+	origin := seed.Scheme + "://" + seed.Host
+
 	var perm *permuter
 	if opts.Permute {
-		perm = newPermuter(seed.Scheme+"://"+seed.Host, baseHost, opts.PermuteMax)
+		perm = newPermuter(origin, baseHost, opts.PermuteMax)
 	}
 
+	// A single calibrator backs both whole-page auto-calibration (skipPage) and
+	// per-method probing, so the two share the level fingerprints they learn. It
+	// is created whenever either feature is active.
+	var cal *autoCalibrator
+	if opts.AutoCalibrate || opts.ProbeMethods {
+		cal = newAutoCalibrator()
+		cal.setBase(seed.String())
+	}
 	if opts.AutoCalibrate {
-		c := newAutoCalibrator()
-		n := c.calibrate(seed.String())
-		e.SetCalibrator(c)
+		n := cal.calibrate(seed.String())
+		e.SetCalibrator(cal)
 		defer e.SetCalibrator(nil)
 		if opts.OnCalibrated != nil {
 			opts.OnCalibrated(n)
 		}
+	}
+
+	methods := normalizeMethods(opts.RequestMethods)
+	var replay *paramReplayer
+	if opts.ProbeMethods && opts.ParamReplay {
+		replay = newParamReplayer(origin, opts.ParamReplayMax)
 	}
 
 	visited := make(map[string]struct{})
@@ -152,12 +195,39 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 		}
 		all = append(all, ms...)
 
+		// Report which request methods this page accepts, judged against the
+		// per-method error logic learned for its level.
+		if opts.ProbeMethods {
+			if worked := probeURLMethods(cal, t.url, methods, ""); worked != nil {
+				if gm, ok := gatheredMatch(t.url, worked, ""); ok {
+					all = append(all, gm)
+				}
+			}
+		}
+
 		// A negative MaxDepth means unlimited depth, so only the page budget and
 		// scope bound the crawl; otherwise stop harvesting once the cap is hit.
 		if opts.MaxDepth >= 0 && t.depth >= opts.MaxDepth {
 			continue
 		}
 		targets := crawlTargetsFromMatches(ms, t.url, baseHost, opts)
+
+		// Replay parameters discovered on this page against every level seen so
+		// far, and this page's levels against every parameter seen so far; keep
+		// the replays that work against each level's learned per-method logic.
+		if replay != nil {
+			// Include this page's own URL so its directory level is registered even
+			// when nothing under it was discovered as a crawl target.
+			levelURLs := make([]string, 0, len(targets)+1)
+			levelURLs = append(levelURLs, targets...)
+			levelURLs = append(levelURLs, t.url)
+			for _, rt := range replay.observe(paramsFromMatches(ms), levelURLs) {
+				worked := probeURLMethods(cal, rt.url, methods, rt.params)
+				if gm, ok := gatheredMatch(rt.url, worked, rt.params); ok {
+					all = append(all, gm)
+				}
+			}
+		}
 		for _, next := range targets {
 			if _, ok := enqueued[next]; ok {
 				continue
