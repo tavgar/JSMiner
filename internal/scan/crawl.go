@@ -37,6 +37,9 @@ type CrawlOptions struct {
 	// target is probed with random paths to learn its catch-all/soft-404
 	// fingerprint, and pages matching that fingerprint — or duplicating a page
 	// already scanned — are skipped so the crawl stays on unique, useful pages.
+	// It defaults to on (see DefaultCrawlOptions); the CLI always enables it and
+	// exposes no toggle. The field is retained so library callers and tests can
+	// opt out.
 	AutoCalibrate bool
 
 	// Progress, when non-nil, is invoked once per fetched page with the page
@@ -51,9 +54,10 @@ type CrawlOptions struct {
 }
 
 // DefaultCrawlOptions returns sensible defaults for interactive use: follow two
-// hops beyond the seed, stay on the seed host and stop after 200 pages.
+// hops beyond the seed, stay on the seed host, stop after 200 pages and
+// auto-calibrate to suppress catch-all/soft-404 and duplicate pages.
 func DefaultCrawlOptions() CrawlOptions {
-	return CrawlOptions{MaxDepth: 2, MaxPages: 200, SameScopeOnly: true}
+	return CrawlOptions{MaxDepth: 2, MaxPages: 200, SameScopeOnly: true, AutoCalibrate: true}
 }
 
 // crawlTarget is a queued page together with its distance from the seed.

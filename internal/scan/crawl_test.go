@@ -48,7 +48,11 @@ func TestScanURLCrawl(t *testing.T) {
 		t.Fatal("did not expect jwt without crawling")
 	}
 
+	// This test isolates crawl reachability; auto-calibration is exercised
+	// separately (calibrate_test.go). The toy pages here are near-identical in
+	// shape, so the coarse wildcard signature would collapse them — disable it.
 	opts := DefaultCrawlOptions()
+	opts.AutoCalibrate = false
 	matches, err := e.ScanURLCrawl(ts.URL, false, false, false, opts)
 	if err != nil {
 		t.Fatal(err)

@@ -48,7 +48,6 @@ func main() {
 	crawlDepth := flag.Int("crawl-depth", 2, "max link hops to follow beyond the seed page when -crawl is set")
 	crawlAll := flag.Bool("crawl-all", false, "crawl to unlimited depth until no new in-scope pages remain (still bounded by -crawl-max-pages; pair with -crawl-max-pages 0 for no page cap)")
 	crawlMaxPages := flag.Int("crawl-max-pages", 200, "max pages to fetch during a crawl (0 = unlimited)")
-	ac := flag.Bool("ac", false, "auto-calibrate crawl: skip catch-all/soft-404 and duplicate pages (requires -crawl)")
 	targetsFile := flag.String("targets", "", "file with list of targets")
 	pluginsFlag := flag.String("plugins", "", "comma-separated plugin files")
 	showSourceFlag := flag.Bool("show-source", false, "show source of each record (auto-enabled for multiple targets)")
@@ -115,8 +114,6 @@ func main() {
 			*crawl = true
 		case "crawl-all":
 			*crawlAll = true
-		case "ac":
-			*ac = true
 		case "crawl-depth", "crawl-max-pages":
 			val := ""
 			if len(parts) == 2 {
@@ -255,10 +252,6 @@ func main() {
 	}
 	scan.SetSkipTLSVerification(*insecure)
 
-	if *ac && !*crawl && *proxyAddr == "" && !*quiet {
-		fmt.Fprintln(os.Stderr, "note: -ac has no effect without -crawl")
-	}
-
 	extractor := scan.NewExtractor(*safe, *longSecret)
 	extractor.SetSnippet(*snippet)
 	if *rulesFile != "" {
@@ -317,15 +310,12 @@ func main() {
 					opts.MaxDepth = -1
 				}
 				opts.MaxPages = *crawlMaxPages
-				opts.AutoCalibrate = *ac
 				if !*quiet {
 					opts.Progress = func(pageURL string, depth, pageNum int) {
 						fmt.Fprintf(os.Stderr, "[crawl] (%d) depth %d %s\n", pageNum, depth, pageURL)
 					}
-					if *ac {
-						opts.OnCalibrated = func(n int) {
-							fmt.Fprintf(os.Stderr, "[crawl] auto-calibration learned %d wildcard signature(s)\n", n)
-						}
+					opts.OnCalibrated = func(n int) {
+						fmt.Fprintf(os.Stderr, "[crawl] auto-calibration learned %d wildcard signature(s)\n", n)
 					}
 				}
 				if *posts {
