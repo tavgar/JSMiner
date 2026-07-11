@@ -57,8 +57,12 @@ Flags:
   before crawling, JSMiner probes the target with a few random, non-existent
   paths to learn what its catch-all / soft-404 pages look like, then skips any
   crawled page that matches that fingerprint or byte-for-byte duplicates a page
-  already scanned. This keeps single-page-app shells and soft-404 responses from
-  flooding the output with duplicate, low-value findings.
+  already scanned. Calibration is also done **per directory level**: the first
+  time the crawl reaches a new level (e.g. `/api/`, `/docs/`) it probes that
+  level with random paths and learns its own catch-all fingerprint, so a
+  section-specific soft-404 that differs from the root is caught too. This keeps
+  single-page-app shells and soft-404 responses from flooding the output with
+  duplicate, low-value findings.
 - `-render` render pages with headless Chrome (default `true`, set `-render=false` to disable; Chrome/Chromium must be installed)
 - `-longsecret` detect generic long secrets (disabled by default). Enable to
   search for high-entropy strings that may represent API keys.
@@ -105,8 +109,10 @@ jsminer -crawl -ac -endpoints https://example.com/
 ```
 
 JSMiner first probes the host with random paths to fingerprint its catch-all
-response, then skips crawled pages that match the fingerprint or duplicate a
-page already scanned, so only unique, useful pages are mined.
+response, and probes each directory level it later reaches (`/api/`, `/docs/`, …)
+to catch section-specific soft-404s that differ from the root. It then skips
+crawled pages that match a fingerprint or duplicate a page already scanned, so
+only unique, useful pages are mined.
 
 ### Code snippets
 
