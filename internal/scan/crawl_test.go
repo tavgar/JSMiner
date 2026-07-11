@@ -48,7 +48,11 @@ func TestScanURLCrawl(t *testing.T) {
 		t.Fatal("did not expect jwt without crawling")
 	}
 
+	// This test isolates crawl reachability; auto-calibration is exercised
+	// separately (calibrate_test.go). The toy pages here are near-identical in
+	// shape, so the coarse wildcard signature would collapse them — disable it.
 	opts := DefaultCrawlOptions()
+	opts.AutoCalibrate = false
 	matches, err := e.ScanURLCrawl(ts.URL, false, false, false, opts)
 	if err != nil {
 		t.Fatal(err)
@@ -100,6 +104,60 @@ func TestScanURLCrawlDepth(t *testing.T) {
 	}
 	if !hasPattern(deep, "jwt") {
 		t.Fatalf("depth 2 should reach the jwt, got %+v", deep)
+	}
+}
+
+// TestScanURLCrawlUnlimitedDepth verifies that a negative MaxDepth follows a
+// chain deeper than any fixed budget, reaching a secret four hops from the seed
+// that a bounded crawl at the default depth cannot.
+func TestScanURLCrawlUnlimitedDepth(t *testing.T) {
+	// /p0 -> /p1 -> /p2 -> /p3 -> /p4 (holds the jwt), each linking the next hop.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		extra := ""
+		if r.URL.Path == "/p4" {
+			extra = `const t='eyJabc.def.ghi';`
+		}
+		io.WriteString(w, `<html><script>fetch('`+nextHop(r.URL.Path)+`');`+extra+`</script></html>`)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	e := NewExtractor(true, false)
+
+	// The default depth (2) stops well short of /p4.
+	bounded, err := e.ScanURLCrawl(ts.URL+"/p0", false, false, false, CrawlOptions{MaxDepth: 2, SameScopeOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasPattern(bounded, "jwt") {
+		t.Fatal("depth 2 should not reach the jwt four hops away")
+	}
+
+	// Unlimited depth (negative) follows the whole chain.
+	unlimited, err := e.ScanURLCrawl(ts.URL+"/p0", false, false, false, CrawlOptions{MaxDepth: -1, SameScopeOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasPattern(unlimited, "jwt") {
+		t.Fatalf("unlimited depth should reach the jwt, got %+v", unlimited)
+	}
+}
+
+// nextHop maps /pN to /p(N+1) for the depth-chain test server.
+func nextHop(path string) string {
+	switch path {
+	case "/p0":
+		return "/p1"
+	case "/p1":
+		return "/p2"
+	case "/p2":
+		return "/p3"
+	case "/p3":
+		return "/p4"
+	default:
+		return "/end"
 	}
 }
 

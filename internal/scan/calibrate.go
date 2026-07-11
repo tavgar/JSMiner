@@ -6,7 +6,9 @@ import (
 	"hash/fnv"
 	"io"
 	"net/url"
+	"path"
 	"strconv"
+	"strings"
 )
 
 // autoCalibrator implements ffuf-style auto-calibration for crawls. Before the
@@ -20,15 +22,27 @@ import (
 // which survives soft-404 pages that echo the requested path back in the body.
 // Duplicate detection uses an exact body hash, so two genuinely different pages
 // are never collapsed — this keeps real-secret recall intact.
+//
+// Calibration is also performed per directory level, lazily. Many sites answer
+// unknown paths differently depending on the level: a marketing 404 shell at the
+// root, a generic JSON error under /api/, a section soft-404 under /docs/. The
+// root probe alone cannot see those, so the first time the crawl reaches a new
+// level it probes that level with random paths and learns its own catch-all
+// fingerprint, then skips pages under that level that match it.
 type autoCalibrator struct {
-	wildcard   map[string]struct{} // status|words|lines of learned catch-all responses
-	seenBodies map[uint64]struct{} // hashes of bodies already accepted
-	primed     bool                // the first page (the seed) is always accepted
+	wildcard   map[string]struct{}            // status|words|lines of the root catch-all responses
+	levelWild  map[string]map[string]struct{} // per-directory-level catch-all signatures
+	levelDone  map[string]struct{}            // levels already probed (even if they learned nothing)
+	seenBodies map[uint64]struct{}            // hashes of bodies already accepted
+	base       string                         // scheme://host origin used to build level probes
+	primed     bool                           // the first page (the seed) is always accepted
 }
 
 func newAutoCalibrator() *autoCalibrator {
 	return &autoCalibrator{
 		wildcard:   make(map[string]struct{}),
+		levelWild:  make(map[string]map[string]struct{}),
+		levelDone:  make(map[string]struct{}),
 		seenBodies: make(map[uint64]struct{}),
 	}
 }
@@ -54,6 +68,10 @@ func (c *autoCalibrator) calibrate(seedURL string) int {
 	if err != nil {
 		return 0
 	}
+	// Remember the origin so per-level probes can be built during the crawl, and
+	// mark the root level as already probed: its catch-all lives in c.wildcard.
+	c.base = base
+	c.levelDone["/"] = struct{}{}
 	counts := make(map[string]int)
 	for _, p := range calibrationProbePaths() {
 		resp, err := fetchURLResponse(base + p)
@@ -74,16 +92,26 @@ func (c *autoCalibrator) calibrate(seedURL string) int {
 
 // skipPage reports whether a fetched page should be ignored by the crawl. The
 // first page it sees (the seed) is always accepted and recorded. Afterwards a
-// page is skipped when it matches a learned wildcard signature or duplicates a
-// body already accepted.
-func (c *autoCalibrator) skipPage(status int, body []byte) bool {
+// page is skipped when it matches the root catch-all signature, matches the
+// catch-all signature of its own directory level, or duplicates a body already
+// accepted. pageURL identifies the level to check (and to lazily calibrate on
+// first sight).
+func (c *autoCalibrator) skipPage(pageURL string, status int, body []byte) bool {
 	if !c.primed {
 		c.primed = true
 		c.seenBodies[hashBody(body)] = struct{}{}
 		return false
 	}
-	if _, ok := c.wildcard[pageSig(status, body)]; ok {
+	sig := pageSig(status, body)
+	if _, ok := c.wildcard[sig]; ok {
 		return true
+	}
+	lvl := levelOf(pageURL)
+	c.ensureLevel(lvl)
+	if sigs, ok := c.levelWild[lvl]; ok {
+		if _, hit := sigs[sig]; hit {
+			return true
+		}
 	}
 	h := hashBody(body)
 	if _, ok := c.seenBodies[h]; ok {
@@ -91,6 +119,71 @@ func (c *autoCalibrator) skipPage(status int, body []byte) bool {
 	}
 	c.seenBodies[h] = struct{}{}
 	return false
+}
+
+// ensureLevel probes lvl the first time it is seen and records the signatures
+// shared by at least two probes as that level's catch-all fingerprint. A level
+// is marked done even when it learns nothing, so it is probed at most once per
+// crawl. Levels are probed lazily — only for levels the crawl actually reaches —
+// so the extra requests scale with the number of distinct directories visited,
+// not with the whole URL space.
+func (c *autoCalibrator) ensureLevel(lvl string) {
+	if c.base == "" {
+		return
+	}
+	if _, ok := c.levelDone[lvl]; ok {
+		return
+	}
+	c.levelDone[lvl] = struct{}{}
+
+	counts := make(map[string]int)
+	for _, p := range levelProbePaths(lvl) {
+		resp, err := fetchURLResponse(c.base + p)
+		if err != nil {
+			continue
+		}
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		resp.Body.Close()
+		counts[pageSig(resp.StatusCode, data)]++
+	}
+	var sigs map[string]struct{}
+	for sig, n := range counts {
+		if n >= 2 {
+			if sigs == nil {
+				sigs = make(map[string]struct{})
+			}
+			sigs[sig] = struct{}{}
+		}
+	}
+	if sigs != nil {
+		c.levelWild[lvl] = sigs
+	}
+}
+
+// levelProbePaths are the random path shapes used to fingerprint a directory
+// level's catch-all behaviour: a plain child, a child directory and a
+// script-looking child. lvl already ends with a slash.
+func levelProbePaths(lvl string) []string {
+	return []string{
+		lvl + randToken(20),
+		lvl + randToken(20) + "/",
+		lvl + randToken(16) + ".js",
+	}
+}
+
+// levelOf returns the directory level of rawURL — the parent path that a
+// catch-all would be probed under. It always ends with a slash, so "/api/v1/x"
+// and "/api/v1/" both map to "/api/v1/" and a URL at the root maps to "/".
+func levelOf(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Path == "" {
+		return "/"
+	}
+	dir := path.Dir(u.Path)
+	if !strings.HasSuffix(dir, "/") {
+		dir += "/"
+	}
+	return dir
 }
 
 // pageSig builds the coarse wildcard signature for a response: HTTP status,
