@@ -30,12 +30,20 @@ import (
 // level it probes that level with random paths and learns its own catch-all
 // fingerprint, then skips pages under that level that match it.
 type autoCalibrator struct {
-	wildcard   map[string]struct{}            // status|words|lines of the root catch-all responses
-	levelWild  map[string]map[string]struct{} // per-directory-level catch-all signatures
+	wildcard   map[string]struct{}            // status|words|lines of the root catch-all responses (GET)
+	levelWild  map[string]map[string]struct{} // per-directory-level catch-all signatures (GET)
 	levelDone  map[string]struct{}            // levels already probed (even if they learned nothing)
 	seenBodies map[uint64]struct{}            // hashes of bodies already accepted
 	base       string                         // scheme://host origin used to build level probes
 	primed     bool                           // the first page (the seed) is always accepted
+
+	// methodWild holds the catch-all/error fingerprint learned per request method
+	// and directory level, so the crawler knows what a "this verb is not handled
+	// here" response looks like independently for GET, POST, PUT, and so on. The
+	// key is method+"\x00"+level. methodDone tracks which (method, level) pairs
+	// have already been probed so each is fingerprinted at most once per crawl.
+	methodWild map[string]map[string]struct{}
+	methodDone map[string]struct{}
 }
 
 func newAutoCalibrator() *autoCalibrator {
@@ -44,6 +52,17 @@ func newAutoCalibrator() *autoCalibrator {
 		levelWild:  make(map[string]map[string]struct{}),
 		levelDone:  make(map[string]struct{}),
 		seenBodies: make(map[uint64]struct{}),
+		methodWild: make(map[string]map[string]struct{}),
+		methodDone: make(map[string]struct{}),
+	}
+}
+
+// setBase records the scheme://host origin used to build probe URLs. It lets the
+// per-method calibration run even when whole-page auto-calibration (calibrate)
+// was not performed, so method probing is self-sufficient.
+func (c *autoCalibrator) setBase(seedURL string) {
+	if base, err := probeBase(seedURL); err == nil {
+		c.base = base
 	}
 }
 
@@ -158,6 +177,68 @@ func (c *autoCalibrator) ensureLevel(lvl string) {
 	if sigs != nil {
 		c.levelWild[lvl] = sigs
 	}
+}
+
+// methodKey builds the map key for a (method, level) fingerprint.
+func methodKey(method, level string) string { return method + "\x00" + level }
+
+// ensureMethodLevel probes the given directory level with the given HTTP method
+// the first time that (method, level) pair is seen, recording the response
+// signatures shared by at least two random probes as the catch-all/error
+// fingerprint for that verb at that level. This is the per-request-type error
+// logic: a level that answers unknown POSTs with a 405 shell and unknown GETs
+// with a 404 shell learns a distinct fingerprint for each. Probing is lazy and
+// bounded (three probes per pair) so the extra requests scale with the number of
+// (method, level) pairs the crawl actually reaches.
+func (c *autoCalibrator) ensureMethodLevel(method, lvl string) {
+	if c.base == "" {
+		return
+	}
+	key := methodKey(method, lvl)
+	if _, ok := c.methodDone[key]; ok {
+		return
+	}
+	c.methodDone[key] = struct{}{}
+
+	counts := make(map[string]int)
+	for _, p := range levelProbePaths(lvl) {
+		resp, err := fetchURLResponseMethod(c.base+p, method, "")
+		if err != nil {
+			continue
+		}
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		resp.Body.Close()
+		counts[pageSig(resp.StatusCode, data)]++
+	}
+	var sigs map[string]struct{}
+	for sig, n := range counts {
+		if n >= 2 {
+			if sigs == nil {
+				sigs = make(map[string]struct{})
+			}
+			sigs[sig] = struct{}{}
+		}
+	}
+	if sigs != nil {
+		c.methodWild[key] = sigs
+	}
+}
+
+// methodCatchAll reports whether a response to method at pageURL's directory
+// level matches that level's learned catch-all/error fingerprint for that verb.
+// It lazily calibrates the (method, level) pair on first sight. A true result
+// means "this verb is not really handled here" — the response is the level's
+// standard rejection shell — so the caller should not treat the method as
+// working.
+func (c *autoCalibrator) methodCatchAll(method, pageURL string, status int, body []byte) bool {
+	lvl := levelOf(pageURL)
+	c.ensureMethodLevel(method, lvl)
+	if sigs, ok := c.methodWild[methodKey(method, lvl)]; ok {
+		if _, hit := sigs[pageSig(status, body)]; hit {
+			return true
+		}
+	}
+	return false
 }
 
 // levelProbePaths are the random path shapes used to fingerprint a directory

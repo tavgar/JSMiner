@@ -47,32 +47,19 @@ func (p *Printer) Print(w io.Writer, matches []scan.Match) error {
 		p.printedBanner = true
 	}
 
+	// Gathered-URL findings are shown as their own segment beneath the normal
+	// JavaScript findings, so split them out while preserving relative order.
+	findings, gathered := splitGathered(matches)
+
 	if p.format == "pretty" {
 		useColor := p.snippet && isTerminal(w)
-		for _, m := range matches {
-			if p.showSource {
-				fmt.Fprintf(w, "%s: [%s] (%s) %s", m.Source, m.Pattern, m.Severity, m.Value)
-			} else {
-				fmt.Fprintf(w, "[%s] (%s) %s", m.Pattern, m.Severity, m.Value)
-			}
-			if m.Params != "" {
-				params := m.Params
-				if len(params) > scan.MaxParameterDisplayLength {
-					params = params[:scan.MaxParameterDisplayLength-3] + "..."
-				}
-				// Replace newlines with spaces for better display
-				params = strings.ReplaceAll(params, "\n", " ")
-				params = strings.ReplaceAll(params, "\r", "")
-				params = strings.ReplaceAll(params, "\t", " ")
-				// Collapse multiple spaces
-				for strings.Contains(params, "  ") {
-					params = strings.ReplaceAll(params, "  ", " ")
-				}
-				fmt.Fprintf(w, " params=%s", strings.TrimSpace(params))
-			}
-			fmt.Fprintln(w)
-			if p.snippet && m.Snippet != "" {
-				fmt.Fprint(w, RenderSnippet(m.Snippet, m.Value, useColor))
+		for _, m := range findings {
+			p.printPretty(w, m, useColor)
+		}
+		if len(gathered) > 0 {
+			fmt.Fprintln(w, "\n=== Gathered URLs ===")
+			for _, m := range gathered {
+				p.printPretty(w, m, useColor)
 			}
 		}
 		return nil
@@ -86,8 +73,14 @@ func (p *Printer) Print(w io.Writer, matches []scan.Match) error {
 		Severity string `json:"severity"`
 		Snippet  string `json:"snippet,omitempty"`
 	}
-	out := make([]outMatch, 0, len(matches))
-	for _, m := range matches {
+	// Emit the normal findings first, then the gathered-URL segment, so the JSON
+	// array mirrors the pretty layout (gathered URLs beneath the JS findings).
+	ordered := make([]scan.Match, 0, len(findings)+len(gathered))
+	ordered = append(ordered, findings...)
+	ordered = append(ordered, gathered...)
+
+	out := make([]outMatch, 0, len(ordered))
+	for _, m := range ordered {
 		params := m.Params
 		if params != "" {
 			if len(params) > scan.MaxParameterDisplayLength {
@@ -114,4 +107,46 @@ func (p *Printer) Print(w io.Writer, matches []scan.Match) error {
 	}
 	enc := json.NewEncoder(w)
 	return enc.Encode(out)
+}
+
+// printPretty renders a single match in the pretty (human) format, including its
+// parameters and, when enabled, a source-code snippet.
+func (p *Printer) printPretty(w io.Writer, m scan.Match, useColor bool) {
+	if p.showSource {
+		fmt.Fprintf(w, "%s: [%s] (%s) %s", m.Source, m.Pattern, m.Severity, m.Value)
+	} else {
+		fmt.Fprintf(w, "[%s] (%s) %s", m.Pattern, m.Severity, m.Value)
+	}
+	if m.Params != "" {
+		params := m.Params
+		if len(params) > scan.MaxParameterDisplayLength {
+			params = params[:scan.MaxParameterDisplayLength-3] + "..."
+		}
+		// Replace newlines with spaces for better display
+		params = strings.ReplaceAll(params, "\n", " ")
+		params = strings.ReplaceAll(params, "\r", "")
+		params = strings.ReplaceAll(params, "\t", " ")
+		// Collapse multiple spaces
+		for strings.Contains(params, "  ") {
+			params = strings.ReplaceAll(params, "  ", " ")
+		}
+		fmt.Fprintf(w, " params=%s", strings.TrimSpace(params))
+	}
+	fmt.Fprintln(w)
+	if p.snippet && m.Snippet != "" {
+		fmt.Fprint(w, RenderSnippet(m.Snippet, m.Value, useColor))
+	}
+}
+
+// splitGathered partitions matches into normal findings and gathered-URL
+// findings, preserving the relative order within each group.
+func splitGathered(matches []scan.Match) (findings, gathered []scan.Match) {
+	for _, m := range matches {
+		if m.Pattern == scan.GatheredURLPattern {
+			gathered = append(gathered, m)
+		} else {
+			findings = append(findings, m)
+		}
+	}
+	return findings, gathered
 }

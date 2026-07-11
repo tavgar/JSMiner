@@ -12,9 +12,10 @@ import (
 	"time"
 )
 
-// fetchURLResponse retrieves a URL and returns the http.Response
-// with limited redirects and a default User-Agent.
-func fetchURLResponse(u string) (*http.Response, error) {
+// newHTTPClient builds the HTTP client shared by the URL fetch helpers: a cloned
+// default transport that optionally skips TLS verification, a request timeout and
+// a redirect cap.
+func newHTTPClient() *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	if SkipTLSVerification {
 		if transport.TLSClientConfig == nil {
@@ -23,7 +24,7 @@ func fetchURLResponse(u string) (*http.Response, error) {
 			transport.TLSClientConfig.InsecureSkipVerify = true
 		}
 	}
-	client := http.Client{
+	return &http.Client{
 		Transport: transport,
 		Timeout:   10 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -33,12 +34,44 @@ func fetchURLResponse(u string) (*http.Response, error) {
 			return nil
 		},
 	}
-	req, err := http.NewRequest("GET", u, nil)
+}
+
+// fetchURLResponse retrieves a URL with GET and returns the http.Response
+// with limited redirects and a default User-Agent.
+func fetchURLResponse(u string) (*http.Response, error) {
+	return fetchURLResponseMethod(u, "GET", "")
+}
+
+// fetchURLResponseMethod retrieves u with the given HTTP method and returns the
+// http.Response. When body is non-empty it is sent as the request body with a
+// content type inferred from its shape (JSON when it starts with '{' or '[',
+// form-encoded otherwise); this lets the crawler replay discovered POST/PUT/PATCH
+// parameters against a target. The default User-Agent and any extra headers still
+// apply.
+func fetchURLResponseMethod(u, method, body string) (*http.Response, error) {
+	var rdr io.Reader
+	if body != "" {
+		rdr = strings.NewReader(body)
+	}
+	req, err := http.NewRequest(method, u, rdr)
 	if err != nil {
 		return nil, err
 	}
 	applyHeaders(req)
-	return client.Do(req)
+	if body != "" && req.Header.Get("Content-Type") == "" {
+		req.Header.Set("Content-Type", inferContentType(body))
+	}
+	return newHTTPClient().Do(req)
+}
+
+// inferContentType guesses a request Content-Type from a parameter body: JSON
+// when it looks like a JSON object/array, otherwise form-encoded.
+func inferContentType(body string) string {
+	trimmed := strings.TrimSpace(body)
+	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+		return "application/json"
+	}
+	return "application/x-www-form-urlencoded"
 }
 
 var scriptSrcRe = regexp.MustCompile(`(?is)<script[^>]+src=["']([^"']+)['"]`)

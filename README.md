@@ -64,6 +64,13 @@ Flags:
   `0` for unlimited).
 - `-crawl-max-pages` max pages to fetch during a crawl (default `200`, `0` for
   unlimited).
+- `-methods` comma-separated HTTP methods each crawled URL is probed with
+  (default `GET,POST,PUT,PATCH,DELETE,OPTIONS`). The methods that work — judged
+  against the per-method error logic learned by auto-calibration — are reported
+  per URL in the [Gathered URLs](#gathered-urls) segment.
+- `-no-methods` disable multi-method probing and gathered-URL reporting.
+- `-no-param-replay` disable replaying discovered parameters across every
+  discovered directory level.
 
   Crawls are always **auto-calibrated** (formerly the `-ac` flag, now the
   default): JSMiner probes the target — and each directory level it reaches — with
@@ -105,8 +112,11 @@ The crawl stays on the target host and its subdomains, skips binary assets
 (images, fonts, media, archives) that cannot yield secrets, fetches each
 resource at most once, and stops at `-crawl-depth` hops or `-crawl-max-pages`
 pages. Progress is printed to stderr unless `-quiet` is set, and all findings are
-deduplicated before output. Crawling issues real GET requests to discovered
-endpoints, so use it only against targets you are authorized to test.
+deduplicated before output. Crawling issues real requests to discovered
+endpoints — including non-`GET` methods (`POST`, `PUT`, `PATCH`, `DELETE`,
+`OPTIONS`) for method probing and parameter replay — so use it only against
+targets you are authorized to test. Pass `-no-methods` to restrict a crawl to
+`GET` requests only.
 
 ### Auto-calibration
 
@@ -125,6 +135,40 @@ response, and probes each directory level it later reaches (`/api/`, `/docs/`, �
 to catch section-specific soft-404s that differ from the root. It then skips
 crawled pages that match a fingerprint or duplicate a page already scanned, so
 only unique, useful pages are mined.
+
+Auto-calibration also learns the catch-all fingerprint **per request method**:
+the same `/api/` level can answer unknown `GET`s with a `404` shell and unknown
+`POST`s with a `405` shell, and each is learned separately. This per-method error
+logic is what decides which verbs count as "working" for the Gathered URLs
+segment below.
+
+### Gathered URLs
+
+During a crawl JSMiner probes every URL it visits with each method from
+`-methods` (by default `GET,POST,PUT,PATCH,DELETE,OPTIONS`) and records the verbs
+that genuinely work — a non-error response that does not match the level's learned
+per-method catch-all. Each such URL becomes a **gathered-URL** finding, shown as
+its own segment beneath the normal JavaScript findings:
+
+```
+$ jsminer -crawl -render=false -format pretty https://example.com/
+[endpoint_path] (info) /api/submit
+
+=== Gathered URLs ===
+[gathered_url] (info) https://example.com/          params=methods=GET,OPTIONS
+[gathered_url] (info) https://example.com/api/submit params=methods=GET,POST
+```
+
+In `json` output the gathered URLs use the `gathered_url` pattern and are ordered
+after the normal findings, with the working methods in the `params` field.
+
+Any parameters JSMiner discovers on `POST`/`PUT`/`PATCH` endpoints are also
+**replayed across every directory level** the crawl has seen (bounded by an
+internal cap): a body found under `/api/` is retried under `/`, `/v2/`, and every
+other level, and a replay that works against that level's per-method error logic
+is reported as a gathered URL with the parameters that produced it. Pass
+`-no-methods` to turn the whole segment off, or `-no-param-replay` to keep
+method probing but skip the cross-level parameter replay.
 
 ### Code snippets
 
