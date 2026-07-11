@@ -53,6 +53,7 @@ func main() {
 	methods := flag.String("methods", "", "comma-separated HTTP methods to probe each crawled URL with (default: GET,POST,PUT,PATCH,DELETE,OPTIONS)")
 	noMethods := flag.Bool("no-methods", false, "disable multi-method probing / gathered-URL reporting during a crawl")
 	noParamReplay := flag.Bool("no-param-replay", false, "disable replaying discovered parameters across every directory level during a crawl")
+	noSourceMaps := flag.Bool("no-source-maps", false, "disable recovering original source from JavaScript source maps advertised by scanned bundles")
 	targetsFile := flag.String("targets", "", "file with list of targets")
 	pluginsFlag := flag.String("plugins", "", "comma-separated plugin files")
 	showSourceFlag := flag.Bool("show-source", false, "show source of each record (auto-enabled for multiple targets)")
@@ -125,6 +126,8 @@ func main() {
 			*noMethods = true
 		case "no-param-replay":
 			*noParamReplay = true
+		case "no-source-maps":
+			*noSourceMaps = true
 		case "methods":
 			val := ""
 			if len(parts) == 2 {
@@ -279,6 +282,9 @@ func main() {
 
 	extractor := scan.NewExtractor(*safe, *longSecret)
 	extractor.SetSnippet(*snippet)
+	if *noSourceMaps {
+		extractor.SetRecoverSourceMaps(false)
+	}
 	if *rulesFile != "" {
 		if err := extractor.LoadRulesFile(*rulesFile); err != nil {
 			log.Fatal(err)

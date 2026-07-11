@@ -71,6 +71,13 @@ Flags:
 - `-no-methods` disable multi-method probing and gathered-URL reporting.
 - `-no-param-replay` disable replaying discovered parameters across every
   discovered directory level.
+- `-no-source-maps` disable recovering original source from JavaScript source
+  maps. By default, when a scanned bundle advertises a source map (via a
+  `//# sourceMappingURL=` comment or a `SourceMap` / `X-SourceMap` response
+  header), JSMiner recovers the original, pre-bundled source — from the map's
+  embedded `sourcesContent` or by fetching in-scope original files — and scans
+  it too, so secrets and endpoints that only survive in the un-minified source
+  are reported through the normal output path.
 
   Crawls are always **auto-calibrated** (formerly the `-ac` flag, now the
   default): JSMiner probes the target — and each directory level it reaches — with
@@ -254,6 +261,26 @@ Package `scan` also provides `Extractor.ScanReaderPostRequests` to capture
 endpoints used in HTTP POST requests. The function returns any associated
 parameters when available. Use the `-posts` flag to output only POST request
 endpoints with their parameters.
+
+### Source map recovery
+
+Production JavaScript ships minified and transpiled, so the secrets and
+endpoints that were readable in the original source often survive only inside a
+**source map** the bundle still advertises. JSMiner recovers them automatically:
+whenever a scanned bundle points at a source map — through a
+`//# sourceMappingURL=` (or legacy `//@`) comment or a `SourceMap` /
+`X-SourceMap` response header — the map is loaded (decoded inline from a `data:`
+URI, or fetched) and every original source it carries is scanned with the same
+rules as everything else.
+
+The map's embedded `sourcesContent` is used when present; when a source ships
+separately, JSMiner fetches the original file if it resolves to an in-scope
+`http(s)` URL (virtual paths such as `webpack://` are skipped). Recovered
+findings are attributed to their original source path (e.g.
+`webpack:///src/config.js`) and flow through the normal output, so a scan of a
+minified bundle can surface a JWT or API path that never appears in the bundle
+itself. Recovery is on by default and works for plain scans, `-crawl`, and
+`-posts`; pass `-no-source-maps` to turn it off.
 
 ### Plugins
 

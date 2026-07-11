@@ -255,6 +255,16 @@ func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited map
 	}
 	matches = append(matches, ms...)
 
+	// Recover and scan any original source the bundle advertises via a source
+	// map, so secrets and endpoints that only survive in the pre-bundled source
+	// are found too.
+	if rec := e.recoverSourceMap(finalURL, data, resp.Header, baseHost, external, visited, false); rec != nil {
+		if endpoints {
+			rec = FilterEndpointMatches(rec)
+		}
+		matches = append(matches, rec...)
+	}
+
 	for _, imp := range extractJSImports(data) {
 		abs := resolveURL(finalURL, imp)
 		u, err := url.Parse(abs)
@@ -340,6 +350,12 @@ func (e *Extractor) scanURLPosts(urlStr, baseHost string, visited map[string]str
 		return nil, err
 	}
 	matches = append(matches, ms...)
+
+	// Recover POST endpoints from any original source the bundle advertises via
+	// a source map.
+	if rec := e.recoverSourceMap(finalURL, data, resp.Header, baseHost, external, visited, true); rec != nil {
+		matches = append(matches, rec...)
+	}
 
 	for _, imp := range extractJSImports(data) {
 		abs := resolveURL(finalURL, imp)
