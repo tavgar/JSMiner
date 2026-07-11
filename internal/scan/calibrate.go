@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/url"
 	"path"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -44,18 +46,35 @@ type autoCalibrator struct {
 	// have already been probed so each is fingerprinted at most once per crawl.
 	methodWild map[string]map[string]struct{}
 	methodDone map[string]struct{}
+
+	// structMax and structCounts implement templated-duplicate suppression on the
+	// body itself. Exact-body and coarse (status|words|lines) signatures collapse
+	// only identical or same-shape pages; templated pages that differ in data —
+	// /product/1 vs /product/2, successive listing or calendar pages — share a
+	// layout but not a body, so neither catches them. A structural signature (see
+	// structuralSig) folds those into one class, and structCounts caps how many
+	// representatives of each class are accepted. A structMax of zero disables the
+	// layer, leaving the exact-body dedup untouched.
+	structMax    int
+	structCounts map[string]int
 }
 
 func newAutoCalibrator() *autoCalibrator {
 	return &autoCalibrator{
-		wildcard:   make(map[string]struct{}),
-		levelWild:  make(map[string]map[string]struct{}),
-		levelDone:  make(map[string]struct{}),
-		seenBodies: make(map[uint64]struct{}),
-		methodWild: make(map[string]map[string]struct{}),
-		methodDone: make(map[string]struct{}),
+		wildcard:     make(map[string]struct{}),
+		levelWild:    make(map[string]map[string]struct{}),
+		levelDone:    make(map[string]struct{}),
+		seenBodies:   make(map[uint64]struct{}),
+		methodWild:   make(map[string]map[string]struct{}),
+		methodDone:   make(map[string]struct{}),
+		structCounts: make(map[string]int),
 	}
 }
+
+// enableStructuralDedup turns on templated-duplicate suppression, keeping at
+// most max representatives of each structural page class. A non-positive max
+// leaves the feature off.
+func (c *autoCalibrator) enableStructuralDedup(max int) { c.structMax = max }
 
 // setBase records the scheme://host origin used to build probe URLs. It lets the
 // per-method calibration run even when whole-page auto-calibration (calibrate)
@@ -119,6 +138,7 @@ func (c *autoCalibrator) skipPage(pageURL string, status int, body []byte) bool 
 	if !c.primed {
 		c.primed = true
 		c.seenBodies[hashBody(body)] = struct{}{}
+		c.countStructural(pageURL, body)
 		return false
 	}
 	sig := pageSig(status, body)
@@ -136,7 +156,47 @@ func (c *autoCalibrator) skipPage(pageURL string, status int, body []byte) bool 
 	if _, ok := c.seenBodies[h]; ok {
 		return true
 	}
+	// Templated-duplicate suppression: a page that is structurally identical to
+	// enough already-scanned pages — same layout, different data — is dropped even
+	// though its bytes are new. This is the check that exact-body and coarse
+	// signatures miss.
+	if c.structMax > 0 && c.structuralClassFull(pageURL, body) {
+		return true
+	}
 	c.seenBodies[h] = struct{}{}
+	return false
+}
+
+// structuralKey identifies a page's structural class: its host paired with the
+// structural signature of its body. The host is included so that two hosts which
+// happen to share a template are never collapsed into one class.
+func (c *autoCalibrator) structuralKey(pageURL string, body []byte) string {
+	host := ""
+	if u, err := url.Parse(pageURL); err == nil {
+		host = u.Host
+	}
+	return host + "\x00" + structuralSig(body)
+}
+
+// countStructural records one representative of a page's structural class,
+// without capping. It is used to enrol the always-accepted seed page so its
+// class starts from one.
+func (c *autoCalibrator) countStructural(pageURL string, body []byte) {
+	if c.structMax <= 0 {
+		return
+	}
+	c.structCounts[c.structuralKey(pageURL, body)]++
+}
+
+// structuralClassFull reports whether the page's structural class has already
+// reached its representative cap. When it has, the page is a templated duplicate
+// and is left uncounted; otherwise it is recorded as a fresh representative.
+func (c *autoCalibrator) structuralClassFull(pageURL string, body []byte) bool {
+	key := c.structuralKey(pageURL, body)
+	if c.structCounts[key] >= c.structMax {
+		return true
+	}
+	c.structCounts[key]++
 	return false
 }
 
@@ -290,6 +350,57 @@ func pageSig(status int, body []byte) string {
 		}
 	}
 	return strconv.Itoa(status) + "|" + strconv.Itoa(words) + "|" + strconv.Itoa(lines)
+}
+
+// htmlTagRe matches the opening of an HTML tag, capturing its name.
+var htmlTagRe = regexp.MustCompile(`(?i)<([a-z][a-z0-9]*)`)
+
+// structuralSig fingerprints the layout of a page independently of its data, so
+// that templated pages which share a structure but differ in content — product
+// pages, listing pages, calendar/faceted views — collapse to one signature.
+//
+// It reduces the body to the multiset of its HTML tag names, then buckets each
+// tag's count by order of magnitude (see countBucket). Dropping text and
+// attribute values makes /product/1 and /product/2 identical; bucketing the
+// counts makes a listing of 18 rows and one of 22 rows identical, so pagination
+// that changes only how many items appear does not split the class. A body with
+// no markup (e.g. a JSON API response) falls back to a bucketed length so such
+// responses still cluster by size rather than every one looking unique.
+func structuralSig(body []byte) string {
+	counts := make(map[string]int)
+	for _, m := range htmlTagRe.FindAllSubmatch(body, -1) {
+		counts[strings.ToLower(string(m[1]))]++
+	}
+	if len(counts) == 0 {
+		return "len:" + strconv.Itoa(countBucket(len(body)))
+	}
+	tags := make([]string, 0, len(counts))
+	for t := range counts {
+		tags = append(tags, t)
+	}
+	sort.Strings(tags)
+	var b strings.Builder
+	for i, t := range tags {
+		if i > 0 {
+			b.WriteByte(';')
+		}
+		b.WriteString(t)
+		b.WriteByte(':')
+		b.WriteString(strconv.Itoa(countBucket(counts[t])))
+	}
+	return b.String()
+}
+
+// countBucket maps n to its order-of-magnitude bucket (floor(log2 n)+1), so
+// nearby counts share a bucket and small differences in how many repeated
+// elements a template renders do not change the signature.
+func countBucket(n int) int {
+	b := 0
+	for n > 0 {
+		b++
+		n >>= 1
+	}
+	return b
 }
 
 // hashBody returns a fast non-cryptographic hash of body for exact-duplicate

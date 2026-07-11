@@ -71,6 +71,12 @@ Flags:
 - `-no-methods` disable multi-method probing and gathered-URL reporting.
 - `-no-param-replay` disable replaying discovered parameters across every
   discovered directory level.
+- `-no-template-dedup` disable collapsing templated duplicate pages — pages that
+  share a layout and differ only in data (`/product/1` vs `/product/2`,
+  paginated listings, calendar/faceted URLs). See
+  [Template deduplication](#template-deduplication) below.
+- `-template-sample-max` how many representative pages to crawl per templated
+  class when template dedup is on (default `3`).
 - `-no-source-maps` disable recovering original source from JavaScript source
   maps. By default, when a scanned bundle advertises a source map (via a
   `//# sourceMappingURL=` comment or a `SourceMap` / `X-SourceMap` response
@@ -148,6 +154,37 @@ the same `/api/` level can answer unknown `GET`s with a `404` shell and unknown
 `POST`s with a `405` shell, and each is learned separately. This per-method error
 logic is what decides which verbs count as "working" for the Gathered URLs
 segment below.
+
+### Template deduplication
+
+Many sites expose the same page template over an unbounded key space —
+`/product/1`, `/product/2`, …; `?page=1`, `?page=2`, …; calendar and faceted
+URLs that differ only in a date or filter. These pages are structurally
+identical and differ only in their data, so crawling every instance burns the
+page budget without finding anything new. Exact-body and coarse (status /
+word-count / line-count) signatures do not catch them, because each instance has
+a genuinely different body.
+
+Template deduplication (on by default) recognises these as one class and keeps
+only a representative few — `-template-sample-max`, default `3` — so the budget
+is spent on genuinely distinct pages:
+
+```
+jsminer -crawl https://example.com/            # dedups templates automatically
+jsminer -crawl -template-sample-max 5 https://example.com/
+jsminer -crawl -no-template-dedup https://example.com/   # visit every instance
+```
+
+It works on two levels. Discovered URLs are grouped by a normalised **URL
+template** — numeric ids, UUIDs, dates and hashes in the path are generalised,
+and query strings are reduced to their parameter names — *before* they are
+fetched, so suppressed instances cost neither a request nor a page-budget slot.
+Fetched pages are then grouped by a **structural body signature** (the page's
+HTML tag skeleton, with repeat counts bucketed so a listing of 18 rows and one
+of 22 match), catching templated pages whose URLs give no hint they are related,
+such as slug-keyed pages. A few representatives of each class are still visited,
+so an instance whose data — and therefore its secrets — differs from its
+siblings is not missed outright.
 
 ### Gathered URLs
 
