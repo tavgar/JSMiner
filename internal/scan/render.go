@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -16,6 +17,24 @@ import (
 type HTTPRequest struct {
 	URL  string
 	Body string
+}
+
+// newRenderContext creates the headless-Chrome context shared by every render
+// helper, with an error logger that drops chromedp's benign "unhandled node
+// event" lines. chromedp mirrors the page DOM from CDP mutation events and logs
+// an error for any event type it has no case for — notably
+// dom.EventTopLayerElementsUpdated, fired whenever a <dialog>, popover or
+// fullscreen element enters or leaves the top layer. Those events carry no
+// payload and do not affect the rendered HTML we scan, so logging them only
+// floods the output on modern pages; every other error is reported exactly as
+// chromedp's default logger would.
+func newRenderContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return chromedp.NewContext(parent, chromedp.WithErrorf(func(format string, args ...any) {
+		if strings.Contains(format, "unhandled node event") {
+			return
+		}
+		log.Printf("ERROR: "+format, args...)
+	}))
 }
 
 // renderExecOptions builds the headless-Chrome allocator options shared by every
@@ -67,7 +86,7 @@ func RenderURL(urlStr string) ([]byte, []string, error) {
 	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), renderExecOptions()...)
 	defer cancel()
 
-	ctx, cancelCtx := chromedp.NewContext(allocCtx)
+	ctx, cancelCtx := newRenderContext(allocCtx)
 	defer cancelCtx()
 
 	ctx, cancelTimeout := context.WithTimeout(ctx, RenderTimeout)
@@ -138,7 +157,7 @@ func renderStates(urlStr string, explore bool) ([][]byte, []string, []HTTPReques
 	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), renderExecOptions()...)
 	defer cancel()
 
-	ctx, cancelCtx := chromedp.NewContext(allocCtx)
+	ctx, cancelCtx := newRenderContext(allocCtx)
 	defer cancelCtx()
 
 	timeout := RenderTimeout
