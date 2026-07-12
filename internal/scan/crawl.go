@@ -316,11 +316,17 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 
 // crawlTargetsFromMatches derives the next set of crawlable page URLs from the
 // matches found on pageURL. Endpoint, POST and `path` values are resolved
-// against the page URL, filtered to http(s), optionally constrained to the seed
-// scope and stripped of obvious binary assets that would waste a fetch. `path`
-// matches are included so that genuine paths surfaced by the power rule (not
-// just JS endpoints) are followed too; they have already passed validPathMatch,
-// and non-web values such as Windows paths fall out at the scheme check below.
+// against the origin they were found in — the match's own source URL when that
+// is an absolute http(s) location, otherwise the page URL — then filtered to
+// http(s), optionally constrained to the seed scope and stripped of obvious
+// binary assets that would waste a fetch. Resolving against the source matters
+// for relative values lifted from a cross-origin bundle (e.g. `/settings.json`
+// in a third-party consent script): they belong to that bundle's host, so they
+// resolve off-scope and are dropped rather than being misattributed to the seed
+// host as bogus 404 targets. `path` matches are included so that genuine paths
+// surfaced by the power rule (not just JS endpoints) are followed too; they have
+// already passed validPathMatch, and non-web values such as Windows paths fall
+// out at the scheme check below.
 func crawlTargetsFromMatches(ms []Match, pageURL, baseHost string, opts CrawlOptions) []string {
 	seen := make(map[string]struct{})
 	var out []string
@@ -336,7 +342,7 @@ func crawlTargetsFromMatches(ms []Match, pageURL, baseHost string, opts CrawlOpt
 		if raw == "" {
 			continue
 		}
-		abs := resolveURL(pageURL, raw)
+		abs := resolveURL(resolveBase(m.Source, pageURL), raw)
 		u, err := url.Parse(abs)
 		if err != nil {
 			continue
@@ -358,6 +364,18 @@ func crawlTargetsFromMatches(ms []Match, pageURL, baseHost string, opts CrawlOpt
 		out = append(out, n)
 	}
 	return out
+}
+
+// resolveBase picks the URL that a match's relative value should be resolved
+// against. A value harvested from an external script belongs to that script's
+// origin, not the page that referenced it, so when source is an absolute http(s)
+// URL it wins. Inline scripts and other non-URL sources (e.g. "inline.js") have
+// no origin of their own and fall back to the page URL, whose origin they share.
+func resolveBase(source, pageURL string) string {
+	if u, err := url.Parse(source); err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != "" {
+		return source
+	}
+	return pageURL
 }
 
 // normalizeCrawlURL canonicalises a URL for crawl bookkeeping by dropping the

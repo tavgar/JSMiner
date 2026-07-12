@@ -1,6 +1,9 @@
 package scan
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestCredentialValueFilter(t *testing.T) {
 	// Real, secret-looking values on the RHS should pass.
@@ -100,6 +103,36 @@ func TestPathFilter(t *testing.T) {
 	for _, s := range drop {
 		if validPathMatch(s) {
 			t.Errorf("expected drop path %q", s)
+		}
+	}
+}
+
+// TestPathRuleRejectsRegexLiterals verifies the context filter drops `/word`
+// hits that are actually the head of a JS regex literal (the metacharacter that
+// continues the pattern sits just past the match), while genuine paths in the
+// same buffer survive. These are exactly the /HTML, /checked, /queueHooks
+// findings — and bogus 404 crawl targets — that minified jQuery produced.
+func TestPathRuleRejectsRegexLiterals(t *testing.T) {
+	r := newRegexRule("path", powerPatterns["path"], "info")
+	r.Filter = validPathMatch
+	r.ContextFilter = pathNotRegexLiteral
+
+	// Regex literals as they appear in minified bundles; none is a route.
+	regexes := `var rchecked = /checked\s*/, fix = /HTML$/, run = /queueHooks$/, alt = /foo|bar/, grp = /seg(x)/;`
+	if hits := r.Find([]byte(regexes)); len(hits) != 0 {
+		t.Errorf("regex literals leaked as paths: %+v", hits)
+	}
+
+	// Real paths in the same shapes (followed by whitespace, quote, query, or
+	// path syntax) must still be reported.
+	routes := `a( /api/users ) b= /static/logo.png ; c /v1/health? d /.env`
+	got := map[string]bool{}
+	for _, m := range r.Find([]byte(routes)) {
+		got[strings.TrimSpace(m.Value)] = true
+	}
+	for _, want := range []string{"/api/users", "/static/logo.png", "/v1/health", "/.env"} {
+		if !got[want] {
+			t.Errorf("expected real path %q kept, got %v", want, got)
 		}
 	}
 }

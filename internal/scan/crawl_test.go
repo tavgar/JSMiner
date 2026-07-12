@@ -203,6 +203,111 @@ func TestCrawlTargetsFromMatches(t *testing.T) {
 	}
 }
 
+// TestCrawlTargetsResolveAgainstSource verifies that a relative path lifted from
+// a cross-origin script resolves to that script's host — landing off-scope and
+// being dropped — rather than being misattributed to the seed host. A relative
+// value from an inline (non-URL) source still resolves against the page.
+func TestCrawlTargetsResolveAgainstSource(t *testing.T) {
+	page := "https://teenused.telia.ee/"
+	ms := []Match{
+		// Found inside a third-party consent script: /settings.json is Cookiebot's,
+		// not the seed host's, so it must not become teenused.telia.ee/settings.json.
+		{Source: "https://consent.cookiebot.com/uc.js", Pattern: "endpoint_path", Value: "/settings.json"},
+		// A relative path from an inline script shares the page's origin.
+		{Source: "inline.js", Pattern: "endpoint_path", Value: "/real/page"},
+	}
+
+	got := crawlTargetsFromMatches(ms, page, "teenused.telia.ee", CrawlOptions{SameScopeOnly: true})
+
+	if contains(got, "https://teenused.telia.ee/settings.json") {
+		t.Fatalf("cross-origin relative path was misattributed to the seed host: %v", got)
+	}
+	if !contains(got, "https://teenused.telia.ee/real/page") {
+		t.Fatalf("inline-source relative path should resolve against the page: %v", got)
+	}
+}
+
+// TestScanURLCrawlCrossOriginRelativePath verifies the crawl does not misresolve
+// a relative path found inside a cross-origin script against the seed host. The
+// seed (127.0.0.1) loads a third-party script served under a different host
+// (localhost) that references /settings.json; that path belongs to the
+// third-party origin, so it must be scope-filtered out rather than turned into a
+// bogus seed-host target — while a same-origin path (/dashboard) is still
+// followed, proving the change does not over-filter genuine targets.
+func TestScanURLCrawlCrossOriginRelativePath(t *testing.T) {
+	// Third-party origin: its script points at its own /config.js.
+	crossMux := http.NewServeMux()
+	crossMux.HandleFunc("/uc.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript")
+		io.WriteString(w, `fetch('/config.js');`)
+	})
+	tsCross := httptest.NewServer(crossMux)
+	defer tsCross.Close()
+	// Reference the third-party server by a hostname distinct from the seed's so
+	// it is genuinely cross-origin (both bind 127.0.0.1; localhost resolves there).
+	crossHost := strings.Replace(tsCross.URL, "127.0.0.1", "localhost", 1)
+
+	const sameOriginSecret = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI3ZjNhOWM1In0.dQw4w9WgXcQ7kHl2mNpZ8rT"
+	const crossOriginSecret = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJ1c2VyIjoiazlxUDFyVCJ9.aB3kLmZ9qP1rTuVwX2cY7nH"
+
+	seedMux := http.NewServeMux()
+	seedMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, `<html><script src="/app.js"></script><script src="%s/uc.js"></script></html>`, crossHost)
+	})
+	// Same-origin path the crawl SHOULD follow.
+	seedMux.HandleFunc("/app.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript")
+		io.WriteString(w, `fetch('/dashboard.js');`)
+	})
+	seedMux.HandleFunc("/dashboard.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript")
+		fmt.Fprintf(w, `const a='%s';`, sameOriginSecret)
+	})
+	// The seed also happens to expose /config.js. If the cross-origin path were
+	// misattributed to the seed host, the crawl would fetch this and leak the
+	// secret — exactly the false-positive target the fix prevents. It is reachable
+	// only via that misresolution; nothing on the seed links it.
+	seedMux.HandleFunc("/config.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript")
+		fmt.Fprintf(w, `const b='%s';`, crossOriginSecret)
+	})
+	tsSeed := httptest.NewServer(seedMux)
+	defer tsSeed.Close()
+
+	e := NewExtractor(true, false)
+	opts := DefaultCrawlOptions()
+	opts.AutoCalibrate = false
+	// external=true so the cross-origin third-party script is scanned, as it is
+	// against a real site (the seed's uc.js is off the seed host).
+	matches, err := e.ScanURLCrawl(tsSeed.URL, false, true, false, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	valueSeen := func(want string) bool {
+		for _, m := range matches {
+			if strings.Contains(m.Value, want) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Guard: only meaningful if the third-party script was actually reachable and
+	// scanned (localhost resolved to the test server). Otherwise the cross-origin
+	// scenario never ran, so skip rather than pass for the wrong reason.
+	if !valueSeen("/config.js") {
+		t.Skip("third-party script not scanned (localhost unresolved); scenario not exercised")
+	}
+	if !valueSeen(sameOriginSecret) {
+		t.Fatalf("same-origin /dashboard.js secret should be reached via crawl; over-filtered")
+	}
+	if valueSeen(crossOriginSecret) {
+		t.Fatalf("cross-origin /config.js was misresolved to the seed host and crawled")
+	}
+}
+
 // TestScanURLCrawlMaxPages ensures the page budget halts the crawl even when the
 // link graph is effectively unbounded.
 func TestScanURLCrawlMaxPages(t *testing.T) {

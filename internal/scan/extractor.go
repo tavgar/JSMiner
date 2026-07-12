@@ -139,6 +139,13 @@ var powerFilters = map[string]func(string) bool{
 	"path": validPathMatch,
 }
 
+// powerContextFilters attaches a context-aware validation (one that inspects the
+// bytes around a hit) to specific power rules. `path` uses it to reject regex
+// literals whose trailing metacharacter sits just past the match.
+var powerContextFilters = map[string]func(data []byte, start, end int) bool{
+	"path": pathNotRegexLiteral,
+}
+
 // NewExtractor creates an Extractor
 func NewExtractor(safe bool, longSecret bool) *Extractor {
 	e := &Extractor{safeMode: safe, jsRules: make(map[string]bool), recoverSourceMaps: true}
@@ -162,6 +169,9 @@ func NewExtractor(safe bool, longSecret bool) *Extractor {
 		r := newRegexRule(name, pat, "info")
 		if f, ok := powerFilters[name]; ok {
 			r.Filter = f
+		}
+		if cf, ok := powerContextFilters[name]; ok {
+			r.ContextFilter = cf
 		}
 		e.rules = append(e.rules, r)
 	}

@@ -25,6 +25,13 @@ type RegexRule struct {
 	// `token:e`, `password:!0`) without weakening the patterns themselves.
 	Filter func(string) bool
 
+	// ContextFilter, when non-nil, receives the whole input and the match bounds
+	// so it can inspect the bytes surrounding a hit that the string-only Filter
+	// cannot see — e.g. the character immediately after a `path` match, which
+	// tells a real route from the head of a JS regex literal (`= /checked\s*…/`).
+	// Returning false drops the match.
+	ContextFilter func(data []byte, start, end int) bool
+
 	// prefilters holds literal substrings that must all be present in the input
 	// for RE to have any chance of matching. They are cheap byte scans used to
 	// skip the far more expensive regex pass on inputs that obviously can't
@@ -41,6 +48,21 @@ func (r RegexRule) Find(data []byte) []Match {
 		}
 	}
 	var matches []Match
+	// A context filter needs the match offsets, so take the index-returning path
+	// only when one is set; every other rule keeps the cheaper FindAll scan.
+	if r.ContextFilter != nil {
+		for _, loc := range r.RE.FindAllIndex(data, -1) {
+			s := string(data[loc[0]:loc[1]])
+			if r.Filter != nil && !r.Filter(s) {
+				continue
+			}
+			if !r.ContextFilter(data, loc[0], loc[1]) {
+				continue
+			}
+			matches = append(matches, Match{Pattern: r.Name, Value: s, Severity: r.Severity})
+		}
+		return matches
+	}
 	for _, m := range r.RE.FindAll(data, -1) {
 		s := string(m)
 		if r.Filter != nil && !r.Filter(s) {

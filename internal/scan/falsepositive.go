@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"bytes"
 	"net"
 	"regexp"
 	"strings"
@@ -278,4 +279,40 @@ func validPathMatch(s string) bool {
 		}
 	}
 	return false
+}
+
+// regexLiteralFollowers are characters that, when they sit immediately after a
+// `/word` hit from the `path` rule, reveal it as the head of a JavaScript regex
+// literal rather than a request path. The rule captures only up to the first
+// character outside [A-Za-z0-9._-], so the metacharacter that continues the
+// regex — `\s`, an anchor, a quantifier, a group or a class — is the very next
+// byte (`= /checked\…`, `= /HTML$/`, `= /queueHooks$/`). None of these can
+// legally follow a path segment in a URL, so dropping them costs no real route.
+// Deliberately absent: `?` (query), `#` (fragment), `.` `/` `-` `_` (path
+// syntax) and `)` `}` (a call/template close around a genuine path).
+var regexLiteralFollowers = [256]bool{
+	'\\': true, '|': true, '$': true, '^': true, '*': true, '+': true,
+	'(': true, '[': true,
+}
+
+// pathNotRegexLiteral reports whether the `path` hit at data[start:end] is a
+// real path rather than the beginning of a JS regex literal. Only Unix-style
+// `/…` hits can be confused with a regex; Windows drive paths (`C:\…`) start
+// with a letter and are always kept. Minified bundles are dense with regex
+// literals, so this removes a large class of `/HTML`, `/checked`, `/queueHooks`
+// noise (and the bogus 404 crawl targets they spawn) without weakening the rule.
+func pathNotRegexLiteral(data []byte, start, end int) bool {
+	if start >= end || start >= len(data) {
+		return true
+	}
+	// The match may carry a leading whitespace byte from the rule's (?:^|\s)
+	// anchor; the path itself begins at the first '/'. A hit without one is a
+	// Windows path and is left untouched.
+	if bytes.IndexByte(data[start:end], '/') < 0 {
+		return true
+	}
+	if end >= len(data) {
+		return true
+	}
+	return !regexLiteralFollowers[data[end]]
 }
