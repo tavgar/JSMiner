@@ -20,17 +20,30 @@ type HTTPRequest struct {
 }
 
 // newRenderContext creates the headless-Chrome context shared by every render
-// helper, with an error logger that drops chromedp's benign "unhandled node
-// event" lines. chromedp mirrors the page DOM from CDP mutation events and logs
-// an error for any event type it has no case for — notably
-// dom.EventTopLayerElementsUpdated, fired whenever a <dialog>, popover or
-// fullscreen element enters or leaves the top layer. Those events carry no
-// payload and do not affect the rendered HTML we scan, so logging them only
-// floods the output on modern pages; every other error is reported exactly as
-// chromedp's default logger would.
+// helper, with an error logger that drops two classes of benign chromedp noise:
+//
+//   - "unhandled node event" lines. chromedp mirrors the page DOM from CDP
+//     mutation events and logs an error for any event type it has no case for —
+//     notably dom.EventTopLayerElementsUpdated, fired whenever a <dialog>,
+//     popover or fullscreen element enters or leaves the top layer. Those events
+//     carry no payload and do not affect the rendered HTML we scan.
+//
+//   - "unknown IPAddressSpace value" unmarshal failures. Newer Chrome reports
+//     CDP IPAddressSpace enum values (e.g. "Loopback", added when the Private
+//     Network Access spec split it out of "Local") that our pinned cdproto
+//     bindings don't recognise, so the requestWillBeSentExtraInfo /
+//     responseReceivedExtraInfo events fail to unmarshal. These are ancillary
+//     security-metadata events; the response bodies and navigation we scan are
+//     unaffected, and the noise appears whenever a loopback/localhost target is
+//     scanned.
+//
+// Every other error is reported exactly as chromedp's default logger would.
 func newRenderContext(parent context.Context) (context.Context, context.CancelFunc) {
 	return chromedp.NewContext(parent, chromedp.WithErrorf(func(format string, args ...any) {
 		if strings.Contains(format, "unhandled node event") {
+			return
+		}
+		if strings.Contains(fmt.Sprintf(format, args...), "unknown IPAddressSpace value") {
 			return
 		}
 		log.Printf("ERROR: "+format, args...)
