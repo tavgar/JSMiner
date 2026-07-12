@@ -195,53 +195,31 @@ func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited map
 		if e.calibrator != nil && e.calibrator.skipPage(finalURL, resp.StatusCode, data) {
 			return matches, nil
 		}
-		var dynamic []string
 		if render {
-			if rhtml, scripts, posts, err := RenderURLWithRequests(finalURL); err == nil {
-				data = rhtml
-				dynamic = scripts
+			// Explore application state, not just the initial DOM: scan the seed
+			// render and every state exploration reaches through interaction, so a
+			// single-page app's event-handler-gated surface is covered too.
+			if states, scripts, posts, err := RenderURLWithStates(finalURL); err == nil && len(states) > 0 {
 				for _, p := range posts {
 					matches = append(matches, Match{Source: finalURL, Pattern: "post_url", Value: p.URL, Params: p.Body, Severity: "info"})
 				}
-			} else if rhtml, scripts, err := RenderURL(finalURL); err == nil {
-				data = rhtml
-				dynamic = scripts
-			}
-		}
-		if !e.safeMode {
-			ms, err := e.ScanReader(finalURL, bytes.NewReader(data))
-			if err != nil {
-				return nil, err
-			}
-			matches = append(matches, ms...)
-		}
-		sources := extractScriptSrcs(data)
-		sources = append(sources, dynamic...)
-		inline := extractInlineScripts(data)
-		for _, src := range inline {
-			ms, err := e.ScanReaderWithEndpoints("inline.js", bytes.NewReader([]byte(src)))
-			if err == nil {
-				if endpoints {
-					ms = FilterEndpointMatches(ms)
+				for i, st := range states {
+					// The captured scripts are the union across states, so they only
+					// need scanning once; the visited map dedups regardless.
+					var dyn []string
+					if i == 0 {
+						dyn = scripts
+					}
+					matches = append(matches, e.scanHTMLState(finalURL, baseHost, st, dyn, endpoints, visited, external, render)...)
 				}
-				matches = append(matches, ms...)
+				return matches, nil
+			}
+			// Fall back to a plain render if state exploration failed entirely.
+			if rhtml, scripts, err := RenderURL(finalURL); err == nil {
+				return append(matches, e.scanHTMLState(finalURL, baseHost, rhtml, scripts, endpoints, visited, external, render)...), nil
 			}
 		}
-		for _, src := range sources {
-			abs := resolveURL(finalURL, src)
-			u, err := url.Parse(abs)
-			if err != nil {
-				continue
-			}
-			if external || sameScope(baseHost, u.Hostname()) {
-				ms, err := e.scanURL(u.String(), baseHost, endpoints, visited, external, render)
-				if err != nil {
-					continue
-				}
-				matches = append(matches, ms...)
-			}
-		}
-		return matches, nil
+		return append(matches, e.scanHTMLState(finalURL, baseHost, data, nil, endpoints, visited, external, render)...), nil
 	}
 
 	// treat as JavaScript or other
@@ -312,36 +290,27 @@ func (e *Extractor) scanURLPosts(urlStr, baseHost string, visited map[string]str
 		if e.calibrator != nil && e.calibrator.skipPage(finalURL, resp.StatusCode, data) {
 			return matches, nil
 		}
-		var dynamic []string
 		if render {
-			if rhtml, scripts, posts, err := RenderURLWithRequests(finalURL); err == nil {
-				data = rhtml
-				dynamic = scripts
+			// Explore application state so POST endpoints fired only after a
+			// client-side navigation or form submission are captured too.
+			if states, scripts, posts, err := RenderURLWithStates(finalURL); err == nil && len(states) > 0 {
 				for _, p := range posts {
 					matches = append(matches, Match{Source: finalURL, Pattern: "post_url", Value: p.URL, Params: p.Body, Severity: "info"})
 				}
-			} else if rhtml, scripts, err := RenderURL(finalURL); err == nil {
-				data = rhtml
-				dynamic = scripts
-			}
-		}
-		sources := extractScriptSrcs(data)
-		sources = append(sources, dynamic...)
-		for _, src := range sources {
-			abs := resolveURL(finalURL, src)
-			u, err := url.Parse(abs)
-			if err != nil {
-				continue
-			}
-			if external || sameScope(baseHost, u.Hostname()) {
-				ms, err := e.scanURLPosts(u.String(), baseHost, visited, external, render)
-				if err != nil {
-					continue
+				for i, st := range states {
+					var dyn []string
+					if i == 0 {
+						dyn = scripts
+					}
+					matches = append(matches, e.scanHTMLStatePosts(finalURL, baseHost, st, dyn, visited, external, render)...)
 				}
-				matches = append(matches, ms...)
+				return matches, nil
+			}
+			if rhtml, scripts, err := RenderURL(finalURL); err == nil {
+				return append(matches, e.scanHTMLStatePosts(finalURL, baseHost, rhtml, scripts, visited, external, render)...), nil
 			}
 		}
-		return matches, nil
+		return append(matches, e.scanHTMLStatePosts(finalURL, baseHost, data, nil, visited, external, render)...), nil
 	}
 
 	reader := bytes.NewReader(data)
@@ -375,4 +344,72 @@ func (e *Extractor) scanURLPosts(urlStr, baseHost string, visited map[string]str
 		}
 	}
 	return matches, nil
+}
+
+// scanHTMLState scans one HTML document reached during a render — the initial
+// page or a state exposed only after interaction. It runs the configured rules
+// over the document body (unless in safe mode), scans its inline scripts, and
+// follows its referenced and dynamically loaded scripts through scanURL. dynamic
+// carries script URLs captured during rendering that are not in the static
+// markup; it is supplied only for the first state since the render returns the
+// union across all states and the visited map dedups the rest.
+func (e *Extractor) scanHTMLState(finalURL, baseHost string, data []byte, dynamic []string, endpoints bool, visited map[string]struct{}, external, render bool) []Match {
+	var matches []Match
+	if !e.safeMode {
+		if ms, err := e.ScanReader(finalURL, bytes.NewReader(data)); err == nil {
+			matches = append(matches, ms...)
+		}
+	}
+	for _, src := range extractInlineScripts(data) {
+		ms, err := e.ScanReaderWithEndpoints("inline.js", bytes.NewReader([]byte(src)))
+		if err == nil {
+			if endpoints {
+				ms = FilterEndpointMatches(ms)
+			}
+			matches = append(matches, ms...)
+		}
+	}
+	sources := extractScriptSrcs(data)
+	sources = append(sources, dynamic...)
+	for _, src := range sources {
+		abs := resolveURL(finalURL, src)
+		u, err := url.Parse(abs)
+		if err != nil {
+			continue
+		}
+		if external || sameScope(baseHost, u.Hostname()) {
+			ms, err := e.scanURL(u.String(), baseHost, endpoints, visited, external, render)
+			if err != nil {
+				continue
+			}
+			matches = append(matches, ms...)
+		}
+	}
+	return matches
+}
+
+// scanHTMLStatePosts scans one HTML document reached during a render for POST
+// endpoints, following its referenced and dynamically loaded scripts through
+// scanURLPosts. Like scanHTMLState, dynamic is supplied only for the first
+// state. It mirrors the POST-only behaviour of scanURLPosts: inline scripts are
+// not scanned here (POST endpoints come from the linked script sources).
+func (e *Extractor) scanHTMLStatePosts(finalURL, baseHost string, data []byte, dynamic []string, visited map[string]struct{}, external, render bool) []Match {
+	var matches []Match
+	sources := extractScriptSrcs(data)
+	sources = append(sources, dynamic...)
+	for _, src := range sources {
+		abs := resolveURL(finalURL, src)
+		u, err := url.Parse(abs)
+		if err != nil {
+			continue
+		}
+		if external || sameScope(baseHost, u.Hostname()) {
+			ms, err := e.scanURLPosts(u.String(), baseHost, visited, external, render)
+			if err != nil {
+				continue
+			}
+			matches = append(matches, ms...)
+		}
+	}
+	return matches
 }

@@ -61,6 +61,7 @@ func main() {
 	showSourceFlag := flag.Bool("show-source", false, "show source of each record (auto-enabled for multiple targets)")
 	snippet := flag.Bool("snippet", false, "show a JS-prettified, syntax-highlighted code snippet around each finding")
 	timeout := flag.Int("timeout", 8, "wait time in seconds for dynamic content to load when rendering pages (default: 8)")
+	exploreStates := flag.Int("explore-states", 12, "when rendering, max additional application states to reach through interaction — client-side navigation and filled/submitted forms (0 = render each page once)")
 	var headerFlags headerSlice
 	flag.Var(&headerFlags, "header", "HTTP header in 'Key: Value' format. May be repeated")
 	flag.Parse()
@@ -284,6 +285,7 @@ func main() {
 	if *timeout > 0 {
 		scan.SetRenderSleepDuration(*timeout)
 	}
+	scan.SetMaxExploreStates(*exploreStates)
 	scan.SetSkipTLSVerification(*insecure)
 
 	extractor := scan.NewExtractor(*safe, *longSecret)
