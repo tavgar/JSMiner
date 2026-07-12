@@ -101,6 +101,13 @@ Flags:
   value is emphasized (color is used only when writing to a terminal). In `json`
   output each record gains a beautified `snippet` field.
 - `-quiet` suppress startup banner.
+- `-v` / `-vv` / `-vvv` verbose logging to stderr, cumulative — each level adds to
+  the ones below it (see [Verbose output](#verbose-output)). `-v` prints the crawl
+  narrative (matches per page, in-scope targets discovered, calibration and
+  template-dedup skips); `-vv` also logs every HTTP request with its method,
+  status and each page render; `-vvv` adds a per-item trace (target enqueue/skip
+  decisions, method probes, parameter replays, permutations, followed imports).
+  Diagnostics go to stderr so they never mix into the results on stdout.
 - `-proxy` run as HTTP/HTTPS proxy on the specified address (e.g. `:8080`).
 - `-targets` file with additional URLs/paths to scan, one per line.
 - `-plugins` comma-separated list of Go plugins providing custom rules.
@@ -130,6 +137,27 @@ endpoints — including non-`GET` methods (`POST`, `PUT`, `PATCH`, `DELETE`,
 `OPTIONS`) for method probing and parameter replay — so use it only against
 targets you are authorized to test. Pass `-no-methods` to restrict a crawl to
 `GET` requests only.
+
+### Verbose output
+
+By default a crawl prints one progress line per page to stderr (unless `-quiet`).
+To see exactly what the crawler is doing, raise the verbosity with `-v`, `-vv` or
+`-vvv`. The levels are cumulative — each includes everything below it — and all
+diagnostics go to stderr, so the results on stdout stay clean and pipeable.
+
+| Level  | Prefix  | What it adds                                                                                       |
+| ------ | ------- | -------------------------------------------------------------------------------------------------- |
+| `-v`   | `[v]`   | Crawl narrative: matches found per page, in-scope targets discovered, calibration and template-dedup skips, soft-404/duplicate skips. |
+| `-vv`  | `[vv]`  | Network and render activity: every HTTP request with its method and status (fetches, calibration probes, method probing, replays) and every page render (scripts and application states surfaced). |
+| `-vvv` | `[vvv]` | Per-item trace: individual target enqueue/skip decisions (with reason), method-probe results, parameter replays, cross-level permutations, and followed JS imports.                                 |
+
+```
+jsminer -crawl -vv https://example.com/           # follow the requests as they go out
+jsminer -crawl -vvv https://example.com/ 2>trace.log   # capture a full trace, keep JSON on stdout
+```
+
+Because the log is on stderr, `2>trace.log` (or `2>/dev/null`) separates it from
+the findings on stdout.
 
 ### Auto-calibration
 

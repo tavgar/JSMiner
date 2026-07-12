@@ -189,9 +189,11 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 		if opts.TemplateDedup {
 			cal.enableStructuralDedup(templateSampleMax(opts))
 		}
+		vlog(1, "[crawl] auto-calibrating against %s", seed.String())
 		n := cal.calibrate(seed.String())
 		e.SetCalibrator(cal)
 		defer e.SetCalibrator(nil)
+		vlog(1, "[crawl] calibration learned %d wildcard signature(s)", n)
 		if opts.OnCalibrated != nil {
 			opts.OnCalibrated(n)
 		}
@@ -232,17 +234,21 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 		if opts.Progress != nil {
 			opts.Progress(t.url, t.depth, pages)
 		}
+		vlog(1, "[crawl] (%d) depth %d fetching %s", pages, t.depth, t.url)
 
 		ms, err := scanPage(t.url, baseHost, visited)
 		if err != nil {
+			vlog(1, "[crawl] (%d) depth %d %s -> error: %v", pages, t.depth, t.url, err)
 			continue
 		}
 		all = append(all, ms...)
+		vlog(1, "[crawl] (%d) %s -> %d match(es)", pages, t.url, len(ms))
 
 		// Report which request methods this page accepts, judged against the
 		// per-method error logic learned for its level.
 		if opts.ProbeMethods {
 			if worked := probeURLMethods(cal, t.url, methods, ""); worked != nil {
+				vlog(3, "[crawl] probe %s -> methods %s", t.url, strings.Join(worked, ","))
 				if gm, ok := gatheredMatch(t.url, worked, ""); ok {
 					all = append(all, gm)
 				}
@@ -255,6 +261,7 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 			continue
 		}
 		targets := crawlTargetsFromMatches(ms, t.url, baseHost, opts)
+		vlog(1, "[crawl] %s -> %d in-scope target(s) discovered", t.url, len(targets))
 
 		// Replay parameters discovered on this page against every level seen so
 		// far, and this page's levels against every parameter seen so far; keep
@@ -268,19 +275,23 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 			for _, rt := range replay.observe(paramsFromMatches(ms), levelURLs) {
 				worked := probeURLMethods(cal, rt.url, methods, rt.params)
 				if gm, ok := gatheredMatch(rt.url, worked, rt.params); ok {
+					vlog(3, "[crawl] param-replay %s params=%s -> methods %s", rt.url, rt.params, strings.Join(worked, ","))
 					all = append(all, gm)
 				}
 			}
 		}
 		for _, next := range targets {
 			if _, ok := enqueued[next]; ok {
+				vlog(3, "[crawl] skip (already queued) %s", next)
 				continue
 			}
 			if !classer.admit(next) {
+				vlog(3, "[crawl] skip (template dedup) %s", next)
 				continue
 			}
 			enqueued[next] = struct{}{}
 			queue = append(queue, crawlTarget{url: next, depth: t.depth + 1})
+			vlog(3, "[crawl] enqueue depth %d %s", t.depth+1, next)
 		}
 		// Cross-level permutation reuses every path discovered so far under every
 		// level seen so far, enqueuing the fresh combinations at the next depth.
@@ -290,10 +301,12 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 					continue
 				}
 				if !classer.admit(next) {
+					vlog(3, "[crawl] skip permuted (template dedup) %s", next)
 					continue
 				}
 				enqueued[next] = struct{}{}
 				queue = append(queue, crawlTarget{url: next, depth: t.depth + 1})
+				vlog(3, "[crawl] enqueue permuted depth %d %s", t.depth+1, next)
 			}
 		}
 	}

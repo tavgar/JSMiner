@@ -61,7 +61,13 @@ func fetchURLResponseMethod(u, method, body string) (*http.Response, error) {
 	if body != "" && req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", inferContentType(body))
 	}
-	return newHTTPClient().Do(req)
+	resp, err := newHTTPClient().Do(req)
+	if err != nil {
+		vlog(2, "http %s %s -> error: %v", method, u, err)
+		return nil, err
+	}
+	vlog(2, "http %s %s -> %s", method, u, resp.Status)
+	return resp, nil
 }
 
 // inferContentType guesses a request Content-Type from a parameter body: JSON
@@ -193,6 +199,7 @@ func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited map
 
 	if isHTMLContent(finalURL, resp.Header.Get("Content-Type")) {
 		if e.calibrator != nil && e.calibrator.skipPage(finalURL, resp.StatusCode, data) {
+			vlog(1, "[crawl] skip (soft-404/duplicate) %s", finalURL)
 			return matches, nil
 		}
 		if render {
@@ -253,6 +260,7 @@ func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited map
 			continue
 		}
 		if external || sameScope(baseHost, u.Hostname()) {
+			vlog(3, "follow import %s (from %s)", u.String(), finalURL)
 			ms, err := e.scanURL(u.String(), baseHost, endpoints, visited, external, render)
 			if err != nil {
 				continue
@@ -288,6 +296,7 @@ func (e *Extractor) scanURLPosts(urlStr, baseHost string, visited map[string]str
 
 	if isHTMLContent(finalURL, resp.Header.Get("Content-Type")) {
 		if e.calibrator != nil && e.calibrator.skipPage(finalURL, resp.StatusCode, data) {
+			vlog(1, "[crawl] skip (soft-404/duplicate) %s", finalURL)
 			return matches, nil
 		}
 		if render {

@@ -61,6 +61,9 @@ func main() {
 	showSourceFlag := flag.Bool("show-source", false, "show source of each record (auto-enabled for multiple targets)")
 	snippet := flag.Bool("snippet", false, "show a JS-prettified, syntax-highlighted code snippet around each finding")
 	timeout := flag.Int("timeout", 8, "wait time in seconds for dynamic content to load when rendering pages (default: 8)")
+	verbose1 := flag.Bool("v", false, "verbose: crawl narrative — matches per page, targets discovered, calibration/dedup skips")
+	verbose2 := flag.Bool("vv", false, "more verbose: also log every HTTP request/response and page render (implies -v)")
+	verbose3 := flag.Bool("vvv", false, "trace: also log per-target enqueue/skip, method probes, param replays and permutations (implies -vv)")
 	exploreStates := flag.Int("explore-states", 12, "when rendering, max additional application states to reach through interaction — client-side navigation and filled/submitted forms (0 = render each page once)")
 	var headerFlags headerSlice
 	flag.Var(&headerFlags, "header", "HTTP header in 'Key: Value' format. May be repeated")
@@ -115,6 +118,12 @@ func main() {
 			*longSecret = true
 		case "quiet":
 			*quiet = true
+		case "v":
+			*verbose1 = true
+		case "vv":
+			*verbose2 = true
+		case "vvv":
+			*verbose3 = true
 		case "show-source":
 			*showSourceFlag = true
 		case "snippet":
@@ -288,6 +297,20 @@ func main() {
 	scan.SetMaxExploreStates(*exploreStates)
 	scan.SetSkipTLSVerification(*insecure)
 
+	// -v/-vv/-vvv are cumulative: the highest one given wins, and each level
+	// implies the ones below it.
+	verbosity := 0
+	if *verbose1 {
+		verbosity = 1
+	}
+	if *verbose2 {
+		verbosity = 2
+	}
+	if *verbose3 {
+		verbosity = 3
+	}
+	scan.SetVerbosity(verbosity)
+
 	extractor := scan.NewExtractor(*safe, *longSecret)
 	extractor.SetSnippet(*snippet)
 	if *noSourceMaps {
@@ -372,7 +395,10 @@ func main() {
 						opts.RequestMethods = ms
 					}
 				}
-				if !*quiet {
+				// The level-0 progress lines are superseded by the richer -v/-vv/-vvv
+				// output the scan package emits, so only install them when verbose
+				// logging is off (and the banner isn't suppressed).
+				if !*quiet && verbosity == 0 {
 					opts.Progress = func(pageURL string, depth, pageNum int) {
 						fmt.Fprintf(os.Stderr, "[crawl] (%d) depth %d %s\n", pageNum, depth, pageURL)
 					}

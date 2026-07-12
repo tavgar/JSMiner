@@ -114,12 +114,16 @@ func RenderURL(urlStr string) ([]byte, []string, error) {
 		chromedp.Sleep(RenderSleepDuration),
 		chromedp.OuterHTML("html", &html, chromedp.ByQuery),
 	)
+	vlog(2, "render %s (plain)", urlStr)
 	err := chromedp.Run(ctx, actions...)
 	if err != nil {
+		vlog(2, "render %s -> error: %v", urlStr, err)
 		return nil, nil, err
 	}
 
-	return []byte(html), scriptKeys(scriptSet), nil
+	scripts := scriptKeys(scriptSet)
+	vlog(2, "render %s -> %d byte(s), %d script(s)", urlStr, len(html), len(scripts))
+	return []byte(html), scripts, nil
 }
 
 // RenderURLWithRequests loads the page and captures POST requests made during
@@ -199,7 +203,9 @@ func renderStates(urlStr string, explore bool) ([][]byte, []string, []HTTPReques
 		chromedp.Sleep(RenderSleepDuration),
 		chromedp.OuterHTML("html", &baseHTML, chromedp.ByQuery),
 	)
+	vlog(2, "render %s (explore=%t)", urlStr, explore)
 	if err := chromedp.Run(ctx, actions...); err != nil {
+		vlog(2, "render %s -> error: %v", urlStr, err)
 		return nil, nil, nil, err
 	}
 
@@ -208,10 +214,15 @@ func renderStates(urlStr string, explore bool) ([][]byte, []string, []HTTPReques
 	winPosts := readWindowPosts(ctx, nil)
 
 	if explore {
+		before := len(states)
 		states, winPosts = exploreStates(ctx, states, seen, winPosts)
+		vlog(2, "render %s -> explored %d additional state(s)", urlStr, len(states)-before)
 	}
 
-	return states, scriptKeys(scriptSet), mergePosts(ctx, reqMap, winPosts), nil
+	scripts := scriptKeys(scriptSet)
+	posts := mergePosts(ctx, reqMap, winPosts)
+	vlog(2, "render %s -> %d state(s), %d script(s), %d post(s)", urlStr, len(states), len(scripts), len(posts))
+	return states, scripts, posts, nil
 }
 
 // exploreStates drives interaction-based state discovery against an already
