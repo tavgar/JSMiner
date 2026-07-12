@@ -294,37 +294,46 @@ func exploreStates(ctx context.Context, states [][]byte, seen map[string]struct{
 		states = append(states, []byte(html))
 	}
 
-	// Forms first, from the pristine base state: filling and submitting a form
-	// reveals what lives behind a submission handler (search results, filtered
-	// views, wizard steps) and captures the endpoint it posts to.
-	for idx := 0; len(states) <= MaxExploreStates && idx < maxAttempts; idx++ {
-		var forms []exploreForm
-		if err := chromedp.Run(ctx,
-			chromedp.Evaluate(interactionScript, nil),
-			chromedp.Evaluate("window.__jsm.tagForms()", &forms),
-		); err != nil {
-			break
-		}
-		if idx >= len(forms) {
-			break
-		}
-		valsJSON, err := json.Marshal(formValues(forms[idx]))
-		if err != nil {
-			continue
-		}
-		var submitted bool
-		var html string
-		if err := chromedp.Run(ctx,
-			chromedp.Evaluate(fmt.Sprintf("window.__jsm.fillAndSubmit(%d, %s)", idx, string(valsJSON)), &submitted),
-			chromedp.Sleep(ExploreSettleDuration),
-			chromedp.OuterHTML("html", &html, chromedp.ByQuery),
-		); err != nil {
-			continue
-		}
-		if submitted {
-			record(html)
+	// submitForms fills and submits every form in the DOM currently loaded,
+	// recording each resulting state. It reveals what lives behind a submission
+	// handler (search results, filtered views, wizard steps, tokens minted on
+	// login) and captures the endpoint it posts to. Because it runs against
+	// whatever state is loaded now, it is invoked both from the pristine base and
+	// after each client-side navigation — a form reached only by navigating to a
+	// route (e.g. /login) is otherwise never exercised.
+	submitForms := func() {
+		for idx := 0; len(states) <= MaxExploreStates && idx < maxAttempts; idx++ {
+			var forms []exploreForm
+			if err := chromedp.Run(ctx,
+				chromedp.Evaluate(interactionScript, nil),
+				chromedp.Evaluate("window.__jsm.tagForms()", &forms),
+			); err != nil {
+				return
+			}
+			if idx >= len(forms) {
+				return
+			}
+			valsJSON, err := json.Marshal(formValues(forms[idx]))
+			if err != nil {
+				continue
+			}
+			var submitted bool
+			var html string
+			if err := chromedp.Run(ctx,
+				chromedp.Evaluate(fmt.Sprintf("window.__jsm.fillAndSubmit(%d, %s)", idx, string(valsJSON)), &submitted),
+				chromedp.Sleep(ExploreSettleDuration),
+				chromedp.OuterHTML("html", &html, chromedp.ByQuery),
+			); err != nil {
+				continue
+			}
+			if submitted {
+				record(html)
+			}
 		}
 	}
+
+	// Forms first, from the pristine base state.
+	submitForms()
 
 	// Client-side navigation: buttons and in-page/JS links that reveal state
 	// through event handlers rather than a fresh URL (real URL navigations are
@@ -351,6 +360,8 @@ func exploreStates(ctx context.Context, states [][]byte, seen map[string]struct{
 		}
 		if clicked {
 			record(html)
+			// A click may reveal a form (a modal, a revealed panel); submit it.
+			submitForms()
 		}
 	}
 
@@ -407,6 +418,9 @@ func exploreStates(ctx context.Context, states [][]byte, seen map[string]struct{
 			}
 			if clicked {
 				record(html)
+				// Exercise any form this route renders (e.g. a /login form), which
+				// the base-state forms pass could not reach.
+				submitForms()
 			}
 		}
 	}
