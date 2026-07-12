@@ -92,6 +92,16 @@ var jsExts = []string{".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".wasm"}
 var baseJSRules = map[string]bool{
 	"jwt":        true,
 	"google_api": true,
+	// Provider token formats are JS-relevant secrets and run in safe mode too.
+	"github_token":  true,
+	"github_pat":    true,
+	"stripe_key":    true,
+	"slack_token":   true,
+	"gitlab_pat":    true,
+	"npm_token":     true,
+	"sendgrid_key":  true,
+	"google_oauth":  true,
+	"aws_akia":      true,
 }
 
 // default patterns (simplified)
@@ -110,6 +120,21 @@ var defaultPatterns = map[string]string{
 	// long alphanumeric strings that might be secrets. Allow common
 	// prefixes like "key" or "secret" for additional context.
 	"long_secret": `(?:(?i)(?:key|secret|token|api)[_-]?[:=]\s*)?[A-Za-z0-9_-]{32,}`,
+
+	// Provider token formats, matched by their distinctive value rather than the
+	// surrounding keyword. Minifiers mangle the assigning variable name and strip
+	// comments, so keyword-based rules (`github_token = ...`) silently stop firing
+	// on production bundles; these prefix+charset+length signatures still match,
+	// and are specific enough to add negligible false positives.
+	"github_token": `\bgh[pousr]_[A-Za-z0-9]{36}\b`,
+	"github_pat":   `\bgithub_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}\b`,
+	"stripe_key":   `\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{10,99}\b`,
+	"slack_token":  `\bxox[baprs]-[A-Za-z0-9-]{10,}`,
+	"gitlab_pat":   `\bglpat-[A-Za-z0-9_-]{20}\b`,
+	"npm_token":    `\bnpm_[A-Za-z0-9]{36}\b`,
+	"sendgrid_key": `\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b`,
+	"google_oauth": `\bya29\.[A-Za-z0-9_-]{20,}`,
+	"aws_akia":     `\b(?:A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}\b`,
 }
 
 // defaultFilters attaches a post-match validation to specific default rules to

@@ -78,6 +78,63 @@ func TestScanNewPatterns(t *testing.T) {
 	}
 }
 
+// TestProviderTokenPatterns verifies the value-format provider-token detectors
+// fire on their distinctive shapes (as they must on minified bundles where the
+// assigning keyword is gone) and do not fire on near-miss non-secrets. -longsecret
+// is off so matches come from the provider rules, not the generic long_secret.
+func TestProviderTokenPatterns(t *testing.T) {
+	e := NewExtractor(false, false)
+	src := strings.Join([]string{
+		`var a="ghp_abcdefghijklmnopqrstuvwxyz0123456789";`, // github_token, mangled var
+		`b("sk_live_abcdefghij1234567890");`,                // stripe_key
+		`c="xoxb-1234567890-1234567890-abcdefABCDEF";`,      // slack_token
+		`d="glpat-abcdefghij1234567890";`,                   // gitlab_pat
+		`e="npm_abcdefghijklmnopqrstuvwxyz0123456789";`,     // npm_token
+		`f="ya29.aBcDeFgHiJkLmNoPqRsTuVwXyZ012345";`,        // google_oauth
+		`g="ghp_tooShort";`,                                 // NOT github (too short)
+		`h="sk_prod_abcdefghij1234567890";`,                 // NOT stripe (not live/test)
+	}, "\n")
+	matches, err := e.ScanReader("bundle.js", strings.NewReader(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := map[string]bool{}
+	for _, m := range matches {
+		found[m.Pattern] = true
+	}
+	for _, p := range []string{"github_token", "stripe_key", "slack_token", "gitlab_pat", "npm_token", "google_oauth"} {
+		if !found[p] {
+			t.Errorf("expected a %s match", p)
+		}
+	}
+	// Near-miss values must not be reported by any provider rule.
+	for _, m := range matches {
+		if m.Value == "ghp_tooShort" || m.Value == "sk_prod_abcdefghij1234567890" {
+			t.Errorf("unexpected provider match on near-miss value %q (pattern %s)", m.Value, m.Pattern)
+		}
+	}
+}
+
+// TestProviderTokenPatternsSafeMode confirms the provider detectors also run in
+// safe mode (they are registered as JS rules), since minified JS bundles are the
+// primary place these tokens leak.
+func TestProviderTokenPatternsSafeMode(t *testing.T) {
+	e := NewExtractor(true, false)
+	matches, err := e.ScanReader("bundle.js", strings.NewReader(`x="ghp_abcdefghijklmnopqrstuvwxyz0123456789"`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok := false
+	for _, m := range matches {
+		if m.Pattern == "github_token" {
+			ok = true
+		}
+	}
+	if !ok {
+		t.Fatal("expected github_token match in safe mode")
+	}
+}
+
 func TestAllowlistIgnore(t *testing.T) {
 	e := NewExtractor(false, false)
 	e.allowlist = []string{"allowed.js"}
