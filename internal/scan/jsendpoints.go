@@ -12,8 +12,18 @@ import (
 // endpoint so that template literals like `${base}/api/login` are matched. We keep the
 // core capture group (the endpoint) unchanged to preserve downstream behaviour.
 // The optional non-capturing prefix `(?:\$\{[^}]+\})*` consumes one or more interpolation
-// segments without including them in the final capture value.
-var endpointRe = regexp.MustCompile("(?i)[\"'`](?:\\$\\{[^}]+\\})*((?:https?:)?//[^\"'`\\s]+|\\.?\\.?/[^\"'`\\s]+)[\"'`]")
+// segments without including them in the final capture value. The scheme group
+// accepts http(s) and ws(s) so WebSocket endpoints are captured too.
+var endpointRe = regexp.MustCompile("(?i)[\"'`](?:\\$\\{[^}]+\\})*((?:(?:https?|wss?):)?//[^\"'`\\s]+|\\.?\\.?/[^\"'`\\s]+)[\"'`]")
+
+// bareRelEndpointRe captures bare relative request paths that lack a leading
+// slash — e.g. fetch("api/users"), axios.post("v3/orders", body),
+// xhr.open("GET", ...) style callers. Matching these unconditionally would be
+// far too noisy (every "text/html", "16/9" or "en/US" would qualify), so the
+// pattern is anchored to a request-issuing call and the captured path must
+// contain at least one `/` segment. That context requirement is what keeps the
+// added recall from costing precision.
+var bareRelEndpointRe = regexp.MustCompile("(?i)(?:\\bfetch|\\baxios(?:\\.\\w+)?|\\$\\.(?:ajax|get|post)|\\.(?:get|post|put|patch|delete|open|request|ajax))\\s*\\(\\s*[\"'`]([a-z0-9_][a-z0-9_.-]*(?:/[a-z0-9_.-]+)+)[\"'`]")
 
 // jsEndpoint holds an endpoint string and whether it is an absolute URL.
 // jsEndpoint holds an endpoint string, whether it is an absolute URL and any
@@ -24,15 +34,48 @@ type jsEndpoint struct {
 	Params string
 }
 
+// isAbsoluteEndpoint reports whether val is an absolute or protocol-relative URL
+// (as opposed to a rooted or relative path).
+func isAbsoluteEndpoint(val string) bool {
+	return strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") ||
+		strings.HasPrefix(val, "ws://") || strings.HasPrefix(val, "wss://") ||
+		strings.HasPrefix(val, "//")
+}
+
+// trimInterpolation reduces a captured endpoint to the static portion before its
+// first `${...}` template interpolation. A path like `/api/user/${id}/posts`
+// becomes `/api/user/` — the crawlable base — instead of being discarded for
+// containing `${}` metacharacters. Values with no interpolation are unchanged.
+func trimInterpolation(val string) string {
+	if i := strings.Index(val, "${"); i >= 0 {
+		return val[:i]
+	}
+	return val
+}
+
 // parseJSEndpoints extracts endpoints from JavaScript source data and
 // indicates whether each endpoint is an absolute URL or a relative path.
 func parseJSEndpoints(data []byte) []jsEndpoint {
-	ms := endpointRe.FindAllSubmatch(data, -1)
-	out := make([]jsEndpoint, 0, len(ms))
-	for _, m := range ms {
+	out := make([]jsEndpoint, 0)
+	seen := make(map[string]struct{})
+	add := func(val string, isURL bool) {
+		val = trimInterpolation(val)
+		if val == "" {
+			return
+		}
+		if _, ok := seen[val]; ok {
+			return
+		}
+		seen[val] = struct{}{}
+		out = append(out, jsEndpoint{Value: val, IsURL: isURL})
+	}
+	for _, m := range endpointRe.FindAllSubmatch(data, -1) {
 		val := string(m[1])
-		isURL := strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") || strings.HasPrefix(val, "//")
-		out = append(out, jsEndpoint{Value: val, IsURL: isURL, Params: ""})
+		add(val, isAbsoluteEndpoint(val))
+	}
+	// Bare relative request paths (no leading slash), only in request-call context.
+	for _, m := range bareRelEndpointRe.FindAllSubmatch(data, -1) {
+		add(string(m[1]), false)
 	}
 	return out
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -353,7 +354,74 @@ func exploreStates(ctx context.Context, states [][]byte, seen map[string]struct{
 		}
 	}
 
+	// Client-side route links: same-origin <a href> routes an SPA renders in
+	// place. When every route serves an identical shell the crawl dedups them
+	// before rendering, so driving them here is the only way each route's
+	// client-rendered DOM — and any secret injected once it mounts — is scanned.
+	//
+	// This is gated to genuine single-page apps: a window-persistent token is set
+	// once, and if a click triggers a real document navigation (a classic
+	// multi-page site, whose links the crawl already follows) the token is gone
+	// and the pass stops immediately, so multi-page crawls are not slowed by
+	// re-rendering pages the crawl fetches anyway.
+	const routeToken = "__jsm_route_token__"
+	if err := chromedp.Run(ctx, chromedp.Evaluate(interactionScript+"\nwindow.__jsmRouteToken="+strconv.Quote(routeToken)+";", nil)); err == nil {
+		visitedRoutes := map[string]struct{}{}
+		if p := currentRoutePath(ctx); p != "" {
+			visitedRoutes[p] = struct{}{}
+		}
+		for i := 0; len(states) <= MaxExploreStates && i < maxAttempts; i++ {
+			var paths []string
+			if err := chromedp.Run(ctx, chromedp.Evaluate("(window.__jsm&&window.__jsm.tagRouteLinks)?window.__jsm.tagRouteLinks():[]", &paths)); err != nil {
+				break
+			}
+			idx := -1
+			for j, p := range paths {
+				if _, ok := visitedRoutes[p]; !ok {
+					visitedRoutes[p] = struct{}{}
+					idx = j
+					break
+				}
+			}
+			if idx < 0 {
+				break // no unvisited same-origin routes remain
+			}
+			var clicked bool
+			var html string
+			if err := chromedp.Run(ctx,
+				chromedp.Evaluate(fmt.Sprintf("(window.__jsm&&window.__jsm.clickRoute)?window.__jsm.clickRoute(%d):false", idx), &clicked),
+				chromedp.Sleep(ExploreSettleDuration),
+				chromedp.OuterHTML("html", &html, chromedp.ByQuery),
+			); err != nil {
+				continue
+			}
+			var token string
+			if err := chromedp.Run(ctx, chromedp.Evaluate("window.__jsmRouteToken||''", &token)); err != nil {
+				break
+			}
+			vlog(3, "[route] drove client-side route %q (clicked=%t, spa=%t)", paths[idx], clicked, token == routeToken)
+			if token != routeToken {
+				// A real document navigation occurred: this is not an in-place SPA
+				// route, and the crawl already follows such links. Stop here.
+				break
+			}
+			if clicked {
+				record(html)
+			}
+		}
+	}
+
 	return states, winPosts
+}
+
+// currentRoutePath returns the browser's current path+query, used to avoid
+// re-driving the route the exploration already sits on.
+func currentRoutePath(ctx context.Context) string {
+	var p string
+	if err := chromedp.Run(ctx, chromedp.Evaluate("location.pathname + location.search", &p)); err != nil {
+		return ""
+	}
+	return p
 }
 
 // exploreMaxAttempts bounds how many interactions each exploration pass (forms,
@@ -664,6 +732,9 @@ const interactionScript = `
 		// anchors. Anchors to real URLs are excluded — the crawl already follows the
 		// link graph — so this focuses on surface hidden behind event handlers.
 		tagClickables: function() {
+			// Clear stale handles so a leftover index from a prior state cannot
+			// shadow a freshly-tagged element of the same index (see tagRouteLinks).
+			Array.prototype.slice.call(document.querySelectorAll('[data-jsm-click]')).forEach(function(el) { el.removeAttribute('data-jsm-click'); });
 			var sel = 'button, [role=button], [onclick], a[href^="#"], a[href^="javascript:"], a[href=""], [ng-click], [data-toggle], [data-target]';
 			var nodes = Array.prototype.slice.call(document.querySelectorAll(sel));
 			nodes = nodes.filter(function(el) {
@@ -697,6 +768,45 @@ const interactionScript = `
 		},
 		click: function(i) {
 			var el = document.querySelector('[data-jsm-click="' + i + '"]');
+			if (!el) return false;
+			try { el.click(); return true; } catch (e) { return false; }
+		},
+		// tagRouteLinks tags same-origin <a href> route links — the client-side
+		// routes an SPA renders in place. tagClickables deliberately skips these
+		// (the crawl follows the real link graph), but when every route serves an
+		// identical HTML shell the crawl dedups them before rendering, so their
+		// client-rendered DOM — and any secret it injects at runtime — is only
+		// reachable by navigating here. Cross-origin, hash and javascript:/mailto:/
+		// tel: links are excluded, as is the current route. Returns the tagged
+		// route paths in order; the array index is the data-jsm-route handle.
+		tagRouteLinks: function() {
+			// Clear stale handles first. Because the current route is excluded from
+			// tagging, an excluded link would otherwise keep a data-jsm-route index
+			// from a previous tagging and, being first in document order, shadow a
+			// freshly-tagged link that reused the same index — so clickRoute would
+			// hit the wrong anchor.
+			Array.prototype.slice.call(document.querySelectorAll('[data-jsm-route]')).forEach(function(el) { el.removeAttribute('data-jsm-route'); });
+			var out = [];
+			var cur = location.pathname + location.search;
+			var anchors = Array.prototype.slice.call(document.querySelectorAll('a[href]'));
+			for (var i = 0; i < anchors.length; i++) {
+				var a = anchors[i];
+				var raw = a.getAttribute('href') || '';
+				if (!raw || raw.charAt(0) === '#') continue;
+				var lower = raw.toLowerCase();
+				if (lower.indexOf('javascript:') === 0 || lower.indexOf('mailto:') === 0 || lower.indexOf('tel:') === 0) continue;
+				var u;
+				try { u = new URL(a.href, location.href); } catch (e) { continue; }
+				if (u.origin !== location.origin) continue;
+				var key = u.pathname + u.search;
+				if (key === cur || out.indexOf(key) !== -1) continue;
+				a.setAttribute('data-jsm-route', out.length);
+				out.push(key);
+			}
+			return out;
+		},
+		clickRoute: function(i) {
+			var el = document.querySelector('[data-jsm-route="' + i + '"]');
 			if (!el) return false;
 			try { el.click(); return true; } catch (e) { return false; }
 		},

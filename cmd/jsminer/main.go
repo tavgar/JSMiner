@@ -31,7 +31,7 @@ func (h *headerSlice) Set(v string) error {
 const version = "0.01v"
 
 func main() {
-	format := flag.String("format", "json", "output format: pretty or json")
+	format := flag.String("format", "pretty", "output format: pretty or json")
 	safe := flag.Bool("safe", false, "safe mode - only scan JS")
 	allowFile := flag.String("allow", "", "allowlist file")
 	rulesFile := flag.String("rules", "", "extra regex rules YAML")

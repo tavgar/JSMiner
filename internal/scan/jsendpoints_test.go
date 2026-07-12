@@ -86,3 +86,62 @@ func TestScanReaderFiltersInvalidEndpoints(t *testing.T) {
 		t.Fatalf("unexpected endpoint %s", matches[0].Value)
 	}
 }
+
+// TestParseJSEndpointsExtended covers the endpoint forms added for broader,
+// still-precise recall: WebSocket URLs, template-literal bases, and bare
+// relative request paths captured only in request-call context.
+func TestParseJSEndpointsExtended(t *testing.T) {
+	js := "fetch(`${API}/api/user/${id}/posts`);\n" + // template -> static base
+		"fetch('api/bare/items');\n" + // bare relative in fetch()
+		"axios.post('v3/orders/create', body);\n" + // bare relative in axios
+		"new WebSocket('wss://sock.example.com/live');\n" +
+		"new WebSocket('ws://sock.example.com/live2');\n" +
+		"const ct = 'application/json';\n" + // trap: not a request call
+		"const ar = '16/9';\n" + // trap: not a request call
+		"cache.get('plain-key');\n" // trap: .get() but no path segment
+
+	got := map[string]bool{}
+	for _, e := range parseJSEndpoints([]byte(js)) {
+		got[e.Value] = e.IsURL
+	}
+	want := map[string]bool{
+		"/api/user/":                  false, // template trimmed to crawlable base
+		"api/bare/items":              false,
+		"v3/orders/create":            false,
+		"wss://sock.example.com/live": true,
+		"ws://sock.example.com/live2": true,
+	}
+	for v, isURL := range want {
+		gu, ok := got[v]
+		if !ok {
+			t.Errorf("missing endpoint %q", v)
+			continue
+		}
+		if gu != isURL {
+			t.Errorf("endpoint %q IsURL=%v, want %v", v, gu, isURL)
+		}
+	}
+	for _, bad := range []string{"application/json", "16/9", "plain-key"} {
+		if _, ok := got[bad]; ok {
+			t.Errorf("trap value %q was wrongly extracted as an endpoint", bad)
+		}
+	}
+}
+
+// TestValidEndpointPathBareRelative verifies that multi-segment bare relative
+// paths are accepted while lone tokens and dotted non-paths are not.
+func TestValidEndpointPathBareRelative(t *testing.T) {
+	cases := map[string]bool{
+		"api/users":        true,
+		"v3/orders/create": true,
+		"/api/rooted":      true,
+		"plain":            false, // single token, no segment
+		"16/9":             true,  // shape is a valid path; precision comes from extraction context
+		"a/b":              true,
+	}
+	for val, want := range cases {
+		if got := validEndpointPath(val); got != want {
+			t.Errorf("validEndpointPath(%q) = %v, want %v", val, got, want)
+		}
+	}
+}

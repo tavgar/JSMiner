@@ -535,13 +535,20 @@ func validEndpointPath(val string) bool {
 	case strings.HasPrefix(rest, "./"):
 		rest = rest[1:]
 	}
-	if len(rest) < 2 || rest[0] != '/' {
-		return false
-	}
-	// The first character of the first segment must be a normal path character.
-	if c := rest[1]; !(c >= 'a' && c <= 'z') && !(c >= 'A' && c <= 'Z') &&
-		!(c >= '0' && c <= '9') && c != '_' && c != '-' && c != '~' {
-		return false
+	if strings.HasPrefix(rest, "/") {
+		// Rooted path: need at least one character after the leading slash, and it
+		// must be a normal path character.
+		if len(rest) < 2 || !isPathStartChar(rest[1]) {
+			return false
+		}
+	} else {
+		// Bare relative path (e.g. `api/users`): only accepted when it is
+		// multi-segment (contains a `/`) and starts with a normal path character,
+		// so lone tokens and non-path strings are not promoted to endpoints. Such
+		// values reach here only from the request-call-anchored bareRelEndpointRe.
+		if !strings.Contains(rest, "/") || !isPathStartChar(rest[0]) {
+			return false
+		}
 	}
 	// Reject empty or dot-only path segments (`/..`, `/./`).
 	for _, seg := range strings.Split(strings.Trim(rest, "/"), "/") {
@@ -550,6 +557,13 @@ func validEndpointPath(val string) bool {
 		}
 	}
 	return true
+}
+
+// isPathStartChar reports whether c is a valid first character for a URL path
+// segment (letter, digit, or one of `_ - ~`).
+func isPathStartChar(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+		(c >= '0' && c <= '9') || c == '_' || c == '-' || c == '~'
 }
 
 // ScanReaderAST scans JavaScript source using an AST and applies regex patterns
