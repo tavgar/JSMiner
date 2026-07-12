@@ -206,9 +206,16 @@ func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited map
 			// Explore application state, not just the initial DOM: scan the seed
 			// render and every state exploration reaches through interaction, so a
 			// single-page app's event-handler-gated surface is covered too.
-			if states, scripts, posts, err := RenderURLWithStates(finalURL); err == nil && len(states) > 0 {
+			if states, scripts, posts, xhrURLs, err := RenderURLWithStates(finalURL); err == nil && len(states) > 0 {
 				for _, p := range posts {
 					matches = append(matches, Match{Source: finalURL, Pattern: "post_url", Value: p.URL, Params: p.Body, Severity: "info"})
+				}
+				// Report the API URLs the page called via XHR/fetch as endpoints.
+				// Emitting them as endpoint_url means crawlTargetsFromMatches will
+				// fetch and scan them like any other discovered endpoint, so secrets
+				// returned only in a dynamically-addressed API response are reached.
+				for _, u := range xhrURLs {
+					matches = append(matches, Match{Source: finalURL, Pattern: "endpoint_url", Value: u, Severity: "info"})
 				}
 				for i, st := range states {
 					// The captured scripts are the union across states, so they only
@@ -301,8 +308,10 @@ func (e *Extractor) scanURLPosts(urlStr, baseHost string, visited map[string]str
 		}
 		if render {
 			// Explore application state so POST endpoints fired only after a
-			// client-side navigation or form submission are captured too.
-			if states, scripts, posts, err := RenderURLWithStates(finalURL); err == nil && len(states) > 0 {
+			// client-side navigation or form submission are captured too. The
+			// XHR/fetch GET URLs are not emitted here: this path is -posts mode,
+			// whose output is intentionally limited to POST request endpoints.
+			if states, scripts, posts, _, err := RenderURLWithStates(finalURL); err == nil && len(states) > 0 {
 				for _, p := range posts {
 					matches = append(matches, Match{Source: finalURL, Pattern: "post_url", Value: p.URL, Params: p.Body, Severity: "info"})
 				}

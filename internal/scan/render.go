@@ -142,7 +142,7 @@ func RenderURL(urlStr string) ([]byte, []string, error) {
 // RenderURLWithRequests loads the page and captures POST requests made during
 // rendering. It returns the rendered HTML, JavaScript URLs and POST requests.
 func RenderURLWithRequests(urlStr string) ([]byte, []string, []HTTPRequest, error) {
-	states, scripts, posts, err := renderStates(urlStr, false)
+	states, scripts, posts, _, err := renderStates(urlStr, false)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -157,20 +157,23 @@ func RenderURLWithRequests(urlStr string) ([]byte, []string, []HTTPRequest, erro
 // only appears after interaction: it clicks client-side navigation controls and
 // fills forms with plausible valid values and submits them, snapshotting each
 // distinct DOM state it reaches. It returns those state snapshots (the initial
-// load first), the union of JavaScript URLs seen across all states, and the POST
-// requests captured throughout — so a single-page app whose surface lives behind
-// event handlers is scanned in every state, not just the shell it first renders.
+// load first), the union of JavaScript URLs seen across all states, the POST
+// requests captured throughout, and the URLs of the XHR/fetch API calls the page
+// made — so a single-page app whose surface lives behind event handlers is
+// scanned in every state, not just the shell it first renders, and the API
+// endpoints its dynamic navigation calls are discovered even when no bundle
+// mentions them literally.
 //
 // Interaction is bounded by MaxExploreStates; when that is zero the result is a
 // single state and this behaves like RenderURLWithRequests.
-func RenderURLWithStates(urlStr string) ([][]byte, []string, []HTTPRequest, error) {
+func RenderURLWithStates(urlStr string) ([][]byte, []string, []HTTPRequest, []string, error) {
 	return renderStates(urlStr, MaxExploreStates > 0)
 }
 
 // renderStates performs the initial render and, when explore is set, drives
 // interaction-based exploration of further states. It is the shared engine
 // behind RenderURLWithRequests (explore off) and RenderURLWithStates.
-func renderStates(urlStr string, explore bool) ([][]byte, []string, []HTTPRequest, error) {
+func renderStates(urlStr string, explore bool) ([][]byte, []string, []HTTPRequest, []string, error) {
 	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), renderExecOptions()...)
 	defer cancel()
 
@@ -187,6 +190,7 @@ func renderStates(urlStr string, explore bool) ([][]byte, []string, []HTTPReques
 	headers := renderHeaders()
 
 	scriptSet := make(map[string]struct{})
+	xhrSet := make(map[string]struct{})
 	reqMap := make(map[network.RequestID]*HTTPRequest)
 	chromedp.ListenTarget(ctx, func(ev interface{}) {
 		switch e := ev.(type) {
@@ -197,10 +201,32 @@ func renderStates(urlStr string, explore bool) ([][]byte, []string, []HTTPReques
 				scriptSet[u] = struct{}{}
 			}
 		case *network.EventRequestWillBeSent:
+			if e.Request == nil {
+				break
+			}
+			// Record the URLs of XHR/fetch API calls the page makes. Single-page
+			// apps routinely build these paths at runtime — from an id fetched from
+			// another endpoint, a template literal, a router param — so they never
+			// appear as a literal string in any shipped bundle and are invisible to
+			// static scanning: the live request is the only place they surface.
+			// Capturing them lets the crawler reach the endpoints, and the secrets
+			// in their responses, that dynamic navigation reveals. Body-bearing
+			// verbs are already recorded as posts below, so only the remaining
+			// methods are added here to avoid reporting one URL as both an endpoint
+			// and a post.
+			if e.Type == network.ResourceTypeXHR || e.Type == network.ResourceTypeFetch {
+				switch e.Request.Method {
+				case "POST", "PUT", "PATCH":
+				default:
+					if strings.HasPrefix(e.Request.URL, "http://") || strings.HasPrefix(e.Request.URL, "https://") {
+						xhrSet[e.Request.URL] = struct{}{}
+					}
+				}
+			}
 			// The CDP network listener captures request-bearing verbs even across
 			// the navigations a form submit or client-side route change triggers, so
 			// it is the reliable record of what the interactions fired.
-			if e.Request != nil && (e.Request.Method == "POST" || e.Request.Method == "PUT" || e.Request.Method == "PATCH") {
+			if e.Request.Method == "POST" || e.Request.Method == "PUT" || e.Request.Method == "PATCH" {
 				reqMap[e.RequestID] = &HTTPRequest{URL: e.Request.URL}
 			}
 		}
@@ -219,7 +245,7 @@ func renderStates(urlStr string, explore bool) ([][]byte, []string, []HTTPReques
 	vlog(2, "render %s (explore=%t)", urlStr, explore)
 	if err := chromedp.Run(ctx, actions...); err != nil {
 		vlog(2, "render %s -> error: %v", urlStr, err)
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	states := [][]byte{[]byte(baseHTML)}
@@ -233,9 +259,10 @@ func renderStates(urlStr string, explore bool) ([][]byte, []string, []HTTPReques
 	}
 
 	scripts := scriptKeys(scriptSet)
+	xhrURLs := scriptKeys(xhrSet)
 	posts := mergePosts(ctx, reqMap, winPosts)
-	vlog(2, "render %s -> %d state(s), %d script(s), %d post(s)", urlStr, len(states), len(scripts), len(posts))
-	return states, scripts, posts, nil
+	vlog(2, "render %s -> %d state(s), %d script(s), %d xhr(s), %d post(s)", urlStr, len(states), len(scripts), len(xhrURLs), len(posts))
+	return states, scripts, posts, xhrURLs, nil
 }
 
 // exploreStates drives interaction-based state discovery against an already
