@@ -72,8 +72,11 @@ func renderExecOptions() []chromedp.ExecAllocatorOption {
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("no-sandbox", true),
 	)
-	if ChromePath != "" {
-		opts = append(opts, chromedp.ExecPath(ChromePath))
+	// Resolve (and, if needed, provision) a browser: an explicit override, one
+	// bundled with jsminer, a cached download, or a fresh Chrome-for-Testing build.
+	// An empty result leaves chromedp to auto-detect on PATH as before.
+	if browser := resolvedBrowserPath(); browser != "" {
+		opts = append(opts, chromedp.ExecPath(browser))
 	}
 	if SkipTLSVerification {
 		opts = append(opts, chromedp.Flag("ignore-certificate-errors", true))

@@ -68,6 +68,9 @@ func main() {
 	exploreStates := flag.Int("explore-states", 12, "when rendering, max additional application states to reach through interaction — client-side navigation and filled/submitted forms (0 = render each page once)")
 	rateLimit := flag.Float64("rate-limit", 0, "max HTTP requests per second across the scan (0 = no proactive limit; adaptive 429/503 backoff is always on)")
 	chromePath := flag.String("chrome-path", "", "path to the Chrome/Chromium executable for rendering (default: auto-detect on PATH; also honours $JSMINER_CHROME)")
+	downloadBrowser := flag.Bool("download-browser", false, "provision the bundled Chromium now (download if needed) and print its path, then exit if no target is given")
+	noDownloadBrowser := flag.Bool("no-download-browser", false, "never download a Chromium; only use -chrome-path, a bundled or cached browser, or one on PATH")
+	browserDest := flag.String("browser-dest", "", "with -download-browser, extract Chromium into <dir>/chromium so <dir> (binary + chromium/) ships as a self-contained bundle")
 	var headerFlags headerSlice
 	flag.Var(&headerFlags, "header", "HTTP header in 'Key: Value' format. May be repeated")
 	flag.Parse()
@@ -145,6 +148,10 @@ func main() {
 			*noTemplateDedup = true
 		case "no-well-known":
 			*noWellKnown = true
+		case "download-browser":
+			*downloadBrowser = true
+		case "no-download-browser":
+			*noDownloadBrowser = true
 		case "no-source-maps":
 			*noSourceMaps = true
 		case "methods":
@@ -224,7 +231,7 @@ func main() {
 			if val != "" {
 				headerFlags = append(headerFlags, val)
 			}
-		case "format", "allow", "rules", "output", "targets", "plugins", "chrome-path":
+		case "format", "allow", "rules", "output", "targets", "plugins", "chrome-path", "browser-dest":
 			if i+1 < len(args) {
 				val := args[i+1]
 				i++
@@ -243,10 +250,48 @@ func main() {
 					*pluginsFlag = val
 				case "chrome-path":
 					*chromePath = val
+				case "browser-dest":
+					*browserDest = val
 				}
 			}
 		default:
 			leftover = append(leftover, a)
+		}
+	}
+
+	// Browser provisioning must be configured before any render (or an explicit
+	// -download-browser) resolves a browser. An explicit -chrome-path wins;
+	// otherwise fall back to $JSMINER_CHROME so a browser installed off PATH
+	// (common in CI images and containers) is still used.
+	if *chromePath == "" {
+		*chromePath = os.Getenv("JSMINER_CHROME")
+	}
+	scan.SetChromePath(*chromePath)
+	if *noDownloadBrowser {
+		scan.SetAutoDownloadBrowser(false)
+	}
+	if *downloadBrowser {
+		var (
+			p   string
+			err error
+		)
+		if *browserDest != "" {
+			// Build a self-contained bundle: place chromium next to a copy of the
+			// binary in <dir>/chromium.
+			p, err = scan.ProvisionBundle(*browserDest)
+		} else {
+			p = scan.ResolveBrowser()
+			if p == "" {
+				err = fmt.Errorf("could not locate or download a Chromium for rendering")
+			}
+		}
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Fprintln(os.Stderr, "browser: "+p)
+		// Provision-only invocation: nothing else to do without a target.
+		if len(leftover) == 0 && *targetsFile == "" && *proxyAddr == "" {
+			os.Exit(0)
 		}
 	}
 
@@ -315,13 +360,6 @@ func main() {
 	scan.SetMaxExploreStates(*exploreStates)
 	scan.SetSkipTLSVerification(*insecure)
 	scan.SetRateLimit(*rateLimit)
-	// An explicit -chrome-path wins; otherwise fall back to $JSMINER_CHROME so a
-	// browser installed off PATH (common in CI images and containers) can still be
-	// used for rendering.
-	if *chromePath == "" {
-		*chromePath = os.Getenv("JSMINER_CHROME")
-	}
-	scan.SetChromePath(*chromePath)
 
 	// -v/-vv/-vvv are cumulative: the highest one given wins, and each level
 	// implies the ones below it.

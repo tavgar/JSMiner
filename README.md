@@ -26,6 +26,38 @@ go build ./cmd/jsminer
 
 This produces a binary named `jsminer`.
 
+### Bundling Chromium
+
+JSMiner renders pages in headless Chrome. So it works out of the box even where no
+browser is installed, it ships with a Chromium: the first time a render is needed
+it downloads the **current latest stable** [Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/)
+build into a per-user cache (`<user cache>/jsminer/browser/<version>/`) and reuses
+it thereafter, always keeping to the latest version. Resolution order for the
+render browser is:
+
+1. `-chrome-path` / `$JSMINER_CHROME` (explicit override);
+2. the latest managed Chromium (downloaded/cached) — unless `-no-download-browser`;
+3. a Chromium bundled next to the `jsminer` binary (`./chromium/…`);
+4. a Chrome/Chromium already on `PATH`.
+
+To produce a **self-contained, offline bundle** — the binary plus a Chromium in a
+single archive that needs no runtime download — run:
+
+```
+make bundle        # builds dist/jsminer and dist/chromium/
+```
+
+or directly:
+
+```
+jsminer -download-browser -browser-dest dist
+```
+
+Ship the resulting `dist/` directory together; JSMiner finds the co-located
+`chromium/` automatically. Use `-no-download-browser` to forbid any runtime
+download (bundle- or PATH-only), or `-download-browser` on its own to pre-populate
+the managed cache.
+
 ## Usage
 
 ``` 
@@ -105,10 +137,14 @@ Flags:
   [Auto-calibration](#auto-calibration) below.
 - `-render` render pages with headless Chrome (default `true`, set `-render=false` to disable; Chrome/Chromium must be installed)
 - `-chrome-path` explicit path to the Chrome/Chromium executable used for
-  rendering. By default JSMiner auto-detects a browser on `PATH`; set this (or the
-  `JSMINER_CHROME` environment variable) when Chrome is installed at a known
-  location that is not on `PATH` — common in CI images and containers — so
-  rendering works instead of silently falling back to a static fetch.
+  rendering. Overrides the bundled/downloaded browser; also honours the
+  `JSMINER_CHROME` environment variable. Use it to force a specific browser.
+- `-no-download-browser` never download a Chromium; render only with
+  `-chrome-path`, a bundled or previously cached browser, or one on `PATH`.
+- `-download-browser` provision the managed Chromium now (downloading the latest
+  stable build if needed) and print its path, then exit if no target is given.
+  Combine with `-browser-dest <dir>` to extract into `<dir>/chromium` for a
+  self-contained bundle (see [Bundling Chromium](#bundling-chromium)).
 - `-longsecret` detect generic long secrets (disabled by default). Enable to
   search for high-entropy strings that may represent API keys.
 - `-output` write output to file instead of stdout.

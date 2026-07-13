@@ -129,19 +129,12 @@ func TestExploreBudgetScaling(t *testing.T) {
 	}
 }
 
-// TestChromePathAddsExecOption verifies that setting an explicit Chrome path adds
-// exactly one allocator option (the ExecPath override) and that clearing it
-// restores auto-detection.
-func TestChromePathAddsExecOption(t *testing.T) {
-	SetChromePath("")
-	base := len(renderExecOptions())
-	SetChromePath("/opt/somewhere/chrome")
+// TestResolveBrowserPrefersExplicitPath verifies the explicit -chrome-path
+// override wins over every other resolution source.
+func TestResolveBrowserPrefersExplicitPath(t *testing.T) {
+	SetChromePath("/explicit/chrome")
 	defer SetChromePath("")
-	if got := len(renderExecOptions()); got != base+1 {
-		t.Fatalf("expected one extra exec option with ChromePath set, base=%d got=%d", base, got)
-	}
-	SetChromePath("")
-	if got := len(renderExecOptions()); got != base {
-		t.Fatalf("clearing ChromePath should restore option count %d, got %d", base, got)
+	if got := ResolveBrowser(); got != "/explicit/chrome" {
+		t.Fatalf("ResolveBrowser() = %q, want the explicit path", got)
 	}
 }

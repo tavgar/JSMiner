@@ -39,6 +39,13 @@ func TestCrawlLiveComplexSPA(t *testing.T) {
 	defer restore()
 	ResetThrottle()
 
+	// Use whatever browser is already available (cache/PATH) without a network
+	// version lookup or download, so the crawl test stays hermetic.
+	savedAuto := AutoDownloadBrowser
+	AutoDownloadBrowser = false
+	resetResolvedBrowser()
+	defer func() { AutoDownloadBrowser = savedAuto; resetResolvedBrowser() }()
+
 	e := NewExtractor(false, false)
 	opts := DefaultCrawlOptions()
 	opts.MaxDepth = 3
