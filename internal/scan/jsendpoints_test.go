@@ -96,6 +96,8 @@ func TestParseJSEndpointsExtended(t *testing.T) {
 		"axios.post('v3/orders/create', body);\n" + // bare relative in axios
 		"new WebSocket('wss://sock.example.com/live');\n" +
 		"new WebSocket('ws://sock.example.com/live2');\n" +
+		"fetch(\"api/search?q=\" + q);\n" + // bare relative with a concatenated query
+		"axios.get('v2/items#top');\n" + // bare relative with a fragment
 		"const ct = 'application/json';\n" + // trap: not a request call
 		"const ar = '16/9';\n" + // trap: not a request call
 		"cache.get('plain-key');\n" // trap: .get() but no path segment
@@ -108,6 +110,8 @@ func TestParseJSEndpointsExtended(t *testing.T) {
 		"/api/user/":                  false, // template trimmed to crawlable base
 		"api/bare/items":              false,
 		"v3/orders/create":            false,
+		"api/search":                  false, // query stripped from concatenated call
+		"v2/items":                    false, // fragment stripped
 		"wss://sock.example.com/live": true,
 		"ws://sock.example.com/live2": true,
 	}
