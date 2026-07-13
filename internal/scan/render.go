@@ -51,6 +51,19 @@ func newRenderContext(parent context.Context) (context.Context, context.CancelFu
 	}))
 }
 
+// ChromePath, when set, is the explicit path to the Chrome/Chromium executable
+// used for rendering. It is empty by default, in which case chromedp auto-detects
+// a browser on PATH. Setting it lets JSMiner render in environments where Chrome
+// is installed at a known location that is not on PATH — common in CI images and
+// containers (Playwright/Puppeteer browser caches, custom installs) — where
+// auto-detection would otherwise fail and rendering would silently fall back to a
+// static fetch.
+var ChromePath string
+
+// SetChromePath configures an explicit Chrome/Chromium executable path for
+// rendering. An empty value restores chromedp's PATH-based auto-detection.
+func SetChromePath(path string) { ChromePath = path }
+
 // renderExecOptions builds the headless-Chrome allocator options shared by every
 // render helper.
 func renderExecOptions() []chromedp.ExecAllocatorOption {
@@ -59,6 +72,12 @@ func renderExecOptions() []chromedp.ExecAllocatorOption {
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("no-sandbox", true),
 	)
+	// Resolve (and, if needed, provision) a browser: an explicit override, one
+	// bundled with jsminer, a cached download, or a fresh Chrome-for-Testing build.
+	// An empty result leaves chromedp to auto-detect on PATH as before.
+	if browser := resolvedBrowserPath(); browser != "" {
+		opts = append(opts, chromedp.ExecPath(browser))
+	}
 	if SkipTLSVerification {
 		opts = append(opts, chromedp.Flag("ignore-certificate-errors", true))
 	}
@@ -94,9 +113,37 @@ func headerActions(headers map[string]interface{}) []chromedp.Action {
 	}
 }
 
+// retryAfterFromHeaders extracts the Retry-After header value from a CDP response
+// header map, matching case-insensitively. It returns "" when absent.
+func retryAfterFromHeaders(h network.Headers) string {
+	for k, v := range h {
+		if strings.EqualFold(k, "Retry-After") {
+			if s, ok := v.(string); ok {
+				return s
+			}
+			return fmt.Sprintf("%v", v)
+		}
+	}
+	return ""
+}
+
+// noteRenderResponse feeds a response headless Chrome received into the shared
+// throttle when it is a rate-limit/overload signal, so a 429/503 the browser hits
+// during a render backs off the whole scan even though Chrome's own fetches never
+// pass through the Go request path.
+func noteRenderResponse(status int, h network.Headers) {
+	if isThrottleStatus(status) {
+		globalThrottle.noteThrottled(status, retryAfterFromHeaders(h))
+	}
+}
+
 // RenderURL loads the page at urlStr in headless Chrome and returns the
 // rendered HTML along with JavaScript URLs fetched during the page load.
 func RenderURL(urlStr string) ([]byte, []string, error) {
+	// Pace the render against the shared throttle before arming the timeout, so a
+	// backoff sleep cannot consume the render budget (see renderStates).
+	globalThrottle.wait()
+
 	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), renderExecOptions()...)
 	defer cancel()
 
@@ -111,6 +158,7 @@ func RenderURL(urlStr string) ([]byte, []string, error) {
 	scriptSet := make(map[string]struct{})
 	chromedp.ListenTarget(ctx, func(ev interface{}) {
 		if e, ok := ev.(*network.EventResponseReceived); ok {
+			noteRenderResponse(int(e.Response.Status), e.Response.Headers)
 			u := e.Response.URL
 			if strings.HasSuffix(strings.ToLower(u), ".js") ||
 				strings.Contains(e.Response.MimeType, "javascript") {
@@ -175,6 +223,12 @@ func RenderURLWithStates(urlStr string) ([][]byte, []string, []HTTPRequest, []st
 // interaction-based exploration of further states. It is the shared engine
 // behind RenderURLWithRequests (explore off) and RenderURLWithStates.
 func renderStates(urlStr string, explore bool) ([][]byte, []string, []HTTPRequest, []string, error) {
+	// Respect the shared throttle's proactive spacing and any active backoff
+	// before starting a render. This must happen before the render timeout is
+	// armed below, otherwise a backoff sleep would eat into the render budget and
+	// could expire the context before Chrome even navigates.
+	globalThrottle.wait()
+
 	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), renderExecOptions()...)
 	defer cancel()
 
@@ -196,6 +250,7 @@ func renderStates(urlStr string, explore bool) ([][]byte, []string, []HTTPReques
 	chromedp.ListenTarget(ctx, func(ev interface{}) {
 		switch e := ev.(type) {
 		case *network.EventResponseReceived:
+			noteRenderResponse(int(e.Response.Status), e.Response.Headers)
 			u := e.Response.URL
 			if strings.HasSuffix(strings.ToLower(u), ".js") ||
 				strings.Contains(e.Response.MimeType, "javascript") {

@@ -23,7 +23,13 @@ var endpointRe = regexp.MustCompile("(?i)[\"'`](?:\\$\\{[^}]+\\})*((?:(?:https?|
 // pattern is anchored to a request-issuing call and the captured path must
 // contain at least one `/` segment. That context requirement is what keeps the
 // added recall from costing precision.
-var bareRelEndpointRe = regexp.MustCompile("(?i)(?:\\bfetch|\\baxios(?:\\.\\w+)?|\\$\\.(?:ajax|get|post)|\\.(?:get|post|put|patch|delete|open|request|ajax))\\s*\\(\\s*[\"'`]([a-z0-9_][a-z0-9_.-]*(?:/[a-z0-9_.-]+)+)[\"'`]")
+//
+// A trailing `(?:[?#][^"'`]*)?` lets an optional query string or fragment sit
+// between the path and the closing quote, so a concatenated call like
+// fetch("api/search?q=" + q) still yields the crawlable path "api/search"; the
+// query is consumed but left out of the capture because its dynamic tail is
+// incomplete anyway.
+var bareRelEndpointRe = regexp.MustCompile("(?i)(?:\\bfetch|\\baxios(?:\\.\\w+)?|\\$\\.(?:ajax|get|post)|\\.(?:get|post|put|patch|delete|open|request|ajax))\\s*\\(\\s*[\"'`]([a-z0-9_][a-z0-9_.-]*(?:/[a-z0-9_.-]+)+)(?:[?#][^\"'`]*)?[\"'`]")
 
 // jsEndpoint holds an endpoint string and whether it is an absolute URL.
 // jsEndpoint holds an endpoint string, whether it is an absolute URL and any

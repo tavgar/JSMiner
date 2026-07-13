@@ -61,7 +61,13 @@ func fetchURLResponseMethod(u, method, body string) (*http.Response, error) {
 	if body != "" && req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", inferContentType(body))
 	}
+	// Pace outbound requests so a crawl's burst of fetches, probes and
+	// calibrations stays under the target's rate limit, and back off when the
+	// server signals 429/503. wait() blocks for the configured/adaptive gap;
+	// observe() adapts the gap to the response.
+	globalThrottle.wait()
 	resp, err := newHTTPClient().Do(req)
+	globalThrottle.observe(resp, err)
 	if err != nil {
 		vlog(2, "http %s %s -> error: %v", method, u, err)
 		return nil, err
@@ -378,6 +384,11 @@ func (e *Extractor) scanHTMLState(finalURL, baseHost string, data []byte, dynami
 			matches = append(matches, ms...)
 		}
 	}
+	// Harvest the URLs the page's own markup references (anchors, forms, embedded
+	// resources). Without this the crawl would only ever follow links that appear
+	// in JavaScript, missing the link graph of server-rendered and multi-page
+	// sites entirely.
+	matches = append(matches, extractHTMLLinkMatches(data, finalURL)...)
 	for _, src := range extractInlineScripts(data) {
 		ms, err := e.ScanReaderWithEndpoints("inline.js", bytes.NewReader([]byte(src)))
 		if err == nil {
@@ -387,10 +398,11 @@ func (e *Extractor) scanHTMLState(finalURL, baseHost string, data []byte, dynami
 			matches = append(matches, ms...)
 		}
 	}
+	base := documentBase(data, finalURL)
 	sources := extractScriptSrcs(data)
 	sources = append(sources, dynamic...)
 	for _, src := range sources {
-		abs := resolveURL(finalURL, src)
+		abs := resolveURL(base, src)
 		u, err := url.Parse(abs)
 		if err != nil {
 			continue
@@ -413,10 +425,19 @@ func (e *Extractor) scanHTMLState(finalURL, baseHost string, data []byte, dynami
 // not scanned here (POST endpoints come from the linked script sources).
 func (e *Extractor) scanHTMLStatePosts(finalURL, baseHost string, data []byte, dynamic []string, visited map[string]struct{}, external, render bool) []Match {
 	var matches []Match
+	// During a crawl (calibrator set), harvest the page's markup links so the posts
+	// crawl follows the HTML link graph to reach deeper pages — and the POST
+	// endpoints their scripts hold — that nothing in JavaScript references. These
+	// endpoint_url matches drive navigation only; the CLI filters them out of the
+	// POST-endpoint output via FilterPostMatches.
+	if e.calibrator != nil {
+		matches = append(matches, extractHTMLLinkMatches(data, finalURL)...)
+	}
+	base := documentBase(data, finalURL)
 	sources := extractScriptSrcs(data)
 	sources = append(sources, dynamic...)
 	for _, src := range sources {
-		abs := resolveURL(finalURL, src)
+		abs := resolveURL(base, src)
 		u, err := url.Parse(abs)
 		if err != nil {
 			continue

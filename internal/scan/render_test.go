@@ -128,3 +128,13 @@ func TestExploreBudgetScaling(t *testing.T) {
 		t.Error("enabled exploration should grant a positive time budget")
 	}
 }
+
+// TestResolveBrowserPrefersExplicitPath verifies the explicit -chrome-path
+// override wins over every other resolution source.
+func TestResolveBrowserPrefersExplicitPath(t *testing.T) {
+	SetChromePath("/explicit/chrome")
+	defer SetChromePath("")
+	if got := ResolveBrowser(); got != "/explicit/chrome" {
+		t.Fatalf("ResolveBrowser() = %q, want the explicit path", got)
+	}
+}

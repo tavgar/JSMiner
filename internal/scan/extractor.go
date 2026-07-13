@@ -434,6 +434,30 @@ func (e *Extractor) ScanReaderPostRequests(source string, r io.Reader) ([]Match,
 	return matches, nil
 }
 
+// FilterPostMatches returns only the matches relevant to POST-request output: the
+// post_url/post_path endpoints and the crawl's gathered-URL findings. It exists so
+// a -posts crawl can harvest HTML markup links to follow the link graph (emitted
+// as endpoint_url matches for navigation) without those navigation-only links
+// leaking into the POST-endpoint results.
+func FilterPostMatches(ms []Match) []Match {
+	seen := make(map[string]struct{})
+	var out []Match
+	for _, m := range ms {
+		switch m.Pattern {
+		case "post_url", "post_path", GatheredURLPattern:
+		default:
+			continue
+		}
+		key := m.Pattern + "|" + m.Value + "|" + m.Params
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, m)
+	}
+	return out
+}
+
 // FilterEndpointMatches returns only endpoint matches from ms.
 func FilterEndpointMatches(ms []Match) []Match {
 	seen := make(map[string]struct{})

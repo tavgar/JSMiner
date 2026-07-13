@@ -26,6 +26,38 @@ go build ./cmd/jsminer
 
 This produces a binary named `jsminer`.
 
+### Bundling Chromium
+
+JSMiner renders pages in headless Chrome. So it works out of the box even where no
+browser is installed, it ships with a Chromium: the first time a render is needed
+it downloads the **current latest stable** [Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/)
+build into a per-user cache (`<user cache>/jsminer/browser/<version>/`) and reuses
+it thereafter, always keeping to the latest version. Resolution order for the
+render browser is:
+
+1. `-chrome-path` / `$JSMINER_CHROME` (explicit override);
+2. the latest managed Chromium (downloaded/cached) — unless `-no-download-browser`;
+3. a Chromium bundled next to the `jsminer` binary (`./chromium/…`);
+4. a Chrome/Chromium already on `PATH`.
+
+To produce a **self-contained, offline bundle** — the binary plus a Chromium in a
+single archive that needs no runtime download — run:
+
+```
+make bundle        # builds dist/jsminer and dist/chromium/
+```
+
+or directly:
+
+```
+jsminer -download-browser -browser-dest dist
+```
+
+Ship the resulting `dist/` directory together; JSMiner finds the co-located
+`chromium/` automatically. Use `-no-download-browser` to forbid any runtime
+download (bundle- or PATH-only), or `-download-browser` on its own to pre-populate
+the managed cache.
+
 ## Usage
 
 ``` 
@@ -77,6 +109,17 @@ Flags:
   [Template deduplication](#template-deduplication) below.
 - `-template-sample-max` how many representative pages to crawl per templated
   class when template dedup is on (default `3`).
+- `-no-well-known` disable seeding a crawl from the site's own declarations. By
+  default a crawl also fetches `robots.txt` (following its `Allow`/`Disallow`
+  directories and `Sitemap:` pointers) and the XML sitemaps it and convention
+  advertise, then enqueues those server-published URLs — reaching pages and API
+  roots that nothing links to and that static JS scanning never reveals.
+- `-rate-limit` cap outbound HTTP at N requests per second across the whole scan
+  (default `0`, no proactive limit). Independent of this, adaptive backoff is
+  always on: a `429`/`503` response — seen on the Go request path or by the
+  headless-Chrome renderer — widens the request spacing and honours the server's
+  `Retry-After` before continuing, easing back to full speed once the host stops
+  rate-limiting.
 - `-no-source-maps` disable recovering original source from JavaScript source
   maps. By default, when a scanned bundle advertises a source map (via a
   `//# sourceMappingURL=` comment or a `SourceMap` / `X-SourceMap` response
@@ -93,6 +136,15 @@ Flags:
   from flooding the output with duplicate, low-value findings. See
   [Auto-calibration](#auto-calibration) below.
 - `-render` render pages with headless Chrome (default `true`, set `-render=false` to disable; Chrome/Chromium must be installed)
+- `-chrome-path` explicit path to the Chrome/Chromium executable used for
+  rendering. Overrides the bundled/downloaded browser; also honours the
+  `JSMINER_CHROME` environment variable. Use it to force a specific browser.
+- `-no-download-browser` never download a Chromium; render only with
+  `-chrome-path`, a bundled or previously cached browser, or one on `PATH`.
+- `-download-browser` provision the managed Chromium now (downloading the latest
+  stable build if needed) and print its path, then exit if no target is given.
+  Combine with `-browser-dest <dir>` to extract into `<dir>/chromium` for a
+  self-contained bundle (see [Bundling Chromium](#bundling-chromium)).
 - `-longsecret` detect generic long secrets (disabled by default). Enable to
   search for high-entropy strings that may represent API keys.
 - `-output` write output to file instead of stdout.
@@ -137,6 +189,48 @@ endpoints — including non-`GET` methods (`POST`, `PUT`, `PATCH`, `DELETE`,
 `OPTIONS`) for method probing and parameter replay — so use it only against
 targets you are authorized to test. Pass `-no-methods` to restrict a crawl to
 `GET` requests only.
+
+### URL discovery
+
+JSMiner pulls candidate URLs from every place a modern app hides them, so a crawl
+follows the real link graph instead of only what one page happens to reference in
+one form:
+
+- **JavaScript** — endpoints and paths in inline scripts, linked bundles and
+  dynamic `import()`s, including template-literal bases (`` `/api/user/${id}` `` →
+  `/api/user/`) and bare-relative request paths in call context
+  (`fetch("api/search?q=" + q)` → `api/search`).
+- **Live requests** — the XHR/`fetch` URLs the page actually calls while rendering
+  in headless Chrome, so endpoints built at runtime (from an id, a router param, a
+  template) that appear in no shipped string are still reached.
+- **HTML markup** — the URLs a page's own markup references: `href`, `src`,
+  `action`/`formaction`, `data-url`/`data-href`/`data-src`, and
+  `<meta http-equiv="refresh">` redirects. Relative links are resolved against the
+  page, and unresolved template placeholders (`${…}`, `{{…}}`, `<%…%>`) are
+  skipped. This is what lets the crawl follow a server-rendered or classic
+  multi-page site, whose pages link one another through plain HTML rather than JS.
+- **Site declarations** — `robots.txt` (`Allow`/`Disallow` directories and
+  `Sitemap:` pointers) and the XML sitemaps it and convention advertise, including
+  gzipped (`sitemap.xml.gz`) and nested sitemap-index documents. These surface
+  server-published pages and API roots that nothing links to. Disable with
+  `-no-well-known`.
+- **Source maps** — original, pre-bundled sources recovered from any source map a
+  scanned bundle advertises (see [Source map recovery](#source-map-recovery)).
+
+### Rate limiting
+
+A crawl issues many requests per page — the page fetch and render, multi-method
+probing, per-directory and per-method auto-calibration, parameter replay and path
+permutation — which can trip a target's rate limiter. JSMiner paces itself to stay
+under those limits:
+
+- **Adaptive backoff (always on).** When any request — on the HTTP path or in the
+  headless-Chrome renderer — comes back `429 Too Many Requests` or `503`, JSMiner
+  widens the spacing between requests and honours the server's `Retry-After` hint
+  (delta-seconds or HTTP-date) before continuing, then eases back to full speed
+  once the host stops rate-limiting.
+- **Proactive limit (opt-in).** Pass `-rate-limit N` to cap outbound requests at
+  `N` per second across the whole scan.
 
 ### Verbose output
 

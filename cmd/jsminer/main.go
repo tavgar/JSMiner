@@ -54,6 +54,7 @@ func main() {
 	noMethods := flag.Bool("no-methods", false, "disable multi-method probing / gathered-URL reporting during a crawl")
 	noParamReplay := flag.Bool("no-param-replay", false, "disable replaying discovered parameters across every directory level during a crawl")
 	noTemplateDedup := flag.Bool("no-template-dedup", false, "disable collapsing templated duplicate pages (/product/1 vs /product/2, paginated/faceted URLs) during a crawl")
+	noWellKnown := flag.Bool("no-well-known", false, "disable seeding a crawl from the site's robots.txt and XML sitemaps")
 	templateSampleMax := flag.Int("template-sample-max", 3, "max representative pages to crawl per templated class when template dedup is on")
 	noSourceMaps := flag.Bool("no-source-maps", false, "disable recovering original source from JavaScript source maps advertised by scanned bundles")
 	targetsFile := flag.String("targets", "", "file with list of targets")
@@ -65,6 +66,11 @@ func main() {
 	verbose2 := flag.Bool("vv", false, "more verbose: also log every HTTP request/response and page render (implies -v)")
 	verbose3 := flag.Bool("vvv", false, "trace: also log per-target enqueue/skip, method probes, param replays and permutations (implies -vv)")
 	exploreStates := flag.Int("explore-states", 12, "when rendering, max additional application states to reach through interaction — client-side navigation and filled/submitted forms (0 = render each page once)")
+	rateLimit := flag.Float64("rate-limit", 0, "max HTTP requests per second across the scan (0 = no proactive limit; adaptive 429/503 backoff is always on)")
+	chromePath := flag.String("chrome-path", "", "path to the Chrome/Chromium executable for rendering (default: auto-detect on PATH; also honours $JSMINER_CHROME)")
+	downloadBrowser := flag.Bool("download-browser", false, "provision the bundled Chromium now (download if needed) and print its path, then exit if no target is given")
+	noDownloadBrowser := flag.Bool("no-download-browser", false, "never download a Chromium; only use -chrome-path, a bundled or cached browser, or one on PATH")
+	browserDest := flag.String("browser-dest", "", "with -download-browser, extract Chromium into <dir>/chromium so <dir> (binary + chromium/) ships as a self-contained bundle")
 	var headerFlags headerSlice
 	flag.Var(&headerFlags, "header", "HTTP header in 'Key: Value' format. May be repeated")
 	flag.Parse()
@@ -140,6 +146,12 @@ func main() {
 			*noParamReplay = true
 		case "no-template-dedup":
 			*noTemplateDedup = true
+		case "no-well-known":
+			*noWellKnown = true
+		case "download-browser":
+			*downloadBrowser = true
+		case "no-download-browser":
+			*noDownloadBrowser = true
 		case "no-source-maps":
 			*noSourceMaps = true
 		case "methods":
@@ -152,6 +164,17 @@ func main() {
 			}
 			if val != "" {
 				*methods = val
+			}
+		case "rate-limit":
+			val := ""
+			if len(parts) == 2 {
+				val = parts[1]
+			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				val = args[i+1]
+				i++
+			}
+			if f, err := strconv.ParseFloat(val, 64); err == nil {
+				*rateLimit = f
 			}
 		case "crawl-depth", "crawl-max-pages", "crawl-permute-max", "template-sample-max":
 			val := ""
@@ -208,7 +231,7 @@ func main() {
 			if val != "" {
 				headerFlags = append(headerFlags, val)
 			}
-		case "format", "allow", "rules", "output", "targets", "plugins":
+		case "format", "allow", "rules", "output", "targets", "plugins", "chrome-path", "browser-dest":
 			if i+1 < len(args) {
 				val := args[i+1]
 				i++
@@ -225,10 +248,55 @@ func main() {
 					*targetsFile = val
 				case "plugins":
 					*pluginsFlag = val
+				case "chrome-path":
+					*chromePath = val
+				case "browser-dest":
+					*browserDest = val
 				}
 			}
 		default:
 			leftover = append(leftover, a)
+		}
+	}
+
+	// Browser provisioning must be configured before any render (or an explicit
+	// -download-browser) resolves a browser. An explicit -chrome-path wins;
+	// otherwise fall back to $JSMINER_CHROME so a browser installed off PATH
+	// (common in CI images and containers) is still used.
+	if *chromePath == "" {
+		*chromePath = os.Getenv("JSMINER_CHROME")
+	}
+	scan.SetChromePath(*chromePath)
+	if *noDownloadBrowser {
+		scan.SetAutoDownloadBrowser(false)
+	}
+	// Surface browser provisioning (chiefly the large first-run download) so the
+	// scan does not appear to hang while Chromium downloads.
+	if !*quiet {
+		scan.BrowserNotice = func(msg string) { fmt.Fprintln(os.Stderr, "jsminer: "+msg) }
+	}
+	if *downloadBrowser {
+		var (
+			p   string
+			err error
+		)
+		if *browserDest != "" {
+			// Build a self-contained bundle: place chromium next to a copy of the
+			// binary in <dir>/chromium.
+			p, err = scan.ProvisionBundle(*browserDest)
+		} else {
+			p = scan.ResolveBrowser()
+			if p == "" {
+				err = fmt.Errorf("could not locate or download a Chromium for rendering")
+			}
+		}
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Fprintln(os.Stderr, "browser: "+p)
+		// Provision-only invocation: nothing else to do without a target.
+		if len(leftover) == 0 && *targetsFile == "" && *proxyAddr == "" {
+			os.Exit(0)
 		}
 	}
 
@@ -296,6 +364,7 @@ func main() {
 	}
 	scan.SetMaxExploreStates(*exploreStates)
 	scan.SetSkipTLSVerification(*insecure)
+	scan.SetRateLimit(*rateLimit)
 
 	// -v/-vv/-vvv are cumulative: the highest one given wins, and each level
 	// implies the ones below it.
@@ -310,6 +379,13 @@ func main() {
 		verbosity = 3
 	}
 	scan.SetVerbosity(verbosity)
+
+	// Provision the render browser up front (when rendering) so any first-run
+	// Chromium download happens with a visible notice before scanning begins,
+	// rather than silently stalling the first page render.
+	if *render && *proxyAddr == "" && len(targets) > 0 {
+		scan.WarmBrowser()
+	}
 
 	extractor := scan.NewExtractor(*safe, *longSecret)
 	extractor.SetSnippet(*snippet)
@@ -383,6 +459,9 @@ func main() {
 				if *noTemplateDedup {
 					opts.TemplateDedup = false
 				}
+				if *noWellKnown {
+					opts.DiscoverWellKnown = false
+				}
 				opts.TemplateSampleMax = *templateSampleMax
 				if *methods != "" {
 					var ms []string
@@ -449,7 +528,12 @@ func main() {
 			f.Close()
 		}
 
-		if !*posts && *endpoints {
+		if *posts {
+			// A posts crawl harvests HTML markup links (as endpoint_url matches) to
+			// follow the link graph; keep only POST endpoints and gathered URLs in the
+			// output so those navigation-only links do not leak in.
+			ms = scan.FilterPostMatches(ms)
+		} else if *endpoints {
 			// FilterEndpointMatches keeps only endpoint_* patterns; preserve the
 			// crawl's gathered-URL findings, which are endpoint discoveries too.
 			gathered := scan.FilterGatheredMatches(ms)
