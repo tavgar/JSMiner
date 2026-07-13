@@ -608,3 +608,36 @@ func TestScanURLPostsCrawlFollowsHTMLLinks(t *testing.T) {
 		}
 	}
 }
+
+// TestScanURLResolvesScriptSrcAgainstBase verifies a relative <script src> is
+// fetched against a <base href>, so JavaScript on a page that sets a base URL is
+// still reached and scanned.
+func TestScanURLResolvesScriptSrcAgainstBase(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app/page", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		io.WriteString(w, `<html><head><base href="/assets/"></head><body><script src="bundle.js"></script></body></html>`)
+	})
+	// The bundle lives under the base path, not the page path.
+	mux.HandleFunc("/assets/bundle.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript")
+		io.WriteString(w, `fetch('https://api.example.com/from-based-script');`)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	e := NewExtractor(false, false)
+	ms, err := e.ScanURL(ts.URL+"/app/page", false, true, false)
+	if err != nil {
+		t.Fatalf("scan error: %v", err)
+	}
+	found := false
+	for _, m := range ms {
+		if m.Pattern == "endpoint_url" && strings.Contains(m.Value, "api.example.com/from-based-script") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("base-relative script was not fetched/scanned; matches=%v", ms)
+	}
+}

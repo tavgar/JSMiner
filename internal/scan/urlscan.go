@@ -398,10 +398,11 @@ func (e *Extractor) scanHTMLState(finalURL, baseHost string, data []byte, dynami
 			matches = append(matches, ms...)
 		}
 	}
+	base := documentBase(data, finalURL)
 	sources := extractScriptSrcs(data)
 	sources = append(sources, dynamic...)
 	for _, src := range sources {
-		abs := resolveURL(finalURL, src)
+		abs := resolveURL(base, src)
 		u, err := url.Parse(abs)
 		if err != nil {
 			continue
@@ -432,10 +433,11 @@ func (e *Extractor) scanHTMLStatePosts(finalURL, baseHost string, data []byte, d
 	if e.calibrator != nil {
 		matches = append(matches, extractHTMLLinkMatches(data, finalURL)...)
 	}
+	base := documentBase(data, finalURL)
 	sources := extractScriptSrcs(data)
 	sources = append(sources, dynamic...)
 	for _, src := range sources {
-		abs := resolveURL(finalURL, src)
+		abs := resolveURL(base, src)
 		u, err := url.Parse(abs)
 		if err != nil {
 			continue

@@ -23,6 +23,26 @@ var nonNavSchemes = []string{"javascript:", "mailto:", "tel:", "data:", "blob:",
 var baseHrefRe = regexp.MustCompile(`(?is)<base\b[^>]*\bhref\s*=\s*["']([^"']+)["']`)
 var baseTagRe = regexp.MustCompile(`(?is)<base\b[^>]*>`)
 
+// documentBase returns the base URL that a page's relative URLs resolve against:
+// the target of a <base href> element (resolved against the page) when present
+// and usable, otherwise the page URL itself. This governs both markup links and
+// relative <script src> references, matching how a browser resolves them.
+func documentBase(data []byte, pageURL string) string {
+	m := baseHrefRe.FindSubmatch(data)
+	if m == nil {
+		return pageURL
+	}
+	href := decodeXMLEntities(strings.TrimSpace(string(m[1])))
+	if href == "" || isTemplatePlaceholder(href) {
+		return pageURL
+	}
+	b := resolveURL(pageURL, href)
+	if u, err := url.Parse(b); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
+		return b
+	}
+	return pageURL
+}
+
 // metaTagRe matches a single <meta> tag, and metaRefreshURLRe pulls the redirect
 // target out of a refresh directive's content ("<seconds>; url=<target>").
 var metaTagRe = regexp.MustCompile(`(?is)<meta\b[^>]*>`)
@@ -51,16 +71,9 @@ func extractHTMLLinkMatches(data []byte, pageURL string) []Match {
 	// Honour <base href>: it changes the base against which every relative URL on
 	// the page resolves, so ignoring it would misplace links on sites (e.g. Angular
 	// apps) that set one. The base's own href is not a navigable link.
-	base := pageURL
+	base := documentBase(data, pageURL)
 	scan := data
-	if m := baseHrefRe.FindSubmatch(data); m != nil {
-		if href := decodeXMLEntities(strings.TrimSpace(string(m[1]))); href != "" && !isTemplatePlaceholder(href) {
-			if b := resolveURL(pageURL, href); b != "" {
-				if u, err := url.Parse(b); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
-					base = b
-				}
-			}
-		}
+	if baseTagRe.Match(data) {
 		// Strip <base> tags so their href is not emitted as a spurious endpoint.
 		scan = baseTagRe.ReplaceAll(data, []byte(" "))
 	}
