@@ -384,6 +384,11 @@ func (e *Extractor) scanHTMLState(finalURL, baseHost string, data []byte, dynami
 			matches = append(matches, ms...)
 		}
 	}
+	// Harvest the URLs the page's own markup references (anchors, forms, embedded
+	// resources). Without this the crawl would only ever follow links that appear
+	// in JavaScript, missing the link graph of server-rendered and multi-page
+	// sites entirely.
+	matches = append(matches, extractHTMLLinkMatches(data, finalURL)...)
 	for _, src := range extractInlineScripts(data) {
 		ms, err := e.ScanReaderWithEndpoints("inline.js", bytes.NewReader([]byte(src)))
 		if err == nil {

@@ -32,21 +32,28 @@ func TestScanURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(matches) != 3 {
-		t.Fatalf("expected 3 matches, got %d", len(matches))
+	// Expected: jwt (a.js) + endpoint_path "./b.js" (a.js import) + endpoint_url
+	// api.example.com/v1 (b.js) + endpoint_url .../a.js (the <script src> the page
+	// markup references, now harvested by HTML link extraction).
+	if len(matches) != 4 {
+		t.Fatalf("expected 4 matches, got %d: %+v", len(matches), matches)
 	}
 	foundJWT := false
 	foundEndpoint := false
+	foundScriptLink := false
 	for _, m := range matches {
 		if m.Pattern == "jwt" {
 			foundJWT = true
 		}
-		if m.Pattern == "endpoint_url" {
+		if m.Pattern == "endpoint_url" && strings.Contains(m.Value, "api.example.com/v1") {
 			foundEndpoint = true
 		}
+		if m.Pattern == "endpoint_url" && strings.HasSuffix(m.Value, "/a.js") {
+			foundScriptLink = true
+		}
 	}
-	if !foundJWT || !foundEndpoint {
-		t.Fatalf("missing expected matches: jwt=%v endpoint=%v", foundJWT, foundEndpoint)
+	if !foundJWT || !foundEndpoint || !foundScriptLink {
+		t.Fatalf("missing expected matches: jwt=%v endpoint=%v scriptLink=%v", foundJWT, foundEndpoint, foundScriptLink)
 	}
 }
 
