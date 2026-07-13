@@ -121,6 +121,10 @@ func noteRenderResponse(status int, h network.Headers) {
 // RenderURL loads the page at urlStr in headless Chrome and returns the
 // rendered HTML along with JavaScript URLs fetched during the page load.
 func RenderURL(urlStr string) ([]byte, []string, error) {
+	// Pace the render against the shared throttle before arming the timeout, so a
+	// backoff sleep cannot consume the render budget (see renderStates).
+	globalThrottle.wait()
+
 	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), renderExecOptions()...)
 	defer cancel()
 
@@ -147,9 +151,6 @@ func RenderURL(urlStr string) ([]byte, []string, error) {
 	var html string
 	actions := []chromedp.Action{network.Enable()}
 	actions = append(actions, headerActions(headers)...)
-	// Respect the shared throttle's proactive spacing and any active backoff
-	// before driving a render, so page loads are paced like Go-path requests.
-	globalThrottle.wait()
 	actions = append(actions,
 		chromedp.Navigate(urlStr),
 		chromedp.WaitReady("body", chromedp.ByQuery),
@@ -203,6 +204,12 @@ func RenderURLWithStates(urlStr string) ([][]byte, []string, []HTTPRequest, []st
 // interaction-based exploration of further states. It is the shared engine
 // behind RenderURLWithRequests (explore off) and RenderURLWithStates.
 func renderStates(urlStr string, explore bool) ([][]byte, []string, []HTTPRequest, []string, error) {
+	// Respect the shared throttle's proactive spacing and any active backoff
+	// before starting a render. This must happen before the render timeout is
+	// armed below, otherwise a backoff sleep would eat into the render budget and
+	// could expire the context before Chrome even navigates.
+	globalThrottle.wait()
+
 	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), renderExecOptions()...)
 	defer cancel()
 
@@ -265,9 +272,6 @@ func renderStates(urlStr string, explore bool) ([][]byte, []string, []HTTPReques
 	var baseHTML string
 	actions := []chromedp.Action{network.Enable().WithMaxPostDataSize(MaxPostDataSize)}
 	actions = append(actions, headerActions(headers)...)
-	// Respect the shared throttle's proactive spacing and any active backoff
-	// before driving a render, so page loads are paced like Go-path requests.
-	globalThrottle.wait()
 	actions = append(actions,
 		chromedp.Navigate(urlStr),
 		chromedp.Evaluate(interactionScript, nil),
