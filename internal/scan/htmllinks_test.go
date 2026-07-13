@@ -60,6 +60,49 @@ func TestExtractHTMLLinkMatches(t *testing.T) {
 	}
 }
 
+// TestExtractHTMLLinkTemplatePlaceholders verifies unresolved template
+// expressions in href/src are not emitted as garbage endpoints.
+func TestExtractHTMLLinkTemplatePlaceholders(t *testing.T) {
+	html := []byte(`
+<a href="${base}/api">a</a>
+<a href="/users/{{id}}">b</a>
+<a href="/p/<%=n%>">c</a>
+<a href="/e/#{path}">d</a>
+<a href="/real/page">e</a>`)
+	got := []string{}
+	for _, m := range extractHTMLLinkMatches(html, "https://s.test/") {
+		got = append(got, m.Value)
+	}
+	if len(got) != 1 || got[0] != "https://s.test/real/page" {
+		t.Fatalf("template placeholders should be dropped, only /real/page kept; got %v", got)
+	}
+}
+
+// TestExtractHTMLLinkMetaRefresh verifies a meta-refresh redirect target is found.
+func TestExtractHTMLLinkMetaRefresh(t *testing.T) {
+	cases := []string{
+		`<meta http-equiv="refresh" content="0; url=/landing">`,
+		`<meta content="5;URL=/landing" http-equiv=refresh>`,
+		`<META HTTP-EQUIV="REFRESH" CONTENT="0;url=/landing">`,
+	}
+	for _, html := range cases {
+		got := extractHTMLLinkMatches([]byte(html), "https://s.test/dir/page")
+		found := false
+		for _, m := range got {
+			if m.Value == "https://s.test/landing" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("meta refresh target not found in %q -> %v", html, got)
+		}
+	}
+	// A non-refresh meta must not yield a link.
+	if got := extractHTMLLinkMatches([]byte(`<meta name="x" content="url=/nope">`), "https://s.test/"); len(got) != 0 {
+		t.Errorf("non-refresh meta should yield no link, got %v", got)
+	}
+}
+
 // TestExtractHTMLLinkMatchesDedup verifies repeated links collapse to one match.
 func TestExtractHTMLLinkMatchesDedup(t *testing.T) {
 	html := []byte(`<a href="/x">1</a><a href="/x#a">2</a><a href="/x">3</a>`)

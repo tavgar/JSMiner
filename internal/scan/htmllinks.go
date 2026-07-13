@@ -17,6 +17,22 @@ var htmlURLAttrRe = regexp.MustCompile(`(?is)\b(?:href|src|action|formaction|dat
 // link using one is skipped rather than emitted as an endpoint.
 var nonNavSchemes = []string{"javascript:", "mailto:", "tel:", "data:", "blob:", "about:", "sms:", "callto:"}
 
+// metaTagRe matches a single <meta> tag, and metaRefreshURLRe pulls the redirect
+// target out of a refresh directive's content ("<seconds>; url=<target>").
+var metaTagRe = regexp.MustCompile(`(?is)<meta\b[^>]*>`)
+var metaRefreshURLRe = regexp.MustCompile(`(?is)content\s*=\s*["'][^"']*?\burl\s*=\s*([^"'\s;]+)`)
+var metaIsRefreshRe = regexp.MustCompile(`(?is)http-equiv\s*=\s*["']?\s*refresh\b`)
+
+// isTemplatePlaceholder reports whether a raw attribute value is a server- or
+// client-side template expression rather than a real URL. Template engines leave
+// markers like {{id}}, ${base}, <%= x %> or #{path} in href/src attributes; the
+// characters { } < > are never valid unencoded in a genuine URL, so their
+// presence marks the value as a placeholder to skip instead of resolving into a
+// garbage endpoint.
+func isTemplatePlaceholder(raw string) bool {
+	return strings.ContainsAny(raw, "{}<>")
+}
+
 // extractHTMLLinkMatches finds the URLs referenced by a page's HTML markup and
 // returns them as resolved, absolute endpoint matches. The crawler otherwise
 // discovers URLs only from JavaScript, so on a server-rendered or multi-page site
@@ -27,34 +43,43 @@ var nonNavSchemes = []string{"javascript:", "mailto:", "tel:", "data:", "blob:",
 func extractHTMLLinkMatches(data []byte, pageURL string) []Match {
 	seen := make(map[string]struct{})
 	var out []Match
-	for _, m := range htmlURLAttrRe.FindAllSubmatch(data, -1) {
-		raw := decodeXMLEntities(strings.TrimSpace(string(m[1])))
-		if raw == "" || strings.HasPrefix(raw, "#") {
-			continue
+	emit := func(rawAttr string) {
+		raw := decodeXMLEntities(strings.TrimSpace(rawAttr))
+		if raw == "" || strings.HasPrefix(raw, "#") || isTemplatePlaceholder(raw) {
+			return
 		}
 		low := strings.ToLower(raw)
-		skip := false
 		for _, s := range nonNavSchemes {
 			if strings.HasPrefix(low, s) {
-				skip = true
-				break
+				return
 			}
-		}
-		if skip {
-			continue
 		}
 		abs := resolveURL(pageURL, raw)
 		u, err := url.Parse(abs)
 		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-			continue
+			return
 		}
 		u.Fragment = ""
 		norm := u.String()
 		if _, ok := seen[norm]; ok {
-			continue
+			return
 		}
 		seen[norm] = struct{}{}
 		out = append(out, Match{Source: pageURL, Pattern: "endpoint_url", Value: norm, Severity: "info"})
+	}
+
+	for _, m := range htmlURLAttrRe.FindAllSubmatch(data, -1) {
+		emit(string(m[1]))
+	}
+	// A meta refresh (<meta http-equiv="refresh" content="0; url=...">) is a real
+	// navigation the crawl should follow, so pull its target out too.
+	for _, tag := range metaTagRe.FindAll(data, -1) {
+		if !metaIsRefreshRe.Match(tag) {
+			continue
+		}
+		if u := metaRefreshURLRe.FindSubmatch(tag); u != nil {
+			emit(string(u[1]))
+		}
 	}
 	return out
 }
