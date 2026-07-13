@@ -54,6 +54,7 @@ func main() {
 	noMethods := flag.Bool("no-methods", false, "disable multi-method probing / gathered-URL reporting during a crawl")
 	noParamReplay := flag.Bool("no-param-replay", false, "disable replaying discovered parameters across every directory level during a crawl")
 	noTemplateDedup := flag.Bool("no-template-dedup", false, "disable collapsing templated duplicate pages (/product/1 vs /product/2, paginated/faceted URLs) during a crawl")
+	noWellKnown := flag.Bool("no-well-known", false, "disable seeding a crawl from the site's robots.txt and XML sitemaps")
 	templateSampleMax := flag.Int("template-sample-max", 3, "max representative pages to crawl per templated class when template dedup is on")
 	noSourceMaps := flag.Bool("no-source-maps", false, "disable recovering original source from JavaScript source maps advertised by scanned bundles")
 	targetsFile := flag.String("targets", "", "file with list of targets")
@@ -141,6 +142,8 @@ func main() {
 			*noParamReplay = true
 		case "no-template-dedup":
 			*noTemplateDedup = true
+		case "no-well-known":
+			*noWellKnown = true
 		case "no-source-maps":
 			*noSourceMaps = true
 		case "methods":
@@ -395,6 +398,9 @@ func main() {
 				}
 				if *noTemplateDedup {
 					opts.TemplateDedup = false
+				}
+				if *noWellKnown {
+					opts.DiscoverWellKnown = false
 				}
 				opts.TemplateSampleMax = *templateSampleMax
 				if *methods != "" {

@@ -95,6 +95,15 @@ type CrawlOptions struct {
 	// (defaultTemplateSampleMax).
 	TemplateSampleMax int
 
+	// DiscoverWellKnown seeds the crawl from the URLs the site declares about
+	// itself: robots.txt (Allow/Disallow directories and Sitemap: pointers) and
+	// the XML sitemaps they and convention advertise (see discoverWellKnownURLs).
+	// These are real, server-published paths, so they reach pages and API roots
+	// that nothing links to and that static JS scanning never reveals. It defaults
+	// to on (see DefaultCrawlOptions) and is off in a zero-value CrawlOptions so
+	// library callers and existing tests are unaffected.
+	DiscoverWellKnown bool
+
 	// Progress, when non-nil, is invoked once per fetched page with the page
 	// URL, its depth from the seed and the running page count. It lets the CLI
 	// surface crawl progress without the scan package depending on the output
@@ -115,6 +124,7 @@ func DefaultCrawlOptions() CrawlOptions {
 		ProbeMethods: true, RequestMethods: defaultRequestMethods(),
 		ParamReplay: true, ParamReplayMax: 500,
 		TemplateDedup: true, TemplateSampleMax: defaultTemplateSampleMax,
+		DiscoverWellKnown: true,
 	}
 }
 
@@ -221,6 +231,35 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 	enqueued[start] = struct{}{}
 	// The seed is always crawled; register it so it counts toward its own class.
 	classer.admit(start)
+
+	// Seed from the site's own declarations (robots.txt / sitemaps) so the crawl
+	// reaches server-published paths that nothing links to. They enter at depth 0,
+	// like the seed, so their own discovered links get the full depth budget.
+	if opts.DiscoverWellKnown {
+		for _, raw := range discoverWellKnownURLs(origin) {
+			u, err := url.Parse(raw)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+				continue
+			}
+			if opts.SameScopeOnly && !sameScope(baseHost, u.Hostname()) {
+				continue
+			}
+			if !crawlableTarget(u) {
+				continue
+			}
+			n := normalizeCrawlURL(u.String())
+			if _, ok := enqueued[n]; ok {
+				continue
+			}
+			if !classer.admit(n) {
+				continue
+			}
+			enqueued[n] = struct{}{}
+			queue = append(queue, crawlTarget{url: n, depth: 0})
+			vlog(1, "[crawl] well-known seed %s", n)
+		}
+		vlog(1, "[crawl] seeded %d URL(s) from robots.txt/sitemaps", len(queue)-1)
+	}
 
 	var all []Match
 	pages := 0

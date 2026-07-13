@@ -77,6 +77,17 @@ Flags:
   [Template deduplication](#template-deduplication) below.
 - `-template-sample-max` how many representative pages to crawl per templated
   class when template dedup is on (default `3`).
+- `-no-well-known` disable seeding a crawl from the site's own declarations. By
+  default a crawl also fetches `robots.txt` (following its `Allow`/`Disallow`
+  directories and `Sitemap:` pointers) and the XML sitemaps it and convention
+  advertise, then enqueues those server-published URLs — reaching pages and API
+  roots that nothing links to and that static JS scanning never reveals.
+- `-rate-limit` cap outbound HTTP at N requests per second across the whole scan
+  (default `0`, no proactive limit). Independent of this, adaptive backoff is
+  always on: a `429`/`503` response — seen on the Go request path or by the
+  headless-Chrome renderer — widens the request spacing and honours the server's
+  `Retry-After` before continuing, easing back to full speed once the host stops
+  rate-limiting.
 - `-no-source-maps` disable recovering original source from JavaScript source
   maps. By default, when a scanned bundle advertises a source map (via a
   `//# sourceMappingURL=` comment or a `SourceMap` / `X-SourceMap` response

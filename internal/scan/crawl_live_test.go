@@ -62,6 +62,8 @@ func TestCrawlLiveComplexSPA(t *testing.T) {
 		"runtime-only XHR endpoint": "/api/runtime/telemetry",
 		"route-link API call":       "/api/dashboard/widgets",
 		"form POST endpoint":        "/api/login",
+		"sitemap-only endpoint":     "/api/hidden/report",
+		"robots.txt directory":      "/admin/private",
 	}
 	for label, want := range wantContains {
 		if !anyContains(found, want) {
@@ -179,10 +181,21 @@ func newComplexSPAServer() *complexSPAServer {
 		`)
 	})
 
+	// robots.txt and a sitemap expose a path that no page or bundle references, so
+	// it is reachable only through well-known discovery.
+	mux.HandleFunc("/robots.txt", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "User-agent: *\nDisallow: /admin/private\nSitemap: %s/sitemap.xml\n", s.URL)
+	})
+	mux.HandleFunc("/sitemap.xml", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		fmt.Fprintf(w, `<urlset><url><loc>%s/api/hidden/report</loc></url></urlset>`, s.URL)
+	})
+
 	// API endpoints. They 200 so method probing sees them as live; the limiter can
 	// still 429 any of them under burst.
 	for _, p := range []string{"/api/v1/users", "/api/v1/orders/history", "/api/v1/orders",
-		"/api/runtime/telemetry", "/api/dashboard/widgets", "/api/login", "/api/search"} {
+		"/api/runtime/telemetry", "/api/dashboard/widgets", "/api/login", "/api/search",
+		"/api/hidden/report", "/admin/private"} {
 		mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
 			if s.rateLimited(w, r) {
 				return
