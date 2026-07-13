@@ -9,7 +9,6 @@ import (
 	"path"
 	"regexp"
 	"strings"
-	"time"
 )
 
 // newHTTPClient builds the HTTP client shared by the URL fetch helpers: a cloned
@@ -26,9 +25,9 @@ func newHTTPClient() *http.Client {
 	}
 	return &http.Client{
 		Transport: transport,
-		Timeout:   10 * time.Second,
+		Timeout:   HTTPClientTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 5 {
+			if len(via) >= MaxRedirects {
 				return http.ErrUseLastResponse
 			}
 			return nil

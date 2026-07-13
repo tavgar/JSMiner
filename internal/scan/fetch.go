@@ -5,7 +5,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 )
 
 const defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
@@ -54,9 +53,9 @@ func FetchURL(url string) (io.ReadCloser, error) {
 	}
 	client := http.Client{
 		Transport: transport,
-		Timeout:   10 * time.Second,
+		Timeout:   HTTPClientTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 5 {
+			if len(via) >= MaxRedirects {
 				return http.ErrUseLastResponse
 			}
 			return nil

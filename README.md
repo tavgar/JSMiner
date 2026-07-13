@@ -120,6 +120,11 @@ Flags:
   headless-Chrome renderer — widens the request spacing and honours the server's
   `Retry-After` before continuing, easing back to full speed once the host stops
   rate-limiting.
+- `-http-timeout` per-request timeout in seconds for HTTP fetches — page and
+  script fetches, calibration and method probes, and sitemap downloads (default
+  `10`). Raise it for enterprise crawls of large bundles over slow links; lower
+  it so a single stalled request cannot hold up the crawl. Independent of the
+  render wait controlled by `-timeout`.
 - `-no-source-maps` disable recovering original source from JavaScript source
   maps. By default, when a scanned bundle advertises a source map (via a
   `//# sourceMappingURL=` comment or a `SourceMap` / `X-SourceMap` response

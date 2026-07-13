@@ -79,6 +79,19 @@ func SetSkipTLSVerification(skip bool) {
 	SkipTLSVerification = skip
 }
 
+// SetHTTPTimeout configures the per-request timeout for the shared HTTP fetch
+// path (page and script fetches, calibration probes, method probes, sitemaps).
+// A non-positive value restores the default. Enterprise crawls of large bundles
+// over slow links need this raised; interactive scans of flaky hosts may want it
+// lowered so a single stalled request cannot hold up the whole crawl.
+func SetHTTPTimeout(seconds int) {
+	if seconds <= 0 {
+		HTTPClientTimeout = 10 * time.Second
+		return
+	}
+	HTTPClientTimeout = time.Duration(seconds) * time.Second
+}
+
 // Other limits
 const (
 	// MaxRedirects is the maximum number of HTTP redirects to follow

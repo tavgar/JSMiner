@@ -62,6 +62,7 @@ func main() {
 	showSourceFlag := flag.Bool("show-source", false, "show source of each record (auto-enabled for multiple targets)")
 	snippet := flag.Bool("snippet", false, "show a JS-prettified, syntax-highlighted code snippet around each finding")
 	timeout := flag.Int("timeout", 8, "wait time in seconds for dynamic content to load when rendering pages (default: 8)")
+	httpTimeout := flag.Int("http-timeout", 10, "per-request timeout in seconds for HTTP fetches (page/script fetches, calibration and method probes, sitemaps)")
 	verbose1 := flag.Bool("v", false, "verbose: crawl narrative — matches per page, targets discovered, calibration/dedup skips")
 	verbose2 := flag.Bool("vv", false, "more verbose: also log every HTTP request/response and page render (implies -v)")
 	verbose3 := flag.Bool("vvv", false, "trace: also log per-target enqueue/skip, method probes, param replays and permutations (implies -vv)")
@@ -220,6 +221,17 @@ func main() {
 			if t, err := strconv.Atoi(val); err == nil {
 				*timeout = t
 			}
+		case "http-timeout":
+			val := ""
+			if len(parts) == 2 {
+				val = parts[1]
+			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				val = args[i+1]
+				i++
+			}
+			if t, err := strconv.Atoi(val); err == nil {
+				*httpTimeout = t
+			}
 		case "header":
 			val := ""
 			if len(parts) == 2 {
@@ -364,6 +376,7 @@ func main() {
 	}
 	scan.SetMaxExploreStates(*exploreStates)
 	scan.SetSkipTLSVerification(*insecure)
+	scan.SetHTTPTimeout(*httpTimeout)
 	scan.SetRateLimit(*rateLimit)
 
 	// -v/-vv/-vvv are cumulative: the highest one given wins, and each level
