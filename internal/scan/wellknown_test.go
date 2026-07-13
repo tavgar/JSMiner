@@ -1,12 +1,22 @@
 package scan
 
 import (
+	"bytes"
+	"compress/gzip"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+func gzipBytes(s string) []byte {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	zw.Write([]byte(s))
+	zw.Close()
+	return buf.Bytes()
+}
 
 func TestRobotsPathPrefix(t *testing.T) {
 	cases := map[string]string{
@@ -57,10 +67,28 @@ func TestParseRobots(t *testing.T) {
 	}
 }
 
+func TestMaybeGunzip(t *testing.T) {
+	plain := []byte("<urlset></urlset>")
+	if got := maybeGunzip(plain); string(got) != string(plain) {
+		t.Errorf("plain data should pass through unchanged, got %q", got)
+	}
+	gz := gzipBytes("<urlset><url><loc>https://e.test/a</loc></url></urlset>")
+	got := maybeGunzip(gz)
+	if !strings.Contains(string(got), "https://e.test/a") {
+		t.Errorf("gzip data should be decompressed, got %q", got)
+	}
+	// Gzip magic but truncated/garbage body -> nil (unreadable stream).
+	if got := maybeGunzip([]byte{0x1f, 0x8b, 0x08, 0x00, 0x00}); got != nil {
+		t.Errorf("corrupt gzip should return nil, got %q", got)
+	}
+}
+
 func TestLooksLikeSitemap(t *testing.T) {
 	yes := []string{"https://e.test/sitemap.xml", "https://e.test/sitemap_index.xml",
-		"https://e.test/sitemaps/products-sitemap.xml", "https://e.test/sitemap.xml?page=2"}
-	no := []string{"https://e.test/products/1", "https://e.test/data.xml", "https://e.test/about"}
+		"https://e.test/sitemaps/products-sitemap.xml", "https://e.test/sitemap.xml?page=2",
+		"https://e.test/sitemap.xml.gz", "https://e.test/products-sitemap.xml.gz"}
+	no := []string{"https://e.test/products/1", "https://e.test/data.xml", "https://e.test/about",
+		"https://e.test/archive.tar.gz"}
 	for _, u := range yes {
 		if !looksLikeSitemap(u) {
 			t.Errorf("looksLikeSitemap(%q) = false, want true", u)
@@ -123,6 +151,41 @@ func TestDiscoverWellKnownURLs(t *testing.T) {
 	for u := range got {
 		if looksLikeSitemap(u) {
 			t.Errorf("sitemap document %q leaked into page results", u)
+		}
+	}
+}
+
+// TestDiscoverWellKnownURLsGzipped verifies the pipeline transparently handles
+// gzipped sitemaps: robots.txt points at a gzipped sitemap index, which points at
+// a gzipped child sitemap of pages, and all page URLs are still recovered.
+func TestDiscoverWellKnownURLsGzipped(t *testing.T) {
+	var origin string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/robots.txt", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "Sitemap: %s/sitemap_index.xml.gz\n", origin)
+	})
+	mux.HandleFunc("/sitemap_index.xml.gz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/gzip")
+		w.Write(gzipBytes(fmt.Sprintf(
+			`<sitemapindex><sitemap><loc>%s/pages.xml.gz</loc></sitemap></sitemapindex>`, origin)))
+	})
+	mux.HandleFunc("/pages.xml.gz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/gzip")
+		w.Write(gzipBytes(fmt.Sprintf(
+			`<urlset><url><loc>%s/gz-page-1</loc></url><url><loc>%s/gz-page-2</loc></url></urlset>`, origin, origin)))
+	})
+	// No plain /sitemap.xml here (404), so discovery must come from the gz chain.
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	origin = srv.URL
+
+	got := map[string]bool{}
+	for _, u := range discoverWellKnownURLs(origin) {
+		got[u] = true
+	}
+	for _, want := range []string{origin + "/gz-page-1", origin + "/gz-page-2"} {
+		if !got[want] {
+			t.Errorf("missing gzipped-sitemap URL %q (got %v)", want, keysOf(got))
 		}
 	}
 }

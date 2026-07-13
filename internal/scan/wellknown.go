@@ -1,6 +1,8 @@
 package scan
 
 import (
+	"bytes"
+	"compress/gzip"
 	"io"
 	"net/url"
 	"regexp"
@@ -26,6 +28,10 @@ const (
 	// sitemap index pointing at hundreds of child sitemaps cannot fan out
 	// unboundedly.
 	wellKnownMaxSitemaps = 20
+
+	// wellKnownMaxDecompressed caps the size of a gunzipped sitemap so a
+	// gzip-bomb sitemap.xml.gz cannot exhaust memory.
+	wellKnownMaxDecompressed = 32 << 20
 )
 
 var (
@@ -86,14 +92,19 @@ func discoverWellKnownURLs(origin string) []string {
 			continue
 		}
 		docs++
+		// Classify <loc> entries by the document type, which is authoritative: a
+		// sitemap index's children are always further sitemaps to fetch, a urlset's
+		// entries are always pages. Fall back to the URL-name heuristic only for a
+		// document whose root element is neither (malformed or truncated).
+		isIndex := strings.Contains(strings.ToLower(body), "<sitemapindex")
+		isURLSet := strings.Contains(strings.ToLower(body), "<urlset")
 		for _, loc := range sitemapLocRe.FindAllStringSubmatch(body, -1) {
 			locURL := decodeXMLEntities(strings.TrimSpace(loc[1]))
 			if locURL == "" {
 				continue
 			}
-			// A <loc> pointing at another sitemap (a sitemap index) is queued for
-			// fetching rather than returned as a page.
-			if looksLikeSitemap(locURL) {
+			childSitemap := isIndex || (!isURLSet && looksLikeSitemap(locURL))
+			if childSitemap {
 				if _, done := fetched[locURL]; !done {
 					queue = append(queue, locURL)
 				}
@@ -170,6 +181,9 @@ func looksLikeSitemap(raw string) bool {
 	if i := strings.IndexAny(lower, "?#"); i >= 0 {
 		lower = lower[:i]
 	}
+	// A gzipped sitemap (sitemap.xml.gz) is still a sitemap document to fetch and
+	// parse; strip the .gz so the .xml/sitemap tests below apply.
+	lower = strings.TrimSuffix(lower, ".gz")
 	return strings.HasSuffix(lower, "sitemap.xml") ||
 		strings.HasSuffix(lower, ".xml") && strings.Contains(lower, "sitemap")
 }
@@ -190,7 +204,33 @@ func fetchWellKnownBody(u string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
+	// A gzipped sitemap (commonly sitemap.xml.gz) is served as a gzip file, not
+	// via Content-Encoding, so the HTTP client does not transparently decode it.
+	// Detect the gzip magic bytes and decompress so the XML underneath is parsed
+	// rather than mined as binary noise.
+	if data = maybeGunzip(data); data == nil {
+		return "", false
+	}
 	return string(data), true
+}
+
+// maybeGunzip decompresses data when it carries the gzip magic header, capping
+// the decompressed output. It returns data unchanged when it is not gzip, and nil
+// only when a gzip stream is present but cannot be read.
+func maybeGunzip(data []byte) []byte {
+	if len(data) < 2 || data[0] != 0x1f || data[1] != 0x8b {
+		return data
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil
+	}
+	defer zr.Close()
+	out, err := io.ReadAll(io.LimitReader(zr, wellKnownMaxDecompressed))
+	if err != nil {
+		return nil
+	}
+	return out
 }
 
 // decodeXMLEntities expands the handful of XML entities a sitemap <loc> may carry
