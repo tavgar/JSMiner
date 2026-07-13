@@ -51,6 +51,19 @@ func newRenderContext(parent context.Context) (context.Context, context.CancelFu
 	}))
 }
 
+// ChromePath, when set, is the explicit path to the Chrome/Chromium executable
+// used for rendering. It is empty by default, in which case chromedp auto-detects
+// a browser on PATH. Setting it lets JSMiner render in environments where Chrome
+// is installed at a known location that is not on PATH — common in CI images and
+// containers (Playwright/Puppeteer browser caches, custom installs) — where
+// auto-detection would otherwise fail and rendering would silently fall back to a
+// static fetch.
+var ChromePath string
+
+// SetChromePath configures an explicit Chrome/Chromium executable path for
+// rendering. An empty value restores chromedp's PATH-based auto-detection.
+func SetChromePath(path string) { ChromePath = path }
+
 // renderExecOptions builds the headless-Chrome allocator options shared by every
 // render helper.
 func renderExecOptions() []chromedp.ExecAllocatorOption {
@@ -59,6 +72,9 @@ func renderExecOptions() []chromedp.ExecAllocatorOption {
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("no-sandbox", true),
 	)
+	if ChromePath != "" {
+		opts = append(opts, chromedp.ExecPath(ChromePath))
+	}
 	if SkipTLSVerification {
 		opts = append(opts, chromedp.Flag("ignore-certificate-errors", true))
 	}

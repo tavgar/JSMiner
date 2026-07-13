@@ -104,6 +104,11 @@ Flags:
   from flooding the output with duplicate, low-value findings. See
   [Auto-calibration](#auto-calibration) below.
 - `-render` render pages with headless Chrome (default `true`, set `-render=false` to disable; Chrome/Chromium must be installed)
+- `-chrome-path` explicit path to the Chrome/Chromium executable used for
+  rendering. By default JSMiner auto-detects a browser on `PATH`; set this (or the
+  `JSMINER_CHROME` environment variable) when Chrome is installed at a known
+  location that is not on `PATH` — common in CI images and containers — so
+  rendering works instead of silently falling back to a static fetch.
 - `-longsecret` detect generic long secrets (disabled by default). Enable to
   search for high-entropy strings that may represent API keys.
 - `-output` write output to file instead of stdout.

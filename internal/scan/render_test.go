@@ -128,3 +128,20 @@ func TestExploreBudgetScaling(t *testing.T) {
 		t.Error("enabled exploration should grant a positive time budget")
 	}
 }
+
+// TestChromePathAddsExecOption verifies that setting an explicit Chrome path adds
+// exactly one allocator option (the ExecPath override) and that clearing it
+// restores auto-detection.
+func TestChromePathAddsExecOption(t *testing.T) {
+	SetChromePath("")
+	base := len(renderExecOptions())
+	SetChromePath("/opt/somewhere/chrome")
+	defer SetChromePath("")
+	if got := len(renderExecOptions()); got != base+1 {
+		t.Fatalf("expected one extra exec option with ChromePath set, base=%d got=%d", base, got)
+	}
+	SetChromePath("")
+	if got := len(renderExecOptions()); got != base {
+		t.Fatalf("clearing ChromePath should restore option count %d, got %d", base, got)
+	}
+}
