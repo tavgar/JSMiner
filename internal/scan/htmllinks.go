@@ -17,6 +17,12 @@ var htmlURLAttrRe = regexp.MustCompile(`(?is)\b(?:href|src|action|formaction|dat
 // link using one is skipped rather than emitted as an endpoint.
 var nonNavSchemes = []string{"javascript:", "mailto:", "tel:", "data:", "blob:", "about:", "sms:", "callto:"}
 
+// baseHrefRe captures the href of a <base> element (which sets the document base
+// URL for relative links); baseTagRe matches the whole <base> tag so it can be
+// stripped before link extraction.
+var baseHrefRe = regexp.MustCompile(`(?is)<base\b[^>]*\bhref\s*=\s*["']([^"']+)["']`)
+var baseTagRe = regexp.MustCompile(`(?is)<base\b[^>]*>`)
+
 // metaTagRe matches a single <meta> tag, and metaRefreshURLRe pulls the redirect
 // target out of a refresh directive's content ("<seconds>; url=<target>").
 var metaTagRe = regexp.MustCompile(`(?is)<meta\b[^>]*>`)
@@ -38,9 +44,27 @@ func isTemplatePlaceholder(raw string) bool {
 // discovers URLs only from JavaScript, so on a server-rendered or multi-page site
 // its <a href> / <form action> links — the primary way such pages reach one
 // another — would be invisible. Each value is entity-decoded and resolved against
-// the page URL, so relative links (including bare-relative ones the JS endpoint
-// heuristics reject) become concrete, crawlable URLs.
+// the document base (honouring a <base href>, else the page URL), so relative
+// links (including bare-relative ones the JS endpoint heuristics reject) become
+// concrete, crawlable URLs.
 func extractHTMLLinkMatches(data []byte, pageURL string) []Match {
+	// Honour <base href>: it changes the base against which every relative URL on
+	// the page resolves, so ignoring it would misplace links on sites (e.g. Angular
+	// apps) that set one. The base's own href is not a navigable link.
+	base := pageURL
+	scan := data
+	if m := baseHrefRe.FindSubmatch(data); m != nil {
+		if href := decodeXMLEntities(strings.TrimSpace(string(m[1]))); href != "" && !isTemplatePlaceholder(href) {
+			if b := resolveURL(pageURL, href); b != "" {
+				if u, err := url.Parse(b); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
+					base = b
+				}
+			}
+		}
+		// Strip <base> tags so their href is not emitted as a spurious endpoint.
+		scan = baseTagRe.ReplaceAll(data, []byte(" "))
+	}
+
 	seen := make(map[string]struct{})
 	var out []Match
 	emit := func(rawAttr string) {
@@ -54,7 +78,7 @@ func extractHTMLLinkMatches(data []byte, pageURL string) []Match {
 				return
 			}
 		}
-		abs := resolveURL(pageURL, raw)
+		abs := resolveURL(base, raw)
 		u, err := url.Parse(abs)
 		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 			return
@@ -68,7 +92,7 @@ func extractHTMLLinkMatches(data []byte, pageURL string) []Match {
 		out = append(out, Match{Source: pageURL, Pattern: "endpoint_url", Value: norm, Severity: "info"})
 	}
 
-	for _, m := range htmlURLAttrRe.FindAllSubmatch(data, -1) {
+	for _, m := range htmlURLAttrRe.FindAllSubmatch(scan, -1) {
 		emit(string(m[1]))
 	}
 	// A meta refresh (<meta http-equiv="refresh" content="0; url=...">) is a real

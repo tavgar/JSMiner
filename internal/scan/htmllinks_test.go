@@ -103,6 +103,37 @@ func TestExtractHTMLLinkMetaRefresh(t *testing.T) {
 	}
 }
 
+// TestExtractHTMLLinkBaseHref verifies relative links resolve against a <base
+// href> when present, and that the base element's own href is not emitted.
+func TestExtractHTMLLinkBaseHref(t *testing.T) {
+	html := []byte(`<html><head><base href="/app/v2/"></head><body>
+<a href="users/list">u</a>
+<a href="/root/abs">r</a>
+<a href="https://other.test/x">o</a>
+</body></html>`)
+	got := map[string]bool{}
+	for _, m := range extractHTMLLinkMatches(html, "https://s.test/some/page") {
+		got[m.Value] = true
+	}
+	want := []string{
+		"https://s.test/app/v2/users/list", // resolved against <base>, not page path
+		"https://s.test/root/abs",          // rooted path ignores base path
+		"https://other.test/x",             // absolute unaffected
+	}
+	for _, w := range want {
+		if !got[w] {
+			t.Errorf("missing %q; got %v", w, keysOf(got))
+		}
+	}
+	// The <base> element's own href must not surface as a navigable link.
+	if got["https://s.test/app/v2/"] {
+		t.Errorf("<base> href leaked as an endpoint")
+	}
+	if len(got) != 3 {
+		t.Errorf("expected exactly 3 links, got %d: %v", len(got), keysOf(got))
+	}
+}
+
 // TestExtractHTMLLinkMatchesDedup verifies repeated links collapse to one match.
 func TestExtractHTMLLinkMatchesDedup(t *testing.T) {
 	html := []byte(`<a href="/x">1</a><a href="/x#a">2</a><a href="/x">3</a>`)
