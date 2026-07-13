@@ -134,6 +134,33 @@ func TestExtractHTMLLinkBaseHref(t *testing.T) {
 	}
 }
 
+// TestExtractHTMLLinkEdgeCases locks in correct handling of protocol-relative
+// URLs, case-insensitive attributes, SVG xlink:href, multiple <base> elements
+// (first wins, per the HTML spec) and whitespace around the '=' — so a future
+// regex change cannot silently regress them.
+func TestExtractHTMLLinkEdgeCases(t *testing.T) {
+	cases := []struct {
+		name string
+		html string
+		want string
+	}{
+		{"protocol-relative", `<a href="//cdn.other.test/app.js">x</a>`, "https://cdn.other.test/app.js"},
+		{"uppercase-attr", `<A HREF="/upper/case">x</A>`, "https://s.test/upper/case"},
+		{"xlink-href", `<use xlink:href="/sprite.svg#icon"/>`, "https://s.test/sprite.svg"},
+		{"multi-base-first-wins", `<base href="/first/"><base href="/second/"><a href="rel">x</a>`, "https://s.test/first/rel"},
+		{"whitespace-around-eq", `<a href = "/spaced" >x</a>`, "https://s.test/spaced"},
+	}
+	for _, c := range cases {
+		got := map[string]bool{}
+		for _, m := range extractHTMLLinkMatches([]byte(c.html), "https://s.test/dir/page") {
+			got[m.Value] = true
+		}
+		if !got[c.want] {
+			t.Errorf("%s: expected %q, got %v", c.name, c.want, keysOf(got))
+		}
+	}
+}
+
 // TestExtractHTMLLinkMatchesDedup verifies repeated links collapse to one match.
 func TestExtractHTMLLinkMatchesDedup(t *testing.T) {
 	html := []byte(`<a href="/x">1</a><a href="/x#a">2</a><a href="/x">3</a>`)
