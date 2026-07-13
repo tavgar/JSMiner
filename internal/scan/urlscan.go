@@ -424,6 +424,14 @@ func (e *Extractor) scanHTMLState(finalURL, baseHost string, data []byte, dynami
 // not scanned here (POST endpoints come from the linked script sources).
 func (e *Extractor) scanHTMLStatePosts(finalURL, baseHost string, data []byte, dynamic []string, visited map[string]struct{}, external, render bool) []Match {
 	var matches []Match
+	// During a crawl (calibrator set), harvest the page's markup links so the posts
+	// crawl follows the HTML link graph to reach deeper pages — and the POST
+	// endpoints their scripts hold — that nothing in JavaScript references. These
+	// endpoint_url matches drive navigation only; the CLI filters them out of the
+	// POST-endpoint output via FilterPostMatches.
+	if e.calibrator != nil {
+		matches = append(matches, extractHTMLLinkMatches(data, finalURL)...)
+	}
 	sources := extractScriptSrcs(data)
 	sources = append(sources, dynamic...)
 	for _, src := range sources {

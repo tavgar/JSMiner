@@ -556,3 +556,55 @@ func (c *chanCounter) count() int {
 	defer c.mu.Unlock()
 	return c.n
 }
+
+// TestScanURLPostsCrawlFollowsHTMLLinks verifies a posts crawl follows the HTML
+// link graph — not just JavaScript references — to reach a POST endpoint that is
+// only discoverable by navigating to a deeper page, and that the navigation-only
+// markup links do not leak into the POST-filtered output.
+func TestScanURLPostsCrawlFollowsHTMLLinks(t *testing.T) {
+	mux := http.NewServeMux()
+	// Seed page: a plain HTML link to /deep and no script of its own.
+	mux.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		io.WriteString(w, `<html><body><a href="/deep">deep</a></body></html>`)
+	})
+	// Deep page: reachable only via the seed's HTML link; loads a bundle.
+	mux.HandleFunc("/deep", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		io.WriteString(w, `<html><body><script src="/d.js"></script></body></html>`)
+	})
+	mux.HandleFunc("/d.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript")
+		io.WriteString(w, `fetch('/api/submit',{method:'POST',body:JSON.stringify({x:1})});`)
+	})
+	mux.HandleFunc("/api/submit", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"ok":true}`)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	e := NewExtractor(false, false)
+	opts := CrawlOptions{MaxDepth: 3, MaxPages: 30, SameScopeOnly: true, AutoCalibrate: true}
+	ms, err := e.ScanURLPostsCrawl(ts.URL+"/", false, false, opts)
+	if err != nil {
+		t.Fatalf("posts crawl error: %v", err)
+	}
+
+	foundPost := false
+	for _, m := range ms {
+		if (m.Pattern == "post_url" || m.Pattern == "post_path") && strings.HasSuffix(m.Value, "/api/submit") {
+			foundPost = true
+		}
+	}
+	if !foundPost {
+		t.Errorf("posts crawl did not reach /api/submit via the HTML link graph; matches=%v", ms)
+	}
+
+	// After POST filtering, only post/gathered patterns remain — no endpoint_url
+	// navigation links.
+	for _, m := range FilterPostMatches(ms) {
+		if strings.HasPrefix(m.Pattern, "endpoint_") {
+			t.Errorf("navigation link leaked into POST output: %+v", m)
+		}
+	}
+}

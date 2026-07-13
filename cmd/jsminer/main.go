@@ -516,7 +516,12 @@ func main() {
 			f.Close()
 		}
 
-		if !*posts && *endpoints {
+		if *posts {
+			// A posts crawl harvests HTML markup links (as endpoint_url matches) to
+			// follow the link graph; keep only POST endpoints and gathered URLs in the
+			// output so those navigation-only links do not leak in.
+			ms = scan.FilterPostMatches(ms)
+		} else if *endpoints {
 			// FilterEndpointMatches keeps only endpoint_* patterns; preserve the
 			// crawl's gathered-URL findings, which are endpoint discoveries too.
 			gathered := scan.FilterGatheredMatches(ms)
