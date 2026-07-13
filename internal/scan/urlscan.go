@@ -61,7 +61,13 @@ func fetchURLResponseMethod(u, method, body string) (*http.Response, error) {
 	if body != "" && req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", inferContentType(body))
 	}
+	// Pace outbound requests so a crawl's burst of fetches, probes and
+	// calibrations stays under the target's rate limit, and back off when the
+	// server signals 429/503. wait() blocks for the configured/adaptive gap;
+	// observe() adapts the gap to the response.
+	globalThrottle.wait()
 	resp, err := newHTTPClient().Do(req)
+	globalThrottle.observe(resp, err)
 	if err != nil {
 		vlog(2, "http %s %s -> error: %v", method, u, err)
 		return nil, err

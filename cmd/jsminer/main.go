@@ -65,6 +65,7 @@ func main() {
 	verbose2 := flag.Bool("vv", false, "more verbose: also log every HTTP request/response and page render (implies -v)")
 	verbose3 := flag.Bool("vvv", false, "trace: also log per-target enqueue/skip, method probes, param replays and permutations (implies -vv)")
 	exploreStates := flag.Int("explore-states", 12, "when rendering, max additional application states to reach through interaction — client-side navigation and filled/submitted forms (0 = render each page once)")
+	rateLimit := flag.Float64("rate-limit", 0, "max HTTP requests per second across the scan (0 = no proactive limit; adaptive 429/503 backoff is always on)")
 	var headerFlags headerSlice
 	flag.Var(&headerFlags, "header", "HTTP header in 'Key: Value' format. May be repeated")
 	flag.Parse()
@@ -152,6 +153,17 @@ func main() {
 			}
 			if val != "" {
 				*methods = val
+			}
+		case "rate-limit":
+			val := ""
+			if len(parts) == 2 {
+				val = parts[1]
+			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				val = args[i+1]
+				i++
+			}
+			if f, err := strconv.ParseFloat(val, 64); err == nil {
+				*rateLimit = f
 			}
 		case "crawl-depth", "crawl-max-pages", "crawl-permute-max", "template-sample-max":
 			val := ""
@@ -296,6 +308,7 @@ func main() {
 	}
 	scan.SetMaxExploreStates(*exploreStates)
 	scan.SetSkipTLSVerification(*insecure)
+	scan.SetRateLimit(*rateLimit)
 
 	// -v/-vv/-vvv are cumulative: the highest one given wins, and each level
 	// implies the ones below it.
