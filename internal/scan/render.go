@@ -94,6 +94,30 @@ func headerActions(headers map[string]interface{}) []chromedp.Action {
 	}
 }
 
+// retryAfterFromHeaders extracts the Retry-After header value from a CDP response
+// header map, matching case-insensitively. It returns "" when absent.
+func retryAfterFromHeaders(h network.Headers) string {
+	for k, v := range h {
+		if strings.EqualFold(k, "Retry-After") {
+			if s, ok := v.(string); ok {
+				return s
+			}
+			return fmt.Sprintf("%v", v)
+		}
+	}
+	return ""
+}
+
+// noteRenderResponse feeds a response headless Chrome received into the shared
+// throttle when it is a rate-limit/overload signal, so a 429/503 the browser hits
+// during a render backs off the whole scan even though Chrome's own fetches never
+// pass through the Go request path.
+func noteRenderResponse(status int, h network.Headers) {
+	if isThrottleStatus(status) {
+		globalThrottle.noteThrottled(status, retryAfterFromHeaders(h))
+	}
+}
+
 // RenderURL loads the page at urlStr in headless Chrome and returns the
 // rendered HTML along with JavaScript URLs fetched during the page load.
 func RenderURL(urlStr string) ([]byte, []string, error) {
@@ -111,6 +135,7 @@ func RenderURL(urlStr string) ([]byte, []string, error) {
 	scriptSet := make(map[string]struct{})
 	chromedp.ListenTarget(ctx, func(ev interface{}) {
 		if e, ok := ev.(*network.EventResponseReceived); ok {
+			noteRenderResponse(int(e.Response.Status), e.Response.Headers)
 			u := e.Response.URL
 			if strings.HasSuffix(strings.ToLower(u), ".js") ||
 				strings.Contains(e.Response.MimeType, "javascript") {
@@ -122,6 +147,9 @@ func RenderURL(urlStr string) ([]byte, []string, error) {
 	var html string
 	actions := []chromedp.Action{network.Enable()}
 	actions = append(actions, headerActions(headers)...)
+	// Respect the shared throttle's proactive spacing and any active backoff
+	// before driving a render, so page loads are paced like Go-path requests.
+	globalThrottle.wait()
 	actions = append(actions,
 		chromedp.Navigate(urlStr),
 		chromedp.WaitReady("body", chromedp.ByQuery),
@@ -196,6 +224,7 @@ func renderStates(urlStr string, explore bool) ([][]byte, []string, []HTTPReques
 	chromedp.ListenTarget(ctx, func(ev interface{}) {
 		switch e := ev.(type) {
 		case *network.EventResponseReceived:
+			noteRenderResponse(int(e.Response.Status), e.Response.Headers)
 			u := e.Response.URL
 			if strings.HasSuffix(strings.ToLower(u), ".js") ||
 				strings.Contains(e.Response.MimeType, "javascript") {
@@ -236,6 +265,9 @@ func renderStates(urlStr string, explore bool) ([][]byte, []string, []HTTPReques
 	var baseHTML string
 	actions := []chromedp.Action{network.Enable().WithMaxPostDataSize(MaxPostDataSize)}
 	actions = append(actions, headerActions(headers)...)
+	// Respect the shared throttle's proactive spacing and any active backoff
+	// before driving a render, so page loads are paced like Go-path requests.
+	globalThrottle.wait()
 	actions = append(actions,
 		chromedp.Navigate(urlStr),
 		chromedp.Evaluate(interactionScript, nil),

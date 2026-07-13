@@ -150,6 +150,38 @@ func TestThrottleTransportErrorDoesNotDecay(t *testing.T) {
 	}
 }
 
+func TestNoteThrottledBacksOffLikeObserve(t *testing.T) {
+	th, slept, _ := newTestThrottle()
+	// The render path feeds a browser-observed 429 in via noteThrottled; it must
+	// widen the gap and delay the next request just as a Go-path 429 would.
+	th.noteThrottled(429, "2")
+	if th.curGap != throttleMinBackoff {
+		t.Fatalf("expected curGap %s, got %s", throttleMinBackoff, th.curGap)
+	}
+	th.wait()
+	if len(*slept) != 1 || (*slept)[0] < 2*time.Second {
+		t.Fatalf("expected a >= 2s wait honouring Retry-After, got %v", *slept)
+	}
+}
+
+func TestObserveDelegatesToNoteThrottled(t *testing.T) {
+	th, _, _ := newTestThrottle()
+	th.observe(resp(503, ""), nil)
+	if th.curGap != throttleMinBackoff {
+		t.Fatalf("expected observe(503) to back off to %s, got %s", throttleMinBackoff, th.curGap)
+	}
+}
+
+func TestRetryAfterFromHeaders(t *testing.T) {
+	h := map[string]interface{}{"Content-Type": "text/html", "retry-after": "9"}
+	if got := retryAfterFromHeaders(h); got != "9" {
+		t.Fatalf("expected case-insensitive Retry-After=9, got %q", got)
+	}
+	if got := retryAfterFromHeaders(map[string]interface{}{}); got != "" {
+		t.Fatalf("expected empty for missing header, got %q", got)
+	}
+}
+
 func TestParseRetryAfterHTTPDate(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	future := now.Add(30 * time.Second).UTC().Format(http.TimeFormat)

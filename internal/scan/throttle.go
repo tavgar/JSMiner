@@ -132,45 +132,69 @@ func (t *requestThrottle) wait() {
 	}
 }
 
-// observe records the outcome of a request so the throttle can adapt: a 429/503
-// widens the gap and pushes the next-allowed instant out (honouring Retry-After),
-// while a run of clean responses decays the gap back toward the base.
+// isThrottleStatus reports whether a status code is a server rate-limit / overload
+// signal the throttle should back off from.
+func isThrottleStatus(status int) bool {
+	return status == http.StatusTooManyRequests || status == http.StatusServiceUnavailable
+}
+
+// observe records the outcome of a Go-client request so the throttle can adapt: a
+// 429/503 widens the gap and pushes the next-allowed instant out (honouring
+// Retry-After), while a run of clean responses decays the gap back toward the base.
 func (t *requestThrottle) observe(resp *http.Response, err error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	if err == nil && resp != nil && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable) {
-		t.ok = 0
-		next := t.curGap * 2
-		if next < throttleMinBackoff {
-			next = throttleMinBackoff
-		}
-		if next > t.maxGap {
-			next = t.maxGap
-		}
-		t.curGap = next
-
-		resumeAt := t.now().Add(t.curGap)
-		if ra := parseRetryAfter(resp.Header.Get("Retry-After"), t.now); ra > 0 {
-			if ra > t.maxGap {
-				ra = t.maxGap
-			}
-			if until := t.now().Add(ra); until.After(resumeAt) {
-				resumeAt = until
-			}
-		}
-		if resumeAt.After(t.next) {
-			t.next = resumeAt
-		}
-		vlog(2, "[throttle] %d from server -> backing off, gap now %s", resp.StatusCode, t.curGap.Round(time.Millisecond))
+	if err == nil && resp != nil && isThrottleStatus(resp.StatusCode) {
+		t.noteThrottled(resp.StatusCode, resp.Header.Get("Retry-After"))
 		return
 	}
-
 	// A transport error carries no rate-limit signal, so leave the gap unchanged;
 	// only genuine clean responses earn a decay back toward the base gap.
 	if err != nil || resp == nil {
 		return
 	}
+	t.decay()
+}
+
+// noteThrottled folds a rate-limit response into the adaptive gap: it doubles the
+// gap (up to the ceiling) and pushes the next-allowed instant out, honouring the
+// server's Retry-After hint. It is exported to the render path so a 429/503 seen
+// by headless Chrome — whose sub-resource fetches never pass through observe —
+// still slows the rest of the scan, making the throttle a rate-limit signal
+// shared across the Go and browser request paths. retryAfter is the raw header
+// value ("" when absent).
+func (t *requestThrottle) noteThrottled(status int, retryAfter string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.ok = 0
+	next := t.curGap * 2
+	if next < throttleMinBackoff {
+		next = throttleMinBackoff
+	}
+	if next > t.maxGap {
+		next = t.maxGap
+	}
+	t.curGap = next
+
+	resumeAt := t.now().Add(t.curGap)
+	if ra := parseRetryAfter(retryAfter, t.now); ra > 0 {
+		if ra > t.maxGap {
+			ra = t.maxGap
+		}
+		if until := t.now().Add(ra); until.After(resumeAt) {
+			resumeAt = until
+		}
+	}
+	if resumeAt.After(t.next) {
+		t.next = resumeAt
+	}
+	vlog(2, "[throttle] %d from server -> backing off, gap now %s", status, t.curGap.Round(time.Millisecond))
+}
+
+// decay eases the adaptive gap back toward the base after a run of clean
+// responses, so the crawl returns to full speed once a host stops rate-limiting.
+func (t *requestThrottle) decay() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	if t.curGap <= t.baseGap {
 		return
 	}
