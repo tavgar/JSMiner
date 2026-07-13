@@ -42,7 +42,27 @@ var (
 	// when none is found locally. It is on by default so rendering works out of the
 	// box; -no-download-browser turns it off for air-gapped or bundle-only setups.
 	AutoDownloadBrowser = true
+
+	// BrowserNotice, when set, receives short human-readable status messages about
+	// browser provisioning — chiefly the first-run download, which is large enough
+	// (~150MB) that a user should be told it is happening rather than seeing the
+	// scan appear to hang. The CLI wires it to stderr; it is unset (silent) for
+	// library callers.
+	BrowserNotice func(msg string)
 )
+
+// browserNotice emits a provisioning status message if a notice sink is set.
+func browserNotice(format string, args ...interface{}) {
+	if BrowserNotice != nil {
+		BrowserNotice(fmt.Sprintf(format, args...))
+	}
+}
+
+// WarmBrowser resolves (and, if necessary, downloads) the render browser now,
+// caching the result for later renders. The CLI calls it once at startup when
+// rendering is enabled so any first-run download happens up front — with a visible
+// notice — instead of silently stalling the first page render mid-scan.
+func WarmBrowser() { resolvedBrowserPath() }
 
 // SetAutoDownloadBrowser toggles on-demand browser provisioning.
 func SetAutoDownloadBrowser(on bool) { AutoDownloadBrowser = on }
@@ -92,11 +112,14 @@ func ResolveBrowser() string {
 			return p
 		}
 		vlog(1, "[browser] downloading latest Chrome-for-Testing %s", version)
+		browserNotice("downloading Chromium %s (first run, ~150MB)…", version)
 		if p, err := downloadBrowser(root, version); err == nil {
 			vlog(1, "[browser] provisioned Chromium %s at %s", version, p)
+			browserNotice("Chromium ready")
 			return p
 		} else {
 			vlog(1, "[browser] browser download failed: %v", err)
+			browserNotice("Chromium download failed (%v); falling back to any local browser", err)
 		}
 	}
 

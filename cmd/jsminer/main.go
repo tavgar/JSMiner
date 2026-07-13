@@ -270,6 +270,11 @@ func main() {
 	if *noDownloadBrowser {
 		scan.SetAutoDownloadBrowser(false)
 	}
+	// Surface browser provisioning (chiefly the large first-run download) so the
+	// scan does not appear to hang while Chromium downloads.
+	if !*quiet {
+		scan.BrowserNotice = func(msg string) { fmt.Fprintln(os.Stderr, "jsminer: "+msg) }
+	}
 	if *downloadBrowser {
 		var (
 			p   string
@@ -374,6 +379,13 @@ func main() {
 		verbosity = 3
 	}
 	scan.SetVerbosity(verbosity)
+
+	// Provision the render browser up front (when rendering) so any first-run
+	// Chromium download happens with a visible notice before scanning begins,
+	// rather than silently stalling the first page render.
+	if *render && *proxyAddr == "" && len(targets) > 0 {
+		scan.WarmBrowser()
+	}
 
 	extractor := scan.NewExtractor(*safe, *longSecret)
 	extractor.SetSnippet(*snippet)

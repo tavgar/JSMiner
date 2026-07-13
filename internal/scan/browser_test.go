@@ -263,9 +263,24 @@ func TestResolveBrowserDownloadsLatest(t *testing.T) {
 		os.Setenv("XDG_CACHE_HOME", savedCache)
 	}()
 
+	var notices []string
+	savedNotice := BrowserNotice
+	BrowserNotice = func(m string) { notices = append(notices, m) }
+	defer func() { BrowserNotice = savedNotice }()
+
 	got := ResolveBrowser()
 	if got == "" || !isExecutableFile(got) {
 		t.Fatalf("ResolveBrowser did not provision a runnable browser, got %q", got)
+	}
+	// The user must be told the (large) first-run download is happening.
+	sawDownloading := false
+	for _, n := range notices {
+		if strings.Contains(strings.ToLower(n), "downloading chromium") {
+			sawDownloading = true
+		}
+	}
+	if !sawDownloading {
+		t.Errorf("expected a 'downloading Chromium' notice, got %v", notices)
 	}
 	if sawVersion != "9.9.9.9" {
 		t.Errorf("download used version %q, want the advertised latest 9.9.9.9", sawVersion)
