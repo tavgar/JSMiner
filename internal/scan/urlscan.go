@@ -9,13 +9,23 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
 )
 
-// newHTTPClient builds the HTTP client shared by the URL fetch helpers: a cloned
-// default transport that optionally skips TLS verification, a request timeout and
-// a redirect cap.
+// newHTTPClient builds an HTTP client for the URL fetch helpers: a cloned default
+// transport that optionally skips TLS verification, a request timeout and a
+// redirect cap. The transport keeps a generous per-host idle-connection pool so a
+// crawl reuses keep-alive connections instead of opening a fresh TCP+TLS
+// connection for every one of its hundreds of requests to the same host.
 func newHTTPClient() *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// The stdlib default is only 2 idle connections per host, which throttles
+	// connection reuse the moment a crawl issues requests back to back (and, once
+	// crawling is parallelised, forces extra handshakes). Raise it so the pool
+	// spans a crawl's working set of hosts.
+	transport.MaxIdleConns = 100
+	transport.MaxIdleConnsPerHost = 16
 	if SkipTLSVerification {
 		if transport.TLSClientConfig == nil {
 			transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
@@ -33,6 +43,35 @@ func newHTTPClient() *http.Client {
 			return nil
 		},
 	}
+}
+
+// The crawl's hot path shares one HTTP client so its transport's keep-alive
+// connection pool is reused across requests rather than discarded after each one.
+// The client is rebuilt only when a setting baked into it changes (TLS
+// verification or the request timeout), which happens once at startup in normal
+// use, so a live crawl always reuses the same pooled connections.
+var (
+	httpClientMu      sync.Mutex
+	sharedClient      *http.Client
+	sharedClientTLS   bool
+	sharedClientTOut  time.Duration
+	sharedClientBuilt bool
+)
+
+// sharedHTTPClient returns the process-wide fetch client, (re)building it when the
+// TLS or timeout settings baked into a cached client no longer match the current
+// configuration. Reusing it is what lets consecutive requests to a host ride the
+// same keep-alive connection instead of re-handshaking every time.
+func sharedHTTPClient() *http.Client {
+	httpClientMu.Lock()
+	defer httpClientMu.Unlock()
+	if !sharedClientBuilt || sharedClientTLS != SkipTLSVerification || sharedClientTOut != HTTPClientTimeout {
+		sharedClient = newHTTPClient()
+		sharedClientTLS = SkipTLSVerification
+		sharedClientTOut = HTTPClientTimeout
+		sharedClientBuilt = true
+	}
+	return sharedClient
 }
 
 // fetchURLResponse retrieves a URL with GET and returns the http.Response
@@ -65,7 +104,7 @@ func fetchURLResponseMethod(u, method, body string) (*http.Response, error) {
 	// server signals 429/503. wait() blocks for the configured/adaptive gap;
 	// observe() adapts the gap to the response.
 	globalThrottle.wait()
-	resp, err := newHTTPClient().Do(req)
+	resp, err := sharedHTTPClient().Do(req)
 	globalThrottle.observe(resp, err)
 	if err != nil {
 		vlog(2, "http %s %s -> error: %v", method, u, err)
