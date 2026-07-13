@@ -76,6 +76,15 @@ func fetchURLResponseMethod(u, method, body string) (*http.Response, error) {
 	return resp, nil
 }
 
+// readCappedBody reads at most MaxResponseBodyBytes from a fetched response
+// body, so a single response cannot exhaust memory during a crawl of untrusted
+// hosts. It exists to keep the crawl's whole-body reads bounded the same way
+// every other network read in the package (calibration, sitemaps, source maps)
+// already is.
+func readCappedBody(r io.Reader) ([]byte, error) {
+	return io.ReadAll(io.LimitReader(r, MaxResponseBodyBytes))
+}
+
 // inferContentType guesses a request Content-Type from a parameter body: JSON
 // when it looks like a JSON object/array, otherwise form-encoded.
 func inferContentType(body string) string {
@@ -196,7 +205,7 @@ func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited map
 
 	finalURL := resp.Request.URL.String()
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := readCappedBody(resp.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -300,7 +309,7 @@ func (e *Extractor) scanURLPosts(urlStr, baseHost string, visited map[string]str
 
 	finalURL := resp.Request.URL.String()
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := readCappedBody(resp.Body)
 	if err != nil {
 		return nil, err
 	}

@@ -17,6 +17,16 @@ const (
 	// skipped. The scanner grows the buffer on demand up to this cap, so the
 	// value is a ceiling, not a pre-allocation.
 	MaxBufferSize = 64 * 1024 * 1024 // 64MB
+
+	// MaxResponseBodyBytes caps how much of a fetched HTTP response the crawler
+	// reads into memory before scanning it. A crawl fetches arbitrary, attacker-
+	// influenced hosts at scale, so an unbounded read lets a single hostile or
+	// misconfigured server that streams a body of any length exhaust the
+	// scanner's memory and take the whole crawl down. The cap matches
+	// MaxBufferSize — the scanner's own per-token ceiling — so bytes past it
+	// would be dropped by the scanner anyway; bounding the read just refuses to
+	// buffer them first.
+	MaxResponseBodyBytes = MaxBufferSize
 )
 
 // Timeouts and delays
