@@ -149,6 +149,48 @@ endpoints — including non-`GET` methods (`POST`, `PUT`, `PATCH`, `DELETE`,
 targets you are authorized to test. Pass `-no-methods` to restrict a crawl to
 `GET` requests only.
 
+### URL discovery
+
+JSMiner pulls candidate URLs from every place a modern app hides them, so a crawl
+follows the real link graph instead of only what one page happens to reference in
+one form:
+
+- **JavaScript** — endpoints and paths in inline scripts, linked bundles and
+  dynamic `import()`s, including template-literal bases (`` `/api/user/${id}` `` →
+  `/api/user/`) and bare-relative request paths in call context
+  (`fetch("api/search?q=" + q)` → `api/search`).
+- **Live requests** — the XHR/`fetch` URLs the page actually calls while rendering
+  in headless Chrome, so endpoints built at runtime (from an id, a router param, a
+  template) that appear in no shipped string are still reached.
+- **HTML markup** — the URLs a page's own markup references: `href`, `src`,
+  `action`/`formaction`, `data-url`/`data-href`/`data-src`, and
+  `<meta http-equiv="refresh">` redirects. Relative links are resolved against the
+  page, and unresolved template placeholders (`${…}`, `{{…}}`, `<%…%>`) are
+  skipped. This is what lets the crawl follow a server-rendered or classic
+  multi-page site, whose pages link one another through plain HTML rather than JS.
+- **Site declarations** — `robots.txt` (`Allow`/`Disallow` directories and
+  `Sitemap:` pointers) and the XML sitemaps it and convention advertise, including
+  gzipped (`sitemap.xml.gz`) and nested sitemap-index documents. These surface
+  server-published pages and API roots that nothing links to. Disable with
+  `-no-well-known`.
+- **Source maps** — original, pre-bundled sources recovered from any source map a
+  scanned bundle advertises (see [Source map recovery](#source-map-recovery)).
+
+### Rate limiting
+
+A crawl issues many requests per page — the page fetch and render, multi-method
+probing, per-directory and per-method auto-calibration, parameter replay and path
+permutation — which can trip a target's rate limiter. JSMiner paces itself to stay
+under those limits:
+
+- **Adaptive backoff (always on).** When any request — on the HTTP path or in the
+  headless-Chrome renderer — comes back `429 Too Many Requests` or `503`, JSMiner
+  widens the spacing between requests and honours the server's `Retry-After` hint
+  (delta-seconds or HTTP-date) before continuing, then eases back to full speed
+  once the host stops rate-limiting.
+- **Proactive limit (opt-in).** Pass `-rate-limit N` to cap outbound requests at
+  `N` per second across the whole scan.
+
 ### Verbose output
 
 By default a crawl prints one progress line per page to stderr (unless `-quiet`).
