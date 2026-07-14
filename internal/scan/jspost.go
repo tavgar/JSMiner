@@ -39,24 +39,31 @@ func inferAuthParams(endpoint string) string {
 	return ""
 }
 
-// extractAuthParams looks for common authentication parameters in the given context
-func extractAuthParams(context []byte) string {
-	// Common auth parameter patterns
-	paramPatterns := map[string]*regexp.Regexp{
+// Auth-parameter inference patterns for extractAuthParams. They are compiled once
+// at package load rather than on every call: extractAuthParams runs once per
+// bodyless POST match, so recompiling this set each time wasted measurable CPU on
+// bundles with many POST calls.
+var (
+	authParamPatterns = map[string]*regexp.Regexp{
 		"email":    regexp.MustCompile(`(?i)(?:email|mail|user(?:name)?)\s*:\s*[^,}]+`),
 		"password": regexp.MustCompile(`(?i)(?:password|pass(?:word)?|pwd)\s*:\s*[^,}]+`),
 		"username": regexp.MustCompile(`(?i)(?:username|user)\s*:\s*[^,}]+`),
 		"token":    regexp.MustCompile(`(?i)(?:token|csrf|authenticity_token)\s*:\s*[^,}]+`),
 	}
+	authObjectPattern   = regexp.MustCompile(`\{([^}]*(?:email|username|password|token)[^}]*)\}`)
+	authFormDataPattern = regexp.MustCompile(`\.append\s*\(\s*['"](\w+)['"]`)
+	authInputPattern    = regexp.MustCompile(`(?i)(?:name|id)\s*=\s*["'](\w+)["'].*?type\s*=\s*["'](password|email|text)["']`)
+)
 
+// extractAuthParams looks for common authentication parameters in the given context
+func extractAuthParams(context []byte) string {
 	foundParams := []string{}
 	contextStr := string(context)
 
 	// Look for object notation parameters
-	objectPattern := regexp.MustCompile(`\{([^}]*(?:email|username|password|token)[^}]*)\}`)
-	if matches := objectPattern.FindStringSubmatch(contextStr); len(matches) > 1 {
+	if matches := authObjectPattern.FindStringSubmatch(contextStr); len(matches) > 1 {
 		// Extract individual parameters
-		for paramName, pattern := range paramPatterns {
+		for paramName, pattern := range authParamPatterns {
 			if pattern.MatchString(matches[1]) {
 				foundParams = append(foundParams, paramName)
 			}
@@ -64,8 +71,7 @@ func extractAuthParams(context []byte) string {
 	}
 
 	// Look for FormData append patterns
-	formDataPattern := regexp.MustCompile(`\.append\s*\(\s*['"](\w+)['"]`)
-	if matches := formDataPattern.FindAllStringSubmatch(contextStr, -1); len(matches) > 0 {
+	if matches := authFormDataPattern.FindAllStringSubmatch(contextStr, -1); len(matches) > 0 {
 		for _, match := range matches {
 			if len(match) > 1 {
 				param := match[1]
@@ -78,8 +84,7 @@ func extractAuthParams(context []byte) string {
 	}
 
 	// Look for input field patterns
-	inputPattern := regexp.MustCompile(`(?i)(?:name|id)\s*=\s*["'](\w+)["'].*?type\s*=\s*["'](password|email|text)["']`)
-	if matches := inputPattern.FindAllStringSubmatch(contextStr, -1); len(matches) > 0 {
+	if matches := authInputPattern.FindAllStringSubmatch(contextStr, -1); len(matches) > 0 {
 		for _, match := range matches {
 			if len(match) > 1 {
 				foundParams = append(foundParams, match[1])
