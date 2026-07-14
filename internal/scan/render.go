@@ -7,6 +7,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chromedp/cdproto/emulation"
@@ -157,6 +158,11 @@ func RenderURL(urlStr string) ([]byte, []string, error) {
 
 	headers := renderHeaders()
 
+	// The listener runs on chromedp's event-loop goroutine, and network events
+	// keep arriving after chromedp.Run returns (the context is still live), so the
+	// map it writes must be guarded against the main goroutine's read below —
+	// otherwise a late response racing the read is a fatal concurrent map access.
+	var mu sync.Mutex
 	scriptSet := make(map[string]struct{})
 	chromedp.ListenTarget(ctx, func(ev interface{}) {
 		if e, ok := ev.(*network.EventResponseReceived); ok {
@@ -164,7 +170,9 @@ func RenderURL(urlStr string) ([]byte, []string, error) {
 			u := e.Response.URL
 			if strings.HasSuffix(strings.ToLower(u), ".js") ||
 				strings.Contains(e.Response.MimeType, "javascript") {
+				mu.Lock()
 				scriptSet[u] = struct{}{}
+				mu.Unlock()
 			}
 		}
 	})
@@ -185,7 +193,9 @@ func RenderURL(urlStr string) ([]byte, []string, error) {
 		return nil, nil, err
 	}
 
+	mu.Lock()
 	scripts := scriptKeys(scriptSet)
+	mu.Unlock()
 	vlog(2, "render %s -> %d byte(s), %d script(s)", urlStr, len(html), len(scripts))
 	return []byte(html), scripts, nil
 }
@@ -246,6 +256,12 @@ func renderStates(urlStr string, explore bool) ([][]byte, []string, []HTTPReques
 
 	headers := renderHeaders()
 
+	// The listener runs on chromedp's event-loop goroutine and keeps firing after
+	// each chromedp.Run returns (the context stays live through exploration and the
+	// final reads), so every map it touches must be guarded — an unsynchronised
+	// late event racing the reads below is a fatal concurrent map access, not a
+	// benign data race.
+	var mu sync.Mutex
 	scriptSet := make(map[string]struct{})
 	xhrSet := make(map[string]struct{})
 	reqMap := make(map[network.RequestID]*HTTPRequest)
@@ -256,7 +272,9 @@ func renderStates(urlStr string, explore bool) ([][]byte, []string, []HTTPReques
 			u := e.Response.URL
 			if strings.HasSuffix(strings.ToLower(u), ".js") ||
 				strings.Contains(e.Response.MimeType, "javascript") {
+				mu.Lock()
 				scriptSet[u] = struct{}{}
+				mu.Unlock()
 			}
 		case *network.EventRequestWillBeSent:
 			if e.Request == nil {
@@ -277,7 +295,9 @@ func renderStates(urlStr string, explore bool) ([][]byte, []string, []HTTPReques
 				case "POST", "PUT", "PATCH":
 				default:
 					if strings.HasPrefix(e.Request.URL, "http://") || strings.HasPrefix(e.Request.URL, "https://") {
+						mu.Lock()
 						xhrSet[e.Request.URL] = struct{}{}
+						mu.Unlock()
 					}
 				}
 			}
@@ -285,7 +305,9 @@ func renderStates(urlStr string, explore bool) ([][]byte, []string, []HTTPReques
 			// the navigations a form submit or client-side route change triggers, so
 			// it is the reliable record of what the interactions fired.
 			if e.Request.Method == "POST" || e.Request.Method == "PUT" || e.Request.Method == "PATCH" {
+				mu.Lock()
 				reqMap[e.RequestID] = &HTTPRequest{URL: e.Request.URL}
+				mu.Unlock()
 			}
 		}
 	})
@@ -316,9 +338,20 @@ func renderStates(urlStr string, explore bool) ([][]byte, []string, []HTTPReques
 		vlog(2, "render %s -> explored %d additional state(s)", urlStr, len(states)-before)
 	}
 
+	// Snapshot the listener-written maps under the lock, then read from the copies:
+	// mergePosts issues further CDP calls (which fire more listener events), so it
+	// must not run while holding the lock, and the live maps must not be touched
+	// once it does.
+	mu.Lock()
 	scripts := scriptKeys(scriptSet)
 	xhrURLs := scriptKeys(xhrSet)
-	posts := mergePosts(ctx, reqMap, winPosts)
+	reqSnapshot := make(map[network.RequestID]*HTTPRequest, len(reqMap))
+	for id, r := range reqMap {
+		reqSnapshot[id] = r
+	}
+	mu.Unlock()
+
+	posts := mergePosts(ctx, reqSnapshot, winPosts)
 	vlog(2, "render %s -> %d state(s), %d script(s), %d xhr(s), %d post(s)", urlStr, len(states), len(scripts), len(xhrURLs), len(posts))
 	return states, scripts, posts, xhrURLs, nil
 }
