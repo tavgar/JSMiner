@@ -282,8 +282,8 @@ func extractJSExpression(data []byte, start int) string {
 func parseJSPostRequests(data []byte) []jsEndpoint {
 	uniq := make(map[string]jsEndpoint)
 
-	for _, m := range fetchPostRe.FindAllSubmatch(data, -1) {
-		opts := m[2]
+	for _, loc := range fetchPostRe.FindAllSubmatchIndex(data, -1) {
+		opts := data[loc[4]:loc[5]]
 		if !fetchMethodRe.Match(opts) {
 			continue
 		}
@@ -291,20 +291,24 @@ func parseJSPostRequests(data []byte) []jsEndpoint {
 		if b := fetchBodyRe.FindSubmatch(opts); b != nil {
 			params = strings.TrimSpace(string(b[1]))
 		}
-		// If no params found, look for common authentication parameters in the surrounding context
+		// If no params found, look for common authentication parameters in the
+		// surrounding context. Use this match's actual offset (loc[0]) rather than
+		// searching data for the matched text: bytes.Index is an O(n) scan and
+		// returns the first occurrence, so a fetch() call repeated verbatim would
+		// take its context from the wrong place.
 		if params == "" {
-			contextStart := bytes.Index(data, m[0]) - 500
+			contextStart := loc[0] - 500
 			if contextStart < 0 {
 				contextStart = 0
 			}
-			contextEnd := bytes.Index(data, m[0]) + len(m[0]) + 500
+			contextEnd := loc[1] + 500
 			if contextEnd > len(data) {
 				contextEnd = len(data)
 			}
 			context := data[contextStart:contextEnd]
 			params = extractAuthParams(context)
 		}
-		val := string(m[1])
+		val := string(data[loc[2]:loc[3]])
 		isURL := strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") || strings.HasPrefix(val, "//")
 		uniq[val+"|"+params] = jsEndpoint{Value: val, IsURL: isURL, Params: params}
 	}
@@ -564,13 +568,13 @@ func parseJSPostRequests(data []byte) []jsEndpoint {
 
 	// Additional patterns for async/dynamic requests
 	// Look for any API endpoint that might handle POST
-	for _, m := range apiRouteRe.FindAllSubmatch(data, -1) {
-		val := string(m[1])
-		// Check if there's any POST-related code nearby
-		startIdx := bytes.Index(data, m[0])
-		if startIdx == -1 {
-			continue
-		}
+	for _, loc := range apiRouteRe.FindAllSubmatchIndex(data, -1) {
+		val := string(data[loc[2]:loc[3]])
+		// Check if there's any POST-related code nearby. Anchor the window on this
+		// match's actual offset (loc[0]); bytes.Index would scan for the matched
+		// literal and return its first occurrence, so an /api/ path appearing more
+		// than once would be judged by the wrong surrounding context.
+		startIdx := loc[0]
 		contextStart := startIdx - 500
 		if contextStart < 0 {
 			contextStart = 0

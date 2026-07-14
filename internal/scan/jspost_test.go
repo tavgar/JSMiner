@@ -292,3 +292,28 @@ func TestExtractJSExpressionEdgeCases(t *testing.T) {
 		})
 	}
 }
+
+// TestParseJSPostRequestsAPIRouteNearestContext pins the fix for the apiRouteRe
+// loop keying its "is POST mentioned nearby?" decision off the match's actual
+// offset rather than the first occurrence of the matched literal. The same
+// "/api/widget" literal appears twice: the first far from any POST-related code,
+// the second right beside a `method: "POST"`. Anchoring on the first occurrence
+// (the old bytes.Index behaviour) judged both by the wrong context and dropped
+// the endpoint; anchoring on each occurrence detects it.
+func TestParseJSPostRequestsAPIRouteNearestContext(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(`const label = "/api/widget";`)
+	b.WriteString(strings.Repeat("const z=1;\n", 120)) // >500 bytes of POST-free filler
+	b.WriteString(`sendRequest({ method: "POST" }); const u = "/api/widget";`)
+
+	eps := parseJSPostRequests([]byte(b.String()))
+	found := false
+	for _, e := range eps {
+		if e.Value == "/api/widget" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected /api/widget to be detected from its POST-adjacent occurrence, got %+v", eps)
+	}
+}
