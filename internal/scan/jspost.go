@@ -39,24 +39,31 @@ func inferAuthParams(endpoint string) string {
 	return ""
 }
 
-// extractAuthParams looks for common authentication parameters in the given context
-func extractAuthParams(context []byte) string {
-	// Common auth parameter patterns
-	paramPatterns := map[string]*regexp.Regexp{
+// Auth-parameter inference patterns for extractAuthParams. They are compiled once
+// at package load rather than on every call: extractAuthParams runs once per
+// bodyless POST match, so recompiling this set each time wasted measurable CPU on
+// bundles with many POST calls.
+var (
+	authParamPatterns = map[string]*regexp.Regexp{
 		"email":    regexp.MustCompile(`(?i)(?:email|mail|user(?:name)?)\s*:\s*[^,}]+`),
 		"password": regexp.MustCompile(`(?i)(?:password|pass(?:word)?|pwd)\s*:\s*[^,}]+`),
 		"username": regexp.MustCompile(`(?i)(?:username|user)\s*:\s*[^,}]+`),
 		"token":    regexp.MustCompile(`(?i)(?:token|csrf|authenticity_token)\s*:\s*[^,}]+`),
 	}
+	authObjectPattern   = regexp.MustCompile(`\{([^}]*(?:email|username|password|token)[^}]*)\}`)
+	authFormDataPattern = regexp.MustCompile(`\.append\s*\(\s*['"](\w+)['"]`)
+	authInputPattern    = regexp.MustCompile(`(?i)(?:name|id)\s*=\s*["'](\w+)["'].*?type\s*=\s*["'](password|email|text)["']`)
+)
 
+// extractAuthParams looks for common authentication parameters in the given context
+func extractAuthParams(context []byte) string {
 	foundParams := []string{}
 	contextStr := string(context)
 
 	// Look for object notation parameters
-	objectPattern := regexp.MustCompile(`\{([^}]*(?:email|username|password|token)[^}]*)\}`)
-	if matches := objectPattern.FindStringSubmatch(contextStr); len(matches) > 1 {
+	if matches := authObjectPattern.FindStringSubmatch(contextStr); len(matches) > 1 {
 		// Extract individual parameters
-		for paramName, pattern := range paramPatterns {
+		for paramName, pattern := range authParamPatterns {
 			if pattern.MatchString(matches[1]) {
 				foundParams = append(foundParams, paramName)
 			}
@@ -64,8 +71,7 @@ func extractAuthParams(context []byte) string {
 	}
 
 	// Look for FormData append patterns
-	formDataPattern := regexp.MustCompile(`\.append\s*\(\s*['"](\w+)['"]`)
-	if matches := formDataPattern.FindAllStringSubmatch(contextStr, -1); len(matches) > 0 {
+	if matches := authFormDataPattern.FindAllStringSubmatch(contextStr, -1); len(matches) > 0 {
 		for _, match := range matches {
 			if len(match) > 1 {
 				param := match[1]
@@ -78,8 +84,7 @@ func extractAuthParams(context []byte) string {
 	}
 
 	// Look for input field patterns
-	inputPattern := regexp.MustCompile(`(?i)(?:name|id)\s*=\s*["'](\w+)["'].*?type\s*=\s*["'](password|email|text)["']`)
-	if matches := inputPattern.FindAllStringSubmatch(contextStr, -1); len(matches) > 0 {
+	if matches := authInputPattern.FindAllStringSubmatch(contextStr, -1); len(matches) > 0 {
 		for _, match := range matches {
 			if len(match) > 1 {
 				foundParams = append(foundParams, match[1])
@@ -277,8 +282,8 @@ func extractJSExpression(data []byte, start int) string {
 func parseJSPostRequests(data []byte) []jsEndpoint {
 	uniq := make(map[string]jsEndpoint)
 
-	for _, m := range fetchPostRe.FindAllSubmatch(data, -1) {
-		opts := m[2]
+	for _, loc := range fetchPostRe.FindAllSubmatchIndex(data, -1) {
+		opts := data[loc[4]:loc[5]]
 		if !fetchMethodRe.Match(opts) {
 			continue
 		}
@@ -286,20 +291,24 @@ func parseJSPostRequests(data []byte) []jsEndpoint {
 		if b := fetchBodyRe.FindSubmatch(opts); b != nil {
 			params = strings.TrimSpace(string(b[1]))
 		}
-		// If no params found, look for common authentication parameters in the surrounding context
+		// If no params found, look for common authentication parameters in the
+		// surrounding context. Use this match's actual offset (loc[0]) rather than
+		// searching data for the matched text: bytes.Index is an O(n) scan and
+		// returns the first occurrence, so a fetch() call repeated verbatim would
+		// take its context from the wrong place.
 		if params == "" {
-			contextStart := bytes.Index(data, m[0]) - 500
+			contextStart := loc[0] - 500
 			if contextStart < 0 {
 				contextStart = 0
 			}
-			contextEnd := bytes.Index(data, m[0]) + len(m[0]) + 500
+			contextEnd := loc[1] + 500
 			if contextEnd > len(data) {
 				contextEnd = len(data)
 			}
 			context := data[contextStart:contextEnd]
 			params = extractAuthParams(context)
 		}
-		val := string(m[1])
+		val := string(data[loc[2]:loc[3]])
 		isURL := strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") || strings.HasPrefix(val, "//")
 		uniq[val+"|"+params] = jsEndpoint{Value: val, IsURL: isURL, Params: params}
 	}
@@ -559,13 +568,13 @@ func parseJSPostRequests(data []byte) []jsEndpoint {
 
 	// Additional patterns for async/dynamic requests
 	// Look for any API endpoint that might handle POST
-	for _, m := range apiRouteRe.FindAllSubmatch(data, -1) {
-		val := string(m[1])
-		// Check if there's any POST-related code nearby
-		startIdx := bytes.Index(data, m[0])
-		if startIdx == -1 {
-			continue
-		}
+	for _, loc := range apiRouteRe.FindAllSubmatchIndex(data, -1) {
+		val := string(data[loc[2]:loc[3]])
+		// Check if there's any POST-related code nearby. Anchor the window on this
+		// match's actual offset (loc[0]); bytes.Index would scan for the matched
+		// literal and return its first occurrence, so an /api/ path appearing more
+		// than once would be judged by the wrong surrounding context.
+		startIdx := loc[0]
 		contextStart := startIdx - 500
 		if contextStart < 0 {
 			contextStart = 0
