@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/tavgar/JSMiner/internal/output"
 	"github.com/tavgar/JSMiner/internal/proxy"
@@ -509,6 +510,15 @@ func main() {
 					}
 					opts.OnCalibrated = func(n int) {
 						fmt.Fprintf(os.Stderr, "[crawl] auto-calibration learned %d wildcard signature(s)\n", n)
+					}
+				}
+				// A one-line end-of-run summary is useful at every verbosity, so it is
+				// gated only on the banner being enabled, not on verbose logging.
+				if !*quiet {
+					opts.OnComplete = func(s scan.CrawlStats) {
+						fmt.Fprintf(os.Stderr,
+							"[crawl] done: %d page(s) fetched, %d error(s), %d target(s) discovered, %d enqueued, %d match(es) in %s\n",
+							s.PagesFetched, s.PagesErrored, s.TargetsFound, s.Enqueued, s.Matches, s.Duration.Round(time.Millisecond))
 					}
 				}
 				if *posts {
