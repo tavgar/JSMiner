@@ -197,3 +197,66 @@ func keysOf(m map[string]bool) []string {
 	}
 	return out
 }
+
+// TestWellKnownInScope verifies the sitemap-fetch scope guard: target-controlled
+// pointers at foreign, internal or metadata hosts (and non-http schemes) are
+// rejected before any fetch, while the seed host and its subdomains are allowed.
+// This is the check that stops a hostile robots.txt from steering the crawler's
+// fetches into an SSRF.
+func TestWellKnownInScope(t *testing.T) {
+	const origin = "example.com"
+	allow := []string{
+		"http://example.com/sitemap.xml",
+		"https://example.com/a/b/sitemap.xml",
+		"https://cdn.example.com/sitemap.xml", // subdomain
+		"https://www.example.com/sitemap.xml",
+	}
+	for _, u := range allow {
+		if !wellKnownInScope(origin, u) {
+			t.Errorf("wellKnownInScope(%q, %q) = false, want true", origin, u)
+		}
+	}
+
+	deny := []string{
+		"http://169.254.169.254/latest/meta-data/", // cloud metadata
+		"http://localhost/sitemap.xml",
+		"http://internal.corp/sitemap.xml",
+		"https://evil.test/sitemap.xml",
+		"http://example.com.evil.test/sitemap.xml", // suffix trick
+		"file:///etc/passwd",
+		"ftp://example.com/sitemap.xml",
+		"gopher://example.com/",
+		"not a url",
+	}
+	for _, u := range deny {
+		if wellKnownInScope(origin, u) {
+			t.Errorf("wellKnownInScope(%q, %q) = true, want false", origin, u)
+		}
+	}
+}
+
+// TestWellKnownSameOriginStillFollowed confirms the guard does not break normal
+// discovery: a same-origin robots.txt Sitemap: pointer and its pages are found.
+func TestWellKnownSameOriginStillFollowed(t *testing.T) {
+	ResetThrottle()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/robots.txt", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "Sitemap: %s/my-sitemap.xml\n", "http://"+r.Host)
+	})
+	mux.HandleFunc("/my-sitemap.xml", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `<urlset><url><loc>http://%s/legit-page</loc></url></urlset>`, r.Host)
+	})
+	seed := httptest.NewServer(mux)
+	defer seed.Close()
+
+	got := discoverWellKnownURLs(seed.URL)
+	found := false
+	for _, u := range got {
+		if strings.HasSuffix(u, "/legit-page") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("same-origin sitemap page not discovered; got %v", got)
+	}
+}

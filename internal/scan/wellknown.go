@@ -48,6 +48,19 @@ var (
 // scheme://host with no trailing slash. The result is de-duplicated and capped at
 // wellKnownMaxURLs; ordering follows discovery so robots directories come first.
 func discoverWellKnownURLs(origin string) []string {
+	// Sitemap documents are fetched here, and the sitemap targets that get fetched
+	// are drawn from target-controlled input: robots.txt Sitemap: pointers and the
+	// <loc> children of sitemap indexes. Left unchecked, a hostile robots.txt could
+	// aim those at an internal or cloud-metadata address (http://169.254.169.254/…)
+	// and turn the crawler into an SSRF primitive. Confine sitemap fetching to the
+	// seed's own scope (and to http/https), which is where a site's real sitemaps
+	// live anyway; discovered content-page URLs are still scope-checked by the crawl.
+	originHost := ""
+	if u, err := url.Parse(origin); err == nil {
+		originHost = u.Hostname()
+	}
+	inScope := func(raw string) bool { return wellKnownInScope(originHost, raw) }
+
 	seen := make(map[string]struct{})
 	var out []string
 	add := func(raw string) bool {
@@ -67,7 +80,13 @@ func discoverWellKnownURLs(origin string) []string {
 	sitemaps := []string{origin + "/sitemap.xml"}
 	if body, ok := fetchWellKnownBody(origin + "/robots.txt"); ok {
 		dirs, sm := parseRobots(body, origin)
-		sitemaps = append(sitemaps, sm...)
+		for _, s := range sm {
+			if inScope(s) {
+				sitemaps = append(sitemaps, s)
+			} else {
+				vlog(2, "[crawl] skip out-of-scope sitemap pointer %s", s)
+			}
+		}
 		for _, d := range dirs {
 			if !add(d) {
 				return out
@@ -105,7 +124,7 @@ func discoverWellKnownURLs(origin string) []string {
 			}
 			childSitemap := isIndex || (!isURLSet && looksLikeSitemap(locURL))
 			if childSitemap {
-				if _, done := fetched[locURL]; !done {
+				if _, done := fetched[locURL]; !done && inScope(locURL) {
 					queue = append(queue, locURL)
 				}
 				continue
@@ -116,6 +135,19 @@ func discoverWellKnownURLs(origin string) []string {
 		}
 	}
 	return out
+}
+
+// wellKnownInScope reports whether a sitemap URL advertised by the target (a
+// robots.txt Sitemap: pointer or a sitemap-index <loc> child) may be fetched: it
+// must be http/https and, unless the origin host is unknown, within the seed's
+// scope. This is what keeps target-controlled sitemap pointers from steering the
+// crawler's fetches at internal or cloud-metadata addresses.
+func wellKnownInScope(originHost, raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return false
+	}
+	return originHost == "" || sameScope(originHost, u.Hostname())
 }
 
 // parseRobots extracts crawlable directory URLs and Sitemap: pointers from a

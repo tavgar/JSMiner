@@ -9,14 +9,23 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
-// newHTTPClient builds the HTTP client shared by the URL fetch helpers: a cloned
-// default transport that optionally skips TLS verification, a request timeout and
-// a redirect cap.
+// newHTTPClient builds an HTTP client for the URL fetch helpers: a cloned default
+// transport that optionally skips TLS verification, a request timeout and a
+// redirect cap. The transport keeps a generous per-host idle-connection pool so a
+// crawl reuses keep-alive connections instead of opening a fresh TCP+TLS
+// connection for every one of its hundreds of requests to the same host.
 func newHTTPClient() *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// The stdlib default is only 2 idle connections per host, which throttles
+	// connection reuse the moment a crawl issues requests back to back (and, once
+	// crawling is parallelised, forces extra handshakes). Raise it so the pool
+	// spans a crawl's working set of hosts.
+	transport.MaxIdleConns = 100
+	transport.MaxIdleConnsPerHost = 16
 	if SkipTLSVerification {
 		if transport.TLSClientConfig == nil {
 			transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
@@ -26,14 +35,43 @@ func newHTTPClient() *http.Client {
 	}
 	return &http.Client{
 		Transport: transport,
-		Timeout:   10 * time.Second,
+		Timeout:   HTTPClientTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 5 {
+			if len(via) >= MaxRedirects {
 				return http.ErrUseLastResponse
 			}
 			return nil
 		},
 	}
+}
+
+// The crawl's hot path shares one HTTP client so its transport's keep-alive
+// connection pool is reused across requests rather than discarded after each one.
+// The client is rebuilt only when a setting baked into it changes (TLS
+// verification or the request timeout), which happens once at startup in normal
+// use, so a live crawl always reuses the same pooled connections.
+var (
+	httpClientMu      sync.Mutex
+	sharedClient      *http.Client
+	sharedClientTLS   bool
+	sharedClientTOut  time.Duration
+	sharedClientBuilt bool
+)
+
+// sharedHTTPClient returns the process-wide fetch client, (re)building it when the
+// TLS or timeout settings baked into a cached client no longer match the current
+// configuration. Reusing it is what lets consecutive requests to a host ride the
+// same keep-alive connection instead of re-handshaking every time.
+func sharedHTTPClient() *http.Client {
+	httpClientMu.Lock()
+	defer httpClientMu.Unlock()
+	if !sharedClientBuilt || sharedClientTLS != SkipTLSVerification || sharedClientTOut != HTTPClientTimeout {
+		sharedClient = newHTTPClient()
+		sharedClientTLS = SkipTLSVerification
+		sharedClientTOut = HTTPClientTimeout
+		sharedClientBuilt = true
+	}
+	return sharedClient
 }
 
 // fetchURLResponse retrieves a URL with GET and returns the http.Response
@@ -61,19 +99,45 @@ func fetchURLResponseMethod(u, method, body string) (*http.Response, error) {
 	if body != "" && req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", inferContentType(body))
 	}
-	// Pace outbound requests so a crawl's burst of fetches, probes and
-	// calibrations stays under the target's rate limit, and back off when the
-	// server signals 429/503. wait() blocks for the configured/adaptive gap;
-	// observe() adapts the gap to the response.
-	globalThrottle.wait()
-	resp, err := newHTTPClient().Do(req)
-	globalThrottle.observe(resp, err)
-	if err != nil {
-		vlog(2, "http %s %s -> error: %v", method, u, err)
-		return nil, err
+	// A transient transport error (connection reset, DNS blip, timeout) is retried
+	// on the idempotent, bodyless fetch path so a single network hiccup does not
+	// drop a page from the crawl. Requests that carry a body — discovered POST/PUT/
+	// PATCH parameter replays — are attempted exactly once so a retry can never
+	// double-submit them against the target.
+	attempts := 1
+	if body == "" {
+		attempts += FetchRetries
+	}
+	var resp *http.Response
+	for attempt := 0; ; attempt++ {
+		// Pace outbound requests so a crawl's burst of fetches, probes and
+		// calibrations stays under the target's rate limit, and back off when the
+		// server signals 429/503. wait() blocks for the configured/adaptive gap;
+		// observe() adapts the gap to the response.
+		host := hostOf(u)
+		globalThrottle.waitHost(host)
+		resp, err = sharedHTTPClient().Do(req)
+		globalThrottle.observeHost(host, resp, err)
+		if err == nil {
+			break
+		}
+		if attempt+1 >= attempts {
+			vlog(2, "http %s %s -> error: %v", method, u, err)
+			return nil, err
+		}
+		vlog(2, "http %s %s -> transport error (%v); retry %d/%d", method, u, err, attempt+1, attempts-1)
 	}
 	vlog(2, "http %s %s -> %s", method, u, resp.Status)
 	return resp, nil
+}
+
+// readCappedBody reads at most MaxResponseBodyBytes from a fetched response
+// body, so a single response cannot exhaust memory during a crawl of untrusted
+// hosts. It exists to keep the crawl's whole-body reads bounded the same way
+// every other network read in the package (calibration, sitemaps, source maps)
+// already is.
+func readCappedBody(r io.Reader) ([]byte, error) {
+	return io.ReadAll(io.LimitReader(r, MaxResponseBodyBytes))
 }
 
 // inferContentType guesses a request Content-Type from a parameter body: JSON
@@ -154,6 +218,43 @@ func isHTMLContent(urlStr, ct string) bool {
 	return ext == ".html" || ext == ".htm"
 }
 
+// binaryContentTypes are the exact media types that carry no JavaScript, endpoint
+// or secret and so are not worth downloading and scanning. It deliberately omits
+// application/octet-stream, which CDNs routinely (mis)apply to real JavaScript and
+// JSON, so a mislabelled bundle is never skipped.
+var binaryContentTypes = map[string]struct{}{
+	"application/pdf": {}, "application/zip": {}, "application/gzip": {},
+	"application/x-gzip": {}, "application/x-tar": {}, "application/x-bzip2": {},
+	"application/x-rar-compressed": {}, "application/x-7z-compressed": {},
+	"application/vnd.ms-fontobject": {}, "application/x-font-ttf": {},
+	"application/msword": {}, "application/vnd.ms-excel": {},
+	"application/vnd.ms-powerpoint": {},
+}
+
+// isBinaryContentType reports whether a response's Content-Type is a binary
+// media/asset type worth skipping during a scan. Any image, audio, video or font
+// type is skipped by prefix; a curated set of archive and document types is
+// skipped exactly. Text, HTML, JavaScript, JSON and XML types — anything that can
+// hold a secret or endpoint — are never matched, and neither is the ambiguous
+// application/octet-stream. An empty type (server sent none) is never skipped, so
+// nothing is dropped merely for lacking a Content-Type.
+func isBinaryContentType(ct string) bool {
+	ct = strings.ToLower(strings.TrimSpace(ct))
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = strings.TrimSpace(ct[:i])
+	}
+	if ct == "" {
+		return false
+	}
+	for _, pre := range []string{"image/", "audio/", "video/", "font/"} {
+		if strings.HasPrefix(ct, pre) {
+			return true
+		}
+	}
+	_, ok := binaryContentTypes[ct]
+	return ok
+}
+
 // ScanURL scans urlStr and any discovered script or import references.
 // Cross-domain resources are followed by default. Set external to false to restrict scanning to the same domain. JavaScript files are scanned using the configured rules.
 // ScanURL scans urlStr and any discovered script or import references. When
@@ -196,7 +297,17 @@ func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited map
 
 	finalURL := resp.Request.URL.String()
 
-	data, err := io.ReadAll(resp.Body)
+	// A binary asset (image, font, media, archive, document) served under an
+	// extensionless or unexpected URL carries no JavaScript, endpoint or secret;
+	// skip it before downloading and running every rule over its bytes. Extension
+	// filtering already drops most binaries before the fetch — this catches the
+	// ones only their Content-Type reveals.
+	if isBinaryContentType(resp.Header.Get("Content-Type")) {
+		vlog(2, "[scan] skip binary %q at %s", resp.Header.Get("Content-Type"), finalURL)
+		return nil, nil
+	}
+
+	data, err := readCappedBody(resp.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -300,7 +411,17 @@ func (e *Extractor) scanURLPosts(urlStr, baseHost string, visited map[string]str
 
 	finalURL := resp.Request.URL.String()
 
-	data, err := io.ReadAll(resp.Body)
+	// A binary asset (image, font, media, archive, document) served under an
+	// extensionless or unexpected URL carries no JavaScript, endpoint or secret;
+	// skip it before downloading and running every rule over its bytes. Extension
+	// filtering already drops most binaries before the fetch — this catches the
+	// ones only their Content-Type reveals.
+	if isBinaryContentType(resp.Header.Get("Content-Type")) {
+		vlog(2, "[scan] skip binary %q at %s", resp.Header.Get("Content-Type"), finalURL)
+		return nil, nil
+	}
+
+	data, err := readCappedBody(resp.Body)
 	if err != nil {
 		return nil, err
 	}

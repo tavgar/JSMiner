@@ -4,6 +4,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"time"
 )
 
 // CrawlOptions configures a breadth-first crawl seeded from a single URL.
@@ -113,6 +114,41 @@ type CrawlOptions struct {
 	// OnCalibrated, when non-nil, is invoked once after auto-calibration with
 	// the number of wildcard signatures learned.
 	OnCalibrated func(wildcardSigs int)
+
+	// OnComplete, when non-nil, is invoked once when the crawl finishes with a
+	// summary of what it did (see CrawlStats). It lets the CLI print an
+	// end-of-run report — pages fetched, targets discovered, errors, duration —
+	// without the scan package depending on the output layer.
+	OnComplete func(CrawlStats)
+}
+
+// CrawlStats summarises a completed crawl. It is reported once through
+// CrawlOptions.OnComplete so operators get the run-level accounting an
+// enterprise crawl is expected to surface — throughput, reach and failures —
+// rather than only the per-page verbose narrative.
+type CrawlStats struct {
+	// PagesFetched is the number of pages dequeued and scanned without a
+	// fetch/scan error; PagesErrored is the number whose scan returned an error.
+	PagesFetched int
+	PagesErrored int
+
+	// WellKnownSeeds is how many URLs the crawl seeded from robots.txt/sitemaps.
+	WellKnownSeeds int
+
+	// TargetsFound is the total in-scope crawl targets discovered across all
+	// pages (with repeats), and Enqueued is the number of distinct pages that
+	// were actually queued for crawling over the whole run.
+	TargetsFound int
+	Enqueued     int
+
+	// Matches is the number of deduplicated matches the crawl returned, and
+	// WildcardSigs is how many catch-all/soft-404 signatures auto-calibration
+	// learned for the root.
+	Matches      int
+	WildcardSigs int
+
+	// Duration is the wall-clock time the crawl took.
+	Duration time.Duration
 }
 
 // DefaultCrawlOptions returns sensible defaults for interactive use: follow two
@@ -180,6 +216,9 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 
 	origin := seed.Scheme + "://" + seed.Host
 
+	crawlStart := time.Now()
+	var stats CrawlStats
+
 	var perm *permuter
 	if opts.Permute {
 		perm = newPermuter(origin, baseHost, opts.PermuteMax)
@@ -201,6 +240,7 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 		}
 		vlog(1, "[crawl] auto-calibrating against %s", seed.String())
 		n := cal.calibrate(seed.String())
+		stats.WildcardSigs = n
 		e.SetCalibrator(cal)
 		defer e.SetCalibrator(nil)
 		vlog(1, "[crawl] calibration learned %d wildcard signature(s)", n)
@@ -258,7 +298,8 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 			queue = append(queue, crawlTarget{url: n, depth: 0})
 			vlog(1, "[crawl] well-known seed %s", n)
 		}
-		vlog(1, "[crawl] seeded %d URL(s) from robots.txt/sitemaps", len(queue)-1)
+		stats.WellKnownSeeds = len(queue) - 1
+		vlog(1, "[crawl] seeded %d URL(s) from robots.txt/sitemaps", stats.WellKnownSeeds)
 	}
 
 	var all []Match
@@ -277,9 +318,11 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 
 		ms, err := scanPage(t.url, baseHost, visited)
 		if err != nil {
+			stats.PagesErrored++
 			vlog(1, "[crawl] (%d) depth %d %s -> error: %v", pages, t.depth, t.url, err)
 			continue
 		}
+		stats.PagesFetched++
 		all = append(all, ms...)
 		vlog(1, "[crawl] (%d) %s -> %d match(es)", pages, t.url, len(ms))
 
@@ -300,6 +343,7 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 			continue
 		}
 		targets := crawlTargetsFromMatches(ms, t.url, baseHost, opts)
+		stats.TargetsFound += len(targets)
 		vlog(1, "[crawl] %s -> %d in-scope target(s) discovered", t.url, len(targets))
 
 		// Replay parameters discovered on this page against every level seen so
@@ -350,7 +394,14 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 		}
 	}
 
-	return UniqueMatches(all), nil
+	out := UniqueMatches(all)
+	if opts.OnComplete != nil {
+		stats.Enqueued = len(enqueued)
+		stats.Matches = len(out)
+		stats.Duration = time.Since(crawlStart)
+		opts.OnComplete(stats)
+	}
+	return out, nil
 }
 
 // crawlTargetsFromMatches derives the next set of crawlable page URLs from the

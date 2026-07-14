@@ -120,6 +120,16 @@ Flags:
   headless-Chrome renderer — widens the request spacing and honours the server's
   `Retry-After` before continuing, easing back to full speed once the host stops
   rate-limiting.
+- `-http-timeout` per-request timeout in seconds for HTTP fetches — page and
+  script fetches, calibration and method probes, and sitemap downloads (default
+  `10`). Raise it for enterprise crawls of large bundles over slow links; lower
+  it so a single stalled request cannot hold up the crawl. Independent of the
+  render wait controlled by `-timeout`.
+- `-retries` extra attempts for a bodyless HTTP fetch that fails with a transient
+  transport error — a connection reset, DNS blip or timeout (default `2`, `0` to
+  disable). Only idempotent, bodyless requests are retried, so a discovered
+  POST/PUT/PATCH parameter replay is never re-sent; this keeps a crawl of
+  thousands of requests from dropping pages to one-off network hiccups.
 - `-no-source-maps` disable recovering original source from JavaScript source
   maps. By default, when a scanned bundle advertises a source map (via a
   `//# sourceMappingURL=` comment or a `SourceMap` / `X-SourceMap` response
@@ -181,10 +191,14 @@ jsminer -crawl -crawl-depth 2 -endpoints https://example.com/
 ```
 
 The crawl stays on the target host and its subdomains, skips binary assets
-(images, fonts, media, archives) that cannot yield secrets, fetches each
-resource at most once, and stops at `-crawl-depth` hops or `-crawl-max-pages`
-pages. Progress is printed to stderr unless `-quiet` is set, and all findings are
-deduplicated before output. Crawling issues real requests to discovered
+(images, fonts, media, archives — by URL extension *and* by response
+`Content-Type`, so an extensionless URL that returns an image or PDF is skipped
+too) that cannot yield secrets, fetches each resource at most once over a pooled
+keep-alive connection, retries transient network errors on idempotent fetches
+(see `-retries`), and stops at `-crawl-depth` hops or `-crawl-max-pages` pages.
+Progress is printed to stderr unless `-quiet` is set, followed by a one-line
+run summary — pages fetched, errors, targets discovered, pages enqueued, matches
+and elapsed time — and all findings are deduplicated before output. Crawling issues real requests to discovered
 endpoints — including non-`GET` methods (`POST`, `PUT`, `PATCH`, `DELETE`,
 `OPTIONS`) for method probing and parameter replay — so use it only against
 targets you are authorized to test. Pass `-no-methods` to restrict a crawl to
@@ -221,16 +235,30 @@ one form:
 
 A crawl issues many requests per page — the page fetch and render, multi-method
 probing, per-directory and per-method auto-calibration, parameter replay and path
-permutation — which can trip a target's rate limiter. JSMiner paces itself to stay
-under those limits:
+permutation — which can trip a target's rate limiter. That is not just a politeness
+problem: once a host starts answering `429`, a page that would have revealed a
+secret is instead returned as an error shell, so tripping the limiter *loses
+findings*. JSMiner paces itself **per host** to stay under those limits without
+dropping or reordering any request, so accuracy and secret recall are unaffected:
 
+- **Budget-aware pre-emption (always on).** Servers that rate-limit almost always
+  advertise the remaining budget and its reset in response headers — the
+  `RateLimit-*` draft standard and the `X-RateLimit-*` / `X-Rate-Limit-*` vendor
+  variants (`Remaining`, `Reset`). JSMiner reads these on every response and spreads
+  the remaining requests across the reset window, slowing down *as it approaches*
+  the limit so it never actually trips one. With none remaining it holds until the
+  window resets (bounded by the backoff ceiling).
 - **Adaptive backoff (always on).** When any request — on the HTTP path or in the
   headless-Chrome renderer — comes back `429 Too Many Requests` or `503`, JSMiner
-  widens the spacing between requests and honours the server's `Retry-After` hint
+  widens the spacing for that host and honours the server's `Retry-After` hint
   (delta-seconds or HTTP-date) before continuing, then eases back to full speed
-  once the host stops rate-limiting.
+  once the host stops rate-limiting. Backoff is tracked per host, so a slow host
+  never throttles requests to an unrelated one.
 - **Proactive limit (opt-in).** Pass `-rate-limit N` to cap outbound requests at
-  `N` per second across the whole scan.
+  `N` per second per host.
+- **Jitter (opt-in).** Pass `-rate-limit-jitter F` (e.g. `0.2`) to randomise each
+  inter-request gap by ±F, breaking up the perfectly regular cadence that some edge
+  rate limiters flag as bot-like.
 
 ### Verbose output
 

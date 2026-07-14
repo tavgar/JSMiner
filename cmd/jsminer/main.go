@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/tavgar/JSMiner/internal/output"
 	"github.com/tavgar/JSMiner/internal/proxy"
@@ -62,11 +63,14 @@ func main() {
 	showSourceFlag := flag.Bool("show-source", false, "show source of each record (auto-enabled for multiple targets)")
 	snippet := flag.Bool("snippet", false, "show a JS-prettified, syntax-highlighted code snippet around each finding")
 	timeout := flag.Int("timeout", 8, "wait time in seconds for dynamic content to load when rendering pages (default: 8)")
+	httpTimeout := flag.Int("http-timeout", 10, "per-request timeout in seconds for HTTP fetches (page/script fetches, calibration and method probes, sitemaps)")
+	retries := flag.Int("retries", 2, "extra attempts for a bodyless HTTP fetch that fails with a transient transport error (0 = no retries)")
 	verbose1 := flag.Bool("v", false, "verbose: crawl narrative — matches per page, targets discovered, calibration/dedup skips")
 	verbose2 := flag.Bool("vv", false, "more verbose: also log every HTTP request/response and page render (implies -v)")
 	verbose3 := flag.Bool("vvv", false, "trace: also log per-target enqueue/skip, method probes, param replays and permutations (implies -vv)")
 	exploreStates := flag.Int("explore-states", 12, "when rendering, max additional application states to reach through interaction — client-side navigation and filled/submitted forms (0 = render each page once)")
-	rateLimit := flag.Float64("rate-limit", 0, "max HTTP requests per second across the scan (0 = no proactive limit; adaptive 429/503 backoff is always on)")
+	rateLimit := flag.Float64("rate-limit", 0, "max HTTP requests per second per host (0 = no proactive limit; adaptive 429/503 backoff and rate-limit-header pre-emption are always on)")
+	rateLimitJitter := flag.Float64("rate-limit-jitter", 0, "randomise each inter-request gap by +/- this fraction (e.g. 0.2 = +/-20%) to avoid a lockstep cadence (0 = off)")
 	chromePath := flag.String("chrome-path", "", "path to the Chrome/Chromium executable for rendering (default: auto-detect on PATH; also honours $JSMINER_CHROME)")
 	downloadBrowser := flag.Bool("download-browser", false, "provision the bundled Chromium now (download if needed) and print its path, then exit if no target is given")
 	noDownloadBrowser := flag.Bool("no-download-browser", false, "never download a Chromium; only use -chrome-path, a bundled or cached browser, or one on PATH")
@@ -176,6 +180,28 @@ func main() {
 			if f, err := strconv.ParseFloat(val, 64); err == nil {
 				*rateLimit = f
 			}
+		case "rate-limit-jitter":
+			val := ""
+			if len(parts) == 2 {
+				val = parts[1]
+			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				val = args[i+1]
+				i++
+			}
+			if f, err := strconv.ParseFloat(val, 64); err == nil {
+				*rateLimitJitter = f
+			}
+		case "retries":
+			val := ""
+			if len(parts) == 2 {
+				val = parts[1]
+			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				val = args[i+1]
+				i++
+			}
+			if n, err := strconv.Atoi(val); err == nil {
+				*retries = n
+			}
 		case "crawl-depth", "crawl-max-pages", "crawl-permute-max", "template-sample-max":
 			val := ""
 			if len(parts) == 2 {
@@ -219,6 +245,17 @@ func main() {
 			}
 			if t, err := strconv.Atoi(val); err == nil {
 				*timeout = t
+			}
+		case "http-timeout":
+			val := ""
+			if len(parts) == 2 {
+				val = parts[1]
+			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				val = args[i+1]
+				i++
+			}
+			if t, err := strconv.Atoi(val); err == nil {
+				*httpTimeout = t
 			}
 		case "header":
 			val := ""
@@ -364,7 +401,10 @@ func main() {
 	}
 	scan.SetMaxExploreStates(*exploreStates)
 	scan.SetSkipTLSVerification(*insecure)
+	scan.SetHTTPTimeout(*httpTimeout)
+	scan.SetFetchRetries(*retries)
 	scan.SetRateLimit(*rateLimit)
+	scan.SetRateLimitJitter(*rateLimitJitter)
 
 	// -v/-vv/-vvv are cumulative: the highest one given wins, and each level
 	// implies the ones below it.
@@ -483,6 +523,15 @@ func main() {
 					}
 					opts.OnCalibrated = func(n int) {
 						fmt.Fprintf(os.Stderr, "[crawl] auto-calibration learned %d wildcard signature(s)\n", n)
+					}
+				}
+				// A one-line end-of-run summary is useful at every verbosity, so it is
+				// gated only on the banner being enabled, not on verbose logging.
+				if !*quiet {
+					opts.OnComplete = func(s scan.CrawlStats) {
+						fmt.Fprintf(os.Stderr,
+							"[crawl] done: %d page(s) fetched, %d error(s), %d target(s) discovered, %d enqueued, %d match(es) in %s\n",
+							s.PagesFetched, s.PagesErrored, s.TargetsFound, s.Enqueued, s.Matches, s.Duration.Round(time.Millisecond))
 					}
 				}
 				if *posts {

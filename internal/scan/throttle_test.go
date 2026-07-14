@@ -46,7 +46,7 @@ func TestThrottleNoProactiveGapByDefault(t *testing.T) {
 func TestThrottleProactiveSpacing(t *testing.T) {
 	th, slept, _ := newTestThrottle()
 	th.baseGap = 200 * time.Millisecond
-	th.curGap = th.baseGap
+	th.host("").curGap = th.baseGap
 
 	// First request goes immediately; each subsequent one is spaced by baseGap.
 	for i := 0; i < 4; i++ {
@@ -71,8 +71,8 @@ func TestThrottleBacksOffOn429(t *testing.T) {
 	// the next request wait at least that long.
 	th.wait()
 	th.observe(resp(429, ""), nil)
-	if th.curGap != throttleMinBackoff {
-		t.Fatalf("expected curGap %s after first 429, got %s", throttleMinBackoff, th.curGap)
+	if th.host("").curGap != throttleMinBackoff {
+		t.Fatalf("expected curGap %s after first 429, got %s", throttleMinBackoff, th.host("").curGap)
 	}
 	th.wait()
 	if len(*slept) != 1 || (*slept)[0] < throttleMinBackoff {
@@ -81,8 +81,8 @@ func TestThrottleBacksOffOn429(t *testing.T) {
 
 	// A second 429 doubles the gap.
 	th.observe(resp(429, ""), nil)
-	if th.curGap != 2*throttleMinBackoff {
-		t.Fatalf("expected curGap to double to %s, got %s", 2*throttleMinBackoff, th.curGap)
+	if th.host("").curGap != 2*throttleMinBackoff {
+		t.Fatalf("expected curGap to double to %s, got %s", 2*throttleMinBackoff, th.host("").curGap)
 	}
 }
 
@@ -117,12 +117,12 @@ func TestThrottleRetryAfterCappedByMaxGap(t *testing.T) {
 func TestThrottleDecaysAfterCleanResponses(t *testing.T) {
 	th, _, _ := newTestThrottle()
 	th.baseGap = 100 * time.Millisecond
-	th.curGap = th.baseGap
+	th.host("").curGap = th.baseGap
 
 	// Drive the gap up with a couple of 429s.
 	th.observe(resp(429, ""), nil)
 	th.observe(resp(429, ""), nil)
-	elevated := th.curGap
+	elevated := th.host("").curGap
 	if elevated <= th.baseGap {
 		t.Fatalf("expected elevated gap after 429s, got %s", elevated)
 	}
@@ -131,22 +131,22 @@ func TestThrottleDecaysAfterCleanResponses(t *testing.T) {
 	for i := 0; i < throttleDecayStreak; i++ {
 		th.observe(resp(200, ""), nil)
 	}
-	if th.curGap != elevated/2 {
-		t.Fatalf("expected gap to halve to %s after a clean streak, got %s", elevated/2, th.curGap)
+	if th.host("").curGap != elevated/2 {
+		t.Fatalf("expected gap to halve to %s after a clean streak, got %s", elevated/2, th.host("").curGap)
 	}
 }
 
 func TestThrottleTransportErrorDoesNotDecay(t *testing.T) {
 	th, _, _ := newTestThrottle()
 	th.observe(resp(429, ""), nil)
-	elevated := th.curGap
+	elevated := th.host("").curGap
 	// Transport errors carry no rate-limit signal and must not be counted as a
 	// clean response that decays the backoff.
 	for i := 0; i < throttleDecayStreak*2; i++ {
 		th.observe(nil, http.ErrHandlerTimeout)
 	}
-	if th.curGap != elevated {
-		t.Fatalf("expected gap unchanged by transport errors, got %s (was %s)", th.curGap, elevated)
+	if th.host("").curGap != elevated {
+		t.Fatalf("expected gap unchanged by transport errors, got %s (was %s)", th.host("").curGap, elevated)
 	}
 }
 
@@ -155,8 +155,8 @@ func TestNoteThrottledBacksOffLikeObserve(t *testing.T) {
 	// The render path feeds a browser-observed 429 in via noteThrottled; it must
 	// widen the gap and delay the next request just as a Go-path 429 would.
 	th.noteThrottled(429, "2")
-	if th.curGap != throttleMinBackoff {
-		t.Fatalf("expected curGap %s, got %s", throttleMinBackoff, th.curGap)
+	if th.host("").curGap != throttleMinBackoff {
+		t.Fatalf("expected curGap %s, got %s", throttleMinBackoff, th.host("").curGap)
 	}
 	th.wait()
 	if len(*slept) != 1 || (*slept)[0] < 2*time.Second {
@@ -167,8 +167,8 @@ func TestNoteThrottledBacksOffLikeObserve(t *testing.T) {
 func TestObserveDelegatesToNoteThrottled(t *testing.T) {
 	th, _, _ := newTestThrottle()
 	th.observe(resp(503, ""), nil)
-	if th.curGap != throttleMinBackoff {
-		t.Fatalf("expected observe(503) to back off to %s, got %s", throttleMinBackoff, th.curGap)
+	if th.host("").curGap != throttleMinBackoff {
+		t.Fatalf("expected observe(503) to back off to %s, got %s", throttleMinBackoff, th.host("").curGap)
 	}
 }
 

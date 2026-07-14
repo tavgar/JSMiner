@@ -17,6 +17,16 @@ const (
 	// skipped. The scanner grows the buffer on demand up to this cap, so the
 	// value is a ceiling, not a pre-allocation.
 	MaxBufferSize = 64 * 1024 * 1024 // 64MB
+
+	// MaxResponseBodyBytes caps how much of a fetched HTTP response the crawler
+	// reads into memory before scanning it. A crawl fetches arbitrary, attacker-
+	// influenced hosts at scale, so an unbounded read lets a single hostile or
+	// misconfigured server that streams a body of any length exhaust the
+	// scanner's memory and take the whole crawl down. The cap matches
+	// MaxBufferSize — the scanner's own per-token ceiling — so bytes past it
+	// would be dropped by the scanner anyway; bounding the read just refuses to
+	// buffer them first.
+	MaxResponseBodyBytes = MaxBufferSize
 )
 
 // Timeouts and delays
@@ -67,6 +77,36 @@ func SetMaxExploreStates(n int) {
 // SetSkipTLSVerification configures whether HTTPS certificate verification should be skipped
 func SetSkipTLSVerification(skip bool) {
 	SkipTLSVerification = skip
+}
+
+// FetchRetries is how many extra attempts the shared HTTP fetch path makes when a
+// request fails with a transport error — a connection reset, DNS blip or timeout,
+// the kind of transient failure an enterprise crawl of thousands of requests hits
+// routinely. Only bodyless (idempotent, GET-style) requests are retried, so a
+// discovered POST/PUT/PATCH parameter replay is never double-submitted against a
+// target. Zero disables retries.
+var FetchRetries = 2
+
+// SetFetchRetries configures how many extra attempts a transient transport error
+// earns on the bodyless fetch path. A negative value is treated as zero.
+func SetFetchRetries(n int) {
+	if n < 0 {
+		n = 0
+	}
+	FetchRetries = n
+}
+
+// SetHTTPTimeout configures the per-request timeout for the shared HTTP fetch
+// path (page and script fetches, calibration probes, method probes, sitemaps).
+// A non-positive value restores the default. Enterprise crawls of large bundles
+// over slow links need this raised; interactive scans of flaky hosts may want it
+// lowered so a single stalled request cannot hold up the whole crawl.
+func SetHTTPTimeout(seconds int) {
+	if seconds <= 0 {
+		HTTPClientTimeout = 10 * time.Second
+		return
+	}
+	HTTPClientTimeout = time.Duration(seconds) * time.Second
 }
 
 // Other limits
