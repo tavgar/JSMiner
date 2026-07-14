@@ -130,10 +130,12 @@ func retryAfterFromHeaders(h network.Headers) string {
 // noteRenderResponse feeds a response headless Chrome received into the shared
 // throttle when it is a rate-limit/overload signal, so a 429/503 the browser hits
 // during a render backs off the whole scan even though Chrome's own fetches never
-// pass through the Go request path.
-func noteRenderResponse(status int, h network.Headers) {
+// pass through the Go request path. respURL is the URL of the response, so the
+// backoff is applied against the host that actually rate-limited rather than
+// globally.
+func noteRenderResponse(respURL string, status int, h network.Headers) {
 	if isThrottleStatus(status) {
-		globalThrottle.noteThrottled(status, retryAfterFromHeaders(h))
+		globalThrottle.noteThrottledHost(hostOf(respURL), status, retryAfterFromHeaders(h))
 	}
 }
 
@@ -142,7 +144,7 @@ func noteRenderResponse(status int, h network.Headers) {
 func RenderURL(urlStr string) ([]byte, []string, error) {
 	// Pace the render against the shared throttle before arming the timeout, so a
 	// backoff sleep cannot consume the render budget (see renderStates).
-	globalThrottle.wait()
+	globalThrottle.waitHost(hostOf(urlStr))
 
 	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), renderExecOptions()...)
 	defer cancel()
@@ -158,7 +160,7 @@ func RenderURL(urlStr string) ([]byte, []string, error) {
 	scriptSet := make(map[string]struct{})
 	chromedp.ListenTarget(ctx, func(ev interface{}) {
 		if e, ok := ev.(*network.EventResponseReceived); ok {
-			noteRenderResponse(int(e.Response.Status), e.Response.Headers)
+			noteRenderResponse(e.Response.URL, int(e.Response.Status), e.Response.Headers)
 			u := e.Response.URL
 			if strings.HasSuffix(strings.ToLower(u), ".js") ||
 				strings.Contains(e.Response.MimeType, "javascript") {
@@ -227,7 +229,7 @@ func renderStates(urlStr string, explore bool) ([][]byte, []string, []HTTPReques
 	// before starting a render. This must happen before the render timeout is
 	// armed below, otherwise a backoff sleep would eat into the render budget and
 	// could expire the context before Chrome even navigates.
-	globalThrottle.wait()
+	globalThrottle.waitHost(hostOf(urlStr))
 
 	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), renderExecOptions()...)
 	defer cancel()
@@ -250,7 +252,7 @@ func renderStates(urlStr string, explore bool) ([][]byte, []string, []HTTPReques
 	chromedp.ListenTarget(ctx, func(ev interface{}) {
 		switch e := ev.(type) {
 		case *network.EventResponseReceived:
-			noteRenderResponse(int(e.Response.Status), e.Response.Headers)
+			noteRenderResponse(e.Response.URL, int(e.Response.Status), e.Response.Headers)
 			u := e.Response.URL
 			if strings.HasSuffix(strings.ToLower(u), ".js") ||
 				strings.Contains(e.Response.MimeType, "javascript") {

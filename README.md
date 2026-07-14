@@ -235,16 +235,30 @@ one form:
 
 A crawl issues many requests per page — the page fetch and render, multi-method
 probing, per-directory and per-method auto-calibration, parameter replay and path
-permutation — which can trip a target's rate limiter. JSMiner paces itself to stay
-under those limits:
+permutation — which can trip a target's rate limiter. That is not just a politeness
+problem: once a host starts answering `429`, a page that would have revealed a
+secret is instead returned as an error shell, so tripping the limiter *loses
+findings*. JSMiner paces itself **per host** to stay under those limits without
+dropping or reordering any request, so accuracy and secret recall are unaffected:
 
+- **Budget-aware pre-emption (always on).** Servers that rate-limit almost always
+  advertise the remaining budget and its reset in response headers — the
+  `RateLimit-*` draft standard and the `X-RateLimit-*` / `X-Rate-Limit-*` vendor
+  variants (`Remaining`, `Reset`). JSMiner reads these on every response and spreads
+  the remaining requests across the reset window, slowing down *as it approaches*
+  the limit so it never actually trips one. With none remaining it holds until the
+  window resets (bounded by the backoff ceiling).
 - **Adaptive backoff (always on).** When any request — on the HTTP path or in the
   headless-Chrome renderer — comes back `429 Too Many Requests` or `503`, JSMiner
-  widens the spacing between requests and honours the server's `Retry-After` hint
+  widens the spacing for that host and honours the server's `Retry-After` hint
   (delta-seconds or HTTP-date) before continuing, then eases back to full speed
-  once the host stops rate-limiting.
+  once the host stops rate-limiting. Backoff is tracked per host, so a slow host
+  never throttles requests to an unrelated one.
 - **Proactive limit (opt-in).** Pass `-rate-limit N` to cap outbound requests at
-  `N` per second across the whole scan.
+  `N` per second per host.
+- **Jitter (opt-in).** Pass `-rate-limit-jitter F` (e.g. `0.2`) to randomise each
+  inter-request gap by ±F, breaking up the perfectly regular cadence that some edge
+  rate limiters flag as bot-like.
 
 ### Verbose output
 

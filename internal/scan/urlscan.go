@@ -114,9 +114,10 @@ func fetchURLResponseMethod(u, method, body string) (*http.Response, error) {
 		// calibrations stays under the target's rate limit, and back off when the
 		// server signals 429/503. wait() blocks for the configured/adaptive gap;
 		// observe() adapts the gap to the response.
-		globalThrottle.wait()
+		host := hostOf(u)
+		globalThrottle.waitHost(host)
 		resp, err = sharedHTTPClient().Do(req)
-		globalThrottle.observe(resp, err)
+		globalThrottle.observeHost(host, resp, err)
 		if err == nil {
 			break
 		}
