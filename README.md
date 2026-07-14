@@ -191,10 +191,14 @@ jsminer -crawl -crawl-depth 2 -endpoints https://example.com/
 ```
 
 The crawl stays on the target host and its subdomains, skips binary assets
-(images, fonts, media, archives) that cannot yield secrets, fetches each
-resource at most once, and stops at `-crawl-depth` hops or `-crawl-max-pages`
-pages. Progress is printed to stderr unless `-quiet` is set, and all findings are
-deduplicated before output. Crawling issues real requests to discovered
+(images, fonts, media, archives — by URL extension *and* by response
+`Content-Type`, so an extensionless URL that returns an image or PDF is skipped
+too) that cannot yield secrets, fetches each resource at most once over a pooled
+keep-alive connection, retries transient network errors on idempotent fetches
+(see `-retries`), and stops at `-crawl-depth` hops or `-crawl-max-pages` pages.
+Progress is printed to stderr unless `-quiet` is set, followed by a one-line
+run summary — pages fetched, errors, targets discovered, pages enqueued, matches
+and elapsed time — and all findings are deduplicated before output. Crawling issues real requests to discovered
 endpoints — including non-`GET` methods (`POST`, `PUT`, `PATCH`, `DELETE`,
 `OPTIONS`) for method probing and parameter replay — so use it only against
 targets you are authorized to test. Pass `-no-methods` to restrict a crawl to
