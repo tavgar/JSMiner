@@ -217,6 +217,43 @@ func isHTMLContent(urlStr, ct string) bool {
 	return ext == ".html" || ext == ".htm"
 }
 
+// binaryContentTypes are the exact media types that carry no JavaScript, endpoint
+// or secret and so are not worth downloading and scanning. It deliberately omits
+// application/octet-stream, which CDNs routinely (mis)apply to real JavaScript and
+// JSON, so a mislabelled bundle is never skipped.
+var binaryContentTypes = map[string]struct{}{
+	"application/pdf": {}, "application/zip": {}, "application/gzip": {},
+	"application/x-gzip": {}, "application/x-tar": {}, "application/x-bzip2": {},
+	"application/x-rar-compressed": {}, "application/x-7z-compressed": {},
+	"application/vnd.ms-fontobject": {}, "application/x-font-ttf": {},
+	"application/msword": {}, "application/vnd.ms-excel": {},
+	"application/vnd.ms-powerpoint": {},
+}
+
+// isBinaryContentType reports whether a response's Content-Type is a binary
+// media/asset type worth skipping during a scan. Any image, audio, video or font
+// type is skipped by prefix; a curated set of archive and document types is
+// skipped exactly. Text, HTML, JavaScript, JSON and XML types — anything that can
+// hold a secret or endpoint — are never matched, and neither is the ambiguous
+// application/octet-stream. An empty type (server sent none) is never skipped, so
+// nothing is dropped merely for lacking a Content-Type.
+func isBinaryContentType(ct string) bool {
+	ct = strings.ToLower(strings.TrimSpace(ct))
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = strings.TrimSpace(ct[:i])
+	}
+	if ct == "" {
+		return false
+	}
+	for _, pre := range []string{"image/", "audio/", "video/", "font/"} {
+		if strings.HasPrefix(ct, pre) {
+			return true
+		}
+	}
+	_, ok := binaryContentTypes[ct]
+	return ok
+}
+
 // ScanURL scans urlStr and any discovered script or import references.
 // Cross-domain resources are followed by default. Set external to false to restrict scanning to the same domain. JavaScript files are scanned using the configured rules.
 // ScanURL scans urlStr and any discovered script or import references. When
@@ -258,6 +295,16 @@ func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited map
 	defer resp.Body.Close()
 
 	finalURL := resp.Request.URL.String()
+
+	// A binary asset (image, font, media, archive, document) served under an
+	// extensionless or unexpected URL carries no JavaScript, endpoint or secret;
+	// skip it before downloading and running every rule over its bytes. Extension
+	// filtering already drops most binaries before the fetch — this catches the
+	// ones only their Content-Type reveals.
+	if isBinaryContentType(resp.Header.Get("Content-Type")) {
+		vlog(2, "[scan] skip binary %q at %s", resp.Header.Get("Content-Type"), finalURL)
+		return nil, nil
+	}
 
 	data, err := readCappedBody(resp.Body)
 	if err != nil {
@@ -362,6 +409,16 @@ func (e *Extractor) scanURLPosts(urlStr, baseHost string, visited map[string]str
 	defer resp.Body.Close()
 
 	finalURL := resp.Request.URL.String()
+
+	// A binary asset (image, font, media, archive, document) served under an
+	// extensionless or unexpected URL carries no JavaScript, endpoint or secret;
+	// skip it before downloading and running every rule over its bytes. Extension
+	// filtering already drops most binaries before the fetch — this catches the
+	// ones only their Content-Type reveals.
+	if isBinaryContentType(resp.Header.Get("Content-Type")) {
+		vlog(2, "[scan] skip binary %q at %s", resp.Header.Get("Content-Type"), finalURL)
+		return nil, nil
+	}
 
 	data, err := readCappedBody(resp.Body)
 	if err != nil {
