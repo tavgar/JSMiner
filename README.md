@@ -125,6 +125,11 @@ Flags:
   `10`). Raise it for enterprise crawls of large bundles over slow links; lower
   it so a single stalled request cannot hold up the crawl. Independent of the
   render wait controlled by `-timeout`.
+- `-retries` extra attempts for a bodyless HTTP fetch that fails with a transient
+  transport error — a connection reset, DNS blip or timeout (default `2`, `0` to
+  disable). Only idempotent, bodyless requests are retried, so a discovered
+  POST/PUT/PATCH parameter replay is never re-sent; this keeps a crawl of
+  thousands of requests from dropping pages to one-off network hiccups.
 - `-no-source-maps` disable recovering original source from JavaScript source
   maps. By default, when a scanned bundle advertises a source map (via a
   `//# sourceMappingURL=` comment or a `SourceMap` / `X-SourceMap` response

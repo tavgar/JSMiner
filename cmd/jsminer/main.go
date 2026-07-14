@@ -63,6 +63,7 @@ func main() {
 	snippet := flag.Bool("snippet", false, "show a JS-prettified, syntax-highlighted code snippet around each finding")
 	timeout := flag.Int("timeout", 8, "wait time in seconds for dynamic content to load when rendering pages (default: 8)")
 	httpTimeout := flag.Int("http-timeout", 10, "per-request timeout in seconds for HTTP fetches (page/script fetches, calibration and method probes, sitemaps)")
+	retries := flag.Int("retries", 2, "extra attempts for a bodyless HTTP fetch that fails with a transient transport error (0 = no retries)")
 	verbose1 := flag.Bool("v", false, "verbose: crawl narrative — matches per page, targets discovered, calibration/dedup skips")
 	verbose2 := flag.Bool("vv", false, "more verbose: also log every HTTP request/response and page render (implies -v)")
 	verbose3 := flag.Bool("vvv", false, "trace: also log per-target enqueue/skip, method probes, param replays and permutations (implies -vv)")
@@ -176,6 +177,17 @@ func main() {
 			}
 			if f, err := strconv.ParseFloat(val, 64); err == nil {
 				*rateLimit = f
+			}
+		case "retries":
+			val := ""
+			if len(parts) == 2 {
+				val = parts[1]
+			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				val = args[i+1]
+				i++
+			}
+			if n, err := strconv.Atoi(val); err == nil {
+				*retries = n
 			}
 		case "crawl-depth", "crawl-max-pages", "crawl-permute-max", "template-sample-max":
 			val := ""
@@ -377,6 +389,7 @@ func main() {
 	scan.SetMaxExploreStates(*exploreStates)
 	scan.SetSkipTLSVerification(*insecure)
 	scan.SetHTTPTimeout(*httpTimeout)
+	scan.SetFetchRetries(*retries)
 	scan.SetRateLimit(*rateLimit)
 
 	// -v/-vv/-vvv are cumulative: the highest one given wins, and each level

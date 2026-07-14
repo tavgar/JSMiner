@@ -99,16 +99,32 @@ func fetchURLResponseMethod(u, method, body string) (*http.Response, error) {
 	if body != "" && req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", inferContentType(body))
 	}
-	// Pace outbound requests so a crawl's burst of fetches, probes and
-	// calibrations stays under the target's rate limit, and back off when the
-	// server signals 429/503. wait() blocks for the configured/adaptive gap;
-	// observe() adapts the gap to the response.
-	globalThrottle.wait()
-	resp, err := sharedHTTPClient().Do(req)
-	globalThrottle.observe(resp, err)
-	if err != nil {
-		vlog(2, "http %s %s -> error: %v", method, u, err)
-		return nil, err
+	// A transient transport error (connection reset, DNS blip, timeout) is retried
+	// on the idempotent, bodyless fetch path so a single network hiccup does not
+	// drop a page from the crawl. Requests that carry a body — discovered POST/PUT/
+	// PATCH parameter replays — are attempted exactly once so a retry can never
+	// double-submit them against the target.
+	attempts := 1
+	if body == "" {
+		attempts += FetchRetries
+	}
+	var resp *http.Response
+	for attempt := 0; ; attempt++ {
+		// Pace outbound requests so a crawl's burst of fetches, probes and
+		// calibrations stays under the target's rate limit, and back off when the
+		// server signals 429/503. wait() blocks for the configured/adaptive gap;
+		// observe() adapts the gap to the response.
+		globalThrottle.wait()
+		resp, err = sharedHTTPClient().Do(req)
+		globalThrottle.observe(resp, err)
+		if err == nil {
+			break
+		}
+		if attempt+1 >= attempts {
+			vlog(2, "http %s %s -> error: %v", method, u, err)
+			return nil, err
+		}
+		vlog(2, "http %s %s -> transport error (%v); retry %d/%d", method, u, err, attempt+1, attempts-1)
 	}
 	vlog(2, "http %s %s -> %s", method, u, resp.Status)
 	return resp, nil
