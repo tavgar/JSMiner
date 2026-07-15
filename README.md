@@ -96,6 +96,15 @@ Flags:
   `0` for unlimited).
 - `-crawl-max-pages` max pages to fetch during a crawl (default `200`, `0` for
   unlimited).
+- `-crawl-workers` how many pages to fetch and scan in parallel during a crawl
+  (default `8`, `1` for a fully serial crawl). A crawl is dominated by per-page
+  I/O — the HTTP fetch and, when rendering is on, a headless-Chrome render that
+  can take seconds — so scanning several pages at once is the main speed-up.
+  Per-host pacing and adaptive backoff (see `-rate-limit`) still bound the load
+  any single host sees, so this stays polite. Note that with rendering on each
+  busy worker runs its own browser, so higher values also cost more memory;
+  lower it on constrained hosts or raise it for network-bound (non-render)
+  crawls.
 - `-methods` comma-separated HTTP methods each crawled URL is probed with
   (default `GET,POST,PUT,PATCH,DELETE,OPTIONS`). The methods that work — judged
   against the per-method error logic learned by auto-calibration — are reported

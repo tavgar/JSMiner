@@ -78,7 +78,7 @@ func sourceMapReference(data []byte, header http.Header) string {
 // bundle's final URL, header its response headers, and visited the shared
 // fetch-dedup set. posts selects POST-endpoint scanning over secret/endpoint
 // scanning. It is a no-op (nil) when recovery is disabled or no map is found.
-func (e *Extractor) recoverSourceMap(bundleURL string, data []byte, header http.Header, baseHost string, external bool, visited map[string]struct{}, posts bool) []Match {
+func (e *Extractor) recoverSourceMap(bundleURL string, data []byte, header http.Header, baseHost string, external bool, visited *visitedSet, posts bool) []Match {
 	if !e.recoverSourceMaps {
 		return nil
 	}
@@ -129,7 +129,7 @@ func (e *Extractor) recoverSourceMap(bundleURL string, data []byte, header http.
 // recording the URL in visited so a map shared by several bundles is fetched
 // once. For a data: URI the map URL is the bundle URL, since embedded relative
 // sources resolve against the bundle's location.
-func (e *Extractor) loadSourceMap(ref, bundleURL, baseHost string, external bool, visited map[string]struct{}) ([]byte, string, bool) {
+func (e *Extractor) loadSourceMap(ref, bundleURL, baseHost string, external bool, visited *visitedSet) ([]byte, string, bool) {
 	if strings.HasPrefix(ref, "data:") {
 		raw, ok := decodeDataURI(ref)
 		return raw, bundleURL, ok
@@ -142,7 +142,7 @@ func (e *Extractor) loadSourceMap(ref, bundleURL, baseHost string, external bool
 // fetchOriginalSource fetches the original source for a map entry when it is not
 // embedded. src is resolved against sourceRoot and the map URL; only in-scope
 // http(s) URLs are fetched. Returns nil when the source is not fetchable.
-func (e *Extractor) fetchOriginalSource(mapURL, sourceRoot, src, baseHost string, external bool, visited map[string]struct{}) []byte {
+func (e *Extractor) fetchOriginalSource(mapURL, sourceRoot, src, baseHost string, external bool, visited *visitedSet) []byte {
 	abs := resolveURL(mapURL, joinSourceRoot(sourceRoot, src))
 	raw, ok := e.fetchInScope(abs, baseHost, external, visited)
 	if !ok {
@@ -154,7 +154,7 @@ func (e *Extractor) fetchOriginalSource(mapURL, sourceRoot, src, baseHost string
 // fetchInScope GETs abs when it is an http(s) URL within scope and not already
 // visited, returning the body (capped at maxSourceMapBytes). It shares the
 // crawl's fetch dedup so each URL is retrieved at most once.
-func (e *Extractor) fetchInScope(abs, baseHost string, external bool, visited map[string]struct{}) ([]byte, bool) {
+func (e *Extractor) fetchInScope(abs, baseHost string, external bool, visited *visitedSet) ([]byte, bool) {
 	u, err := url.Parse(abs)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return nil, false
@@ -162,10 +162,9 @@ func (e *Extractor) fetchInScope(abs, baseHost string, external bool, visited ma
 	if !external && !sameScope(baseHost, u.Hostname()) {
 		return nil, false
 	}
-	if _, ok := visited[abs]; ok {
+	if !visited.visit(abs) {
 		return nil, false
 	}
-	visited[abs] = struct{}{}
 	resp, err := fetchURLResponse(abs)
 	if err != nil {
 		return nil, false

@@ -264,7 +264,7 @@ func (e *Extractor) ScanURL(urlStr string, endpoints bool, external bool, render
 	if err != nil {
 		return nil, err
 	}
-	visited := make(map[string]struct{})
+	visited := newVisitedSet()
 	return e.scanURL(u.String(), u.Hostname(), endpoints, visited, external, render)
 }
 
@@ -275,19 +275,19 @@ func (e *Extractor) ScanURLPosts(urlStr string, external bool, render bool) ([]M
 	if err != nil {
 		return nil, err
 	}
-	visited := make(map[string]struct{})
+	visited := newVisitedSet()
 	return e.scanURLPosts(u.String(), u.Hostname(), visited, external, render)
 }
 
 // scanURL performs the recursive scanning used by ScanURL. The baseHost
-// parameter indicates the host of the initial URL. The visited map tracks
-// already processed URLs to avoid loops. When external is false, only resources
-// from the same domain are processed.
-func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited map[string]struct{}, external bool, render bool) ([]Match, error) {
-	if _, ok := visited[urlStr]; ok {
+// parameter indicates the host of the initial URL. The visited set tracks
+// already processed URLs to avoid loops and is shared (and synchronised) across
+// a concurrent crawl's workers. When external is false, only resources from the
+// same domain are processed.
+func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited *visitedSet, external bool, render bool) ([]Match, error) {
+	if !visited.visit(urlStr) {
 		return nil, nil
 	}
-	visited[urlStr] = struct{}{}
 
 	resp, err := fetchURLResponse(urlStr)
 	if err != nil {
@@ -397,11 +397,10 @@ func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited map
 
 // scanURLPosts performs recursive scanning like scanURL but returns only POST
 // request endpoints.
-func (e *Extractor) scanURLPosts(urlStr, baseHost string, visited map[string]struct{}, external bool, render bool) ([]Match, error) {
-	if _, ok := visited[urlStr]; ok {
+func (e *Extractor) scanURLPosts(urlStr, baseHost string, visited *visitedSet, external bool, render bool) ([]Match, error) {
+	if !visited.visit(urlStr) {
 		return nil, nil
 	}
-	visited[urlStr] = struct{}{}
 
 	resp, err := fetchURLResponse(urlStr)
 	if err != nil {
@@ -498,7 +497,7 @@ func (e *Extractor) scanURLPosts(urlStr, baseHost string, visited map[string]str
 // carries script URLs captured during rendering that are not in the static
 // markup; it is supplied only for the first state since the render returns the
 // union across all states and the visited map dedups the rest.
-func (e *Extractor) scanHTMLState(finalURL, baseHost string, data []byte, dynamic []string, endpoints bool, visited map[string]struct{}, external, render bool) []Match {
+func (e *Extractor) scanHTMLState(finalURL, baseHost string, data []byte, dynamic []string, endpoints bool, visited *visitedSet, external, render bool) []Match {
 	var matches []Match
 	if !e.safeMode {
 		if ms, err := e.ScanReader(finalURL, bytes.NewReader(data)); err == nil {
@@ -544,7 +543,7 @@ func (e *Extractor) scanHTMLState(finalURL, baseHost string, data []byte, dynami
 // scanURLPosts. Like scanHTMLState, dynamic is supplied only for the first
 // state. It mirrors the POST-only behaviour of scanURLPosts: inline scripts are
 // not scanned here (POST endpoints come from the linked script sources).
-func (e *Extractor) scanHTMLStatePosts(finalURL, baseHost string, data []byte, dynamic []string, visited map[string]struct{}, external, render bool) []Match {
+func (e *Extractor) scanHTMLStatePosts(finalURL, baseHost string, data []byte, dynamic []string, visited *visitedSet, external, render bool) []Match {
 	var matches []Match
 	// During a crawl (calibrator set), harvest the page's markup links so the posts
 	// crawl follows the HTML link graph to reach deeper pages — and the POST
