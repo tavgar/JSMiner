@@ -499,7 +499,7 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 				defer wg.Done()
 				for job := range jobCh {
 					if job.isReplay {
-						worked := probeURLMethods(cal, job.replay.url, methods, job.replay.params)
+						worked := probeParamReplayMethods(cal, job.replay.url, methods, job.replay.params)
 						var ms []Match
 						if gm, ok := gatheredMatch(job.replay.url, worked, job.replay.params); ok {
 							vlog(3, "[crawl] param-replay %s params=%s -> methods %s", job.replay.url, job.replay.params, strings.Join(worked, ","))
@@ -713,7 +713,7 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 				levelURLs = append(levelURLs, targets...)
 				levelURLs = append(levelURLs, t.url)
 				for _, rt := range replay.observe(paramsFromMatches(ms), levelURLs) {
-					worked := probeURLMethods(cal, rt.url, methods, rt.params)
+					worked := probeParamReplayMethods(cal, rt.url, methods, rt.params)
 					if gm, ok := gatheredMatch(rt.url, worked, rt.params); ok {
 						vlog(3, "[crawl] param-replay %s params=%s -> methods %s", rt.url, rt.params, strings.Join(worked, ","))
 						all = append(all, gm)

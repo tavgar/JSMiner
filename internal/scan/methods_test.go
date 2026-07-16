@@ -55,9 +55,16 @@ func TestScanURLCrawlGathersMethods(t *testing.T) {
 			return
 		}
 		// /api/submit accepts GET and POST; everything else is a 404 shell so the
-		// per-method calibration has a catch-all to learn.
+		// per-method calibration has a catch-all to learn. POST returns a distinctly
+		// larger body than GET so the two are distinguishable by the coarse response
+		// signature (a POST that merely echoed the GET body would read as the server
+		// ignoring the method and be collapsed).
 		if r.URL.Path == "/api/submit" {
-			io.WriteString(w, `<html><body>submit ok `+r.Method+`</body></html>`)
+			if r.Method == "POST" {
+				io.WriteString(w, `<html><body>submission accepted and stored with a confirmation identifier and many more descriptive words here</body></html>`)
+				return
+			}
+			io.WriteString(w, `<html><body>submit</body></html>`)
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -130,6 +137,94 @@ func TestScanURLCrawlMethodCatchAll(t *testing.T) {
 	}
 	if !strings.Contains(page, "GET") {
 		t.Fatalf("GET should still be reported for /read/page, got %q", page)
+	}
+}
+
+// TestProbeURLMethodsCollapsesMethodAgnostic verifies the GET-baseline collapse:
+// a resource that answers every verb with the same response (a CDN/static server
+// ignoring the method) is reported as GET only, while a real POST-only endpoint
+// that rejects GET still reports POST.
+func TestProbeURLMethodsCollapsesMethodAgnostic(t *testing.T) {
+	mux := http.NewServeMux()
+	// Method-agnostic: identical 200 body for every verb, like a static file served
+	// by an edge that ignores the request method.
+	mux.HandleFunc("/asset.js", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "export const x = 1; // identical bytes returned for every method here")
+	})
+	// Real POST-only endpoint: GET (and the other verbs) are rejected with 405.
+	mux.HandleFunc("/api/create", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			io.WriteString(w, "created a brand new record with several distinct words in the body")
+			return
+		}
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		io.WriteString(w, "method not allowed")
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	methods := defaultRequestMethods()
+
+	if got := probeURLMethods(nil, ts.URL+"/asset.js", methods, ""); !equalStrings(got, []string{"GET"}) {
+		t.Fatalf("method-agnostic resource should collapse to GET only, got %v", got)
+	}
+	if got := probeURLMethods(nil, ts.URL+"/api/create", methods, ""); !equalStrings(got, []string{"POST"}) {
+		t.Fatalf("POST-only endpoint should report POST only, got %v", got)
+	}
+}
+
+func TestParamReplayChanged(t *testing.T) {
+	if paramReplayChanged(200, []byte("same body here"), 200, []byte("same body here")) {
+		t.Fatal("identical responses must not count as changed")
+	}
+	if !paramReplayChanged(302, nil, 400, nil) {
+		t.Fatal("a different status must count as changed")
+	}
+	if !paramReplayChanged(200, []byte("one two three four five six"), 200, []byte("one")) {
+		t.Fatal("a different word count must count as changed")
+	}
+}
+
+// TestProbeParamReplayMethodsRequiresEffect verifies the differential check: a
+// replayed body is attributed to an endpoint only when it changes that endpoint's
+// response versus its own empty-body baseline, and only ever for body-bearing
+// verbs. An SSR-style endpoint that echoes the same shell regardless of input is
+// dropped, which is what stops login params from being reported against every
+// crawled level.
+func TestProbeParamReplayMethodsRequiresEffect(t *testing.T) {
+	mux := http.NewServeMux()
+	// /consumes reflects the request body, so a body-bearing request differs from
+	// the empty-body baseline: the params genuinely worked here.
+	mux.HandleFunc("/consumes", func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		if len(b) > 0 {
+			io.WriteString(w, "accepted "+string(b)+" with several extra words that shift the signature")
+			return
+		}
+		io.WriteString(w, "empty")
+	})
+	// /ignores answers with an identical soft-200 no matter what body it is sent,
+	// like a catch-all SSR shell: the params did not work here and must be dropped.
+	mux.HandleFunc("/ignores", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "always the same shell response body regardless of any input")
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	methods := defaultRequestMethods()
+	body := "username=testuser&password=Password123!"
+
+	got := probeParamReplayMethods(nil, ts.URL+"/consumes", methods, body)
+	if !equalStrings(got, []string{"POST", "PUT", "PATCH"}) {
+		t.Fatalf("endpoint that consumes the body should report only body verbs, got %v", got)
+	}
+
+	if got := probeParamReplayMethods(nil, ts.URL+"/ignores", methods, body); len(got) != 0 {
+		t.Fatalf("endpoint that ignores the body should report nothing, got %v", got)
+	}
+
+	if got := probeParamReplayMethods(nil, ts.URL+"/consumes", methods, ""); got != nil {
+		t.Fatalf("empty params must not probe at all, got %v", got)
 	}
 }
 

@@ -79,10 +79,28 @@ func methodWorks(cal *autoCalibrator, method, pageURL string, status int, body [
 
 // probeURLMethods requests pageURL with each method and returns the ordered list
 // of methods that worked (see methodWorks). body, when non-empty, is sent with
-// the body-bearing verbs so discovered parameters can be replayed. It performs
-// one request per method; the crawl's page budget bounds how often it is called.
+// the body-bearing verbs. It performs one request per method; the crawl's page
+// budget bounds how often it is called.
+//
+// A GET baseline is used to suppress the "every verb works" noise that permissive
+// servers produce. Many hosts — CDNs, edge gateways, static-file servers — return
+// the resource (a non-error, non-catch-all response) for whatever method they are
+// sent, so a plain per-verb check reports GET,POST,PUT,PATCH,DELETE,OPTIONS on a
+// static .js file or a landing page even though only GET is genuinely handled.
+// When GET works on the URL, another verb is therefore reported only if its
+// response differs from the GET baseline (coarse status|words|lines signature): a
+// verb that echoes the GET response is the server ignoring the method, not a
+// distinct operation. OPTIONS is dropped outright in that case as a CORS
+// preflight artifact. When GET does not work (a real POST-only API rejects GET
+// with 404/405), there is no baseline to collapse against, so every working verb
+// is reported as before — keeping genuine per-route method constraints intact.
 func probeURLMethods(cal *autoCalibrator, pageURL string, methods []string, body string) []string {
-	var worked []string
+	type probeResult struct {
+		method string
+		works  bool
+		sig    string
+	}
+	probes := make([]probeResult, 0, len(methods))
 	for _, m := range methods {
 		reqBody := ""
 		if body != "" && bodyMethods[m] {
@@ -94,7 +112,97 @@ func probeURLMethods(cal *autoCalibrator, pageURL string, methods []string, body
 		}
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 		resp.Body.Close()
-		if methodWorks(cal, m, pageURL, resp.StatusCode, data) {
+		probes = append(probes, probeResult{
+			method: m,
+			works:  methodWorks(cal, m, pageURL, resp.StatusCode, data),
+			sig:    pageSig(resp.StatusCode, data),
+		})
+	}
+
+	// Establish the GET baseline: whether GET is genuinely handled, and what its
+	// response looks like.
+	getWorks := false
+	getSig := ""
+	for _, pr := range probes {
+		if pr.method == "GET" {
+			getWorks = pr.works
+			getSig = pr.sig
+			break
+		}
+	}
+
+	var worked []string
+	for _, pr := range probes {
+		if !pr.works {
+			continue
+		}
+		if getWorks && pr.method != "GET" {
+			// The resource already answers GET, so collapse method-agnostic verbs.
+			if pr.method == "OPTIONS" {
+				continue // CORS preflight, never a real operation
+			}
+			if pr.sig == getSig {
+				continue // same response as GET: the server is ignoring the method
+			}
+		}
+		worked = append(worked, pr.method)
+	}
+	return worked
+}
+
+// paramReplayChanged reports whether sending the parameter body produced a
+// materially different response from the same endpoint+method sent with no body.
+// It compares the coarse (status|words|lines) signature — the same signal the
+// auto-calibrator trusts — so per-request jitter such as a rotating CSRF token
+// does not read as a change, while a different status or a differently sized body
+// (the sign the endpoint actually consumed the parameters) does.
+func paramReplayChanged(paramStatus int, paramBody []byte, baseStatus int, baseBody []byte) bool {
+	return pageSig(paramStatus, paramBody) != pageSig(baseStatus, baseBody)
+}
+
+// probeParamReplayMethods replays a discovered parameter body against pageURL and
+// returns only the methods on which the parameters genuinely worked: a body-bearing
+// verb (POST/PUT/PATCH) whose response is non-error, is not the level's learned
+// catch-all for that verb, AND differs from that same verb's empty-body baseline
+// against this same endpoint.
+//
+// The empty-body baseline is the check plain method probing lacks. Many hosts —
+// SSR/Next.js shells especially — answer every path and verb with an identical
+// soft-200, so probeURLMethods reports the parameters as "working" on directories
+// that never consume them, including static-asset levels. Requiring the parameter
+// response to differ from the endpoint's own no-body response attributes a
+// parameter to an endpoint only when it actually changed what that endpoint
+// returned. GET/DELETE/OPTIONS are excluded outright: they carry no body, so
+// annotating them with a replayed body was always misleading.
+//
+// The baseline request is issued only after the parameter response already looks
+// like a hit, so an endpoint that rejects the verb outright costs a single probe,
+// not two.
+func probeParamReplayMethods(cal *autoCalibrator, pageURL string, methods []string, body string) []string {
+	if strings.TrimSpace(body) == "" {
+		return nil
+	}
+	var worked []string
+	for _, m := range methods {
+		if !bodyMethods[m] {
+			continue
+		}
+		presp, err := fetchURLResponseMethodSameScope(pageURL, m, body)
+		if err != nil {
+			continue
+		}
+		pdata, _ := io.ReadAll(io.LimitReader(presp.Body, 2<<20))
+		presp.Body.Close()
+		if !methodWorks(cal, m, pageURL, presp.StatusCode, pdata) {
+			continue
+		}
+		bresp, err := fetchURLResponseMethodSameScope(pageURL, m, "")
+		if err != nil {
+			continue
+		}
+		bdata, _ := io.ReadAll(io.LimitReader(bresp.Body, 2<<20))
+		bresp.Body.Close()
+		if paramReplayChanged(presp.StatusCode, pdata, bresp.StatusCode, bdata) {
 			worked = append(worked, m)
 		}
 	}
