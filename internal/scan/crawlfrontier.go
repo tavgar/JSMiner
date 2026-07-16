@@ -40,6 +40,18 @@ func (f *crawlFrontier) peek() crawlTarget { return f.h.items[0].target }
 // pop removes and returns the highest-priority target.
 func (f *crawlFrontier) pop() crawlTarget { return heap.Pop(f.h).(frontierItem).target }
 
+// snapshot returns the pending targets, in no particular order, so a crawl
+// checkpoint can persist the frontier. Reloading them with push restores an
+// equivalent priority order (the heap re-derives it from each target's depth and
+// score), so resume order does not depend on how the heap happened to be laid out.
+func (f *crawlFrontier) snapshot() []crawlTarget {
+	out := make([]crawlTarget, 0, len(f.h.items))
+	for _, it := range f.h.items {
+		out = append(out, it.target)
+	}
+	return out
+}
+
 // frontierItem is a heap entry: the target, its precomputed yield score and the
 // monotonic insertion sequence used as a stable final tiebreak.
 type frontierItem struct {

@@ -1,0 +1,183 @@
+package scan
+
+import (
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestCrawlCheckpointRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	cp := crawlCheckpoint{
+		Version:      crawlCheckpointVersion,
+		Seed:         "https://x.com",
+		Pages:        7,
+		CrawlDelayMS: 2500,
+		Visited:      []string{"https://x.com/a", "https://x.com/b"},
+		Enqueued:     []string{"https://x.com/c"},
+		Frontier:     []checkpointTarget{{URL: "https://x.com/c", Depth: 2}},
+		Matches:      []Match{{Source: "https://x.com/a", Pattern: "jwt", Value: "tok", Severity: "high"}},
+	}
+	if err := writeCheckpoint(path, cp); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readCheckpoint(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Seed != cp.Seed || got.Pages != cp.Pages || got.CrawlDelayMS != cp.CrawlDelayMS ||
+		len(got.Visited) != 2 || len(got.Frontier) != 1 || got.Frontier[0].Depth != 2 ||
+		len(got.Matches) != 1 || got.Matches[0].Value != "tok" {
+		t.Fatalf("round-trip mismatch: %+v", got)
+	}
+
+	// A version bump makes an old checkpoint unreadable rather than misread.
+	cp.Version = 999
+	if err := writeCheckpoint(path, cp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readCheckpoint(path); err == nil {
+		t.Fatal("expected an error reading an incompatible-version checkpoint")
+	}
+}
+
+// TestScanURLCrawlResumesFromCheckpoint verifies a crawl started with a resume
+// file continues from a pre-existing checkpoint: it carries the prior matches
+// forward, does not re-fetch pages already marked visited, crawls the pending
+// frontier to find new secrets, and removes the checkpoint on clean completion.
+func TestScanURLCrawlResumesFromCheckpoint(t *testing.T) {
+	const (
+		priorSecret   = "eyJhbGciOiJIUzI1NiJ9.eyJwcmlvciI6MX0.priorRunSignatureAA"
+		pendingSecret = "eyJhbGciOiJIUzI1NiJ9.eyJuZXh0Ijoxfe0.pendingSignatureBBBB"
+	)
+	var alreadyHits, pendingHits int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/already", func(w http.ResponseWriter, r *http.Request) {
+		alreadyHits++
+		w.Header().Set("Content-Type", "text/html")
+		io.WriteString(w, `<html><body>already visited</body></html>`)
+	})
+	mux.HandleFunc("/pending", func(w http.ResponseWriter, r *http.Request) {
+		pendingHits++
+		w.Header().Set("Content-Type", "text/html")
+		// Links /already (which must be skipped as visited) and holds a secret.
+		io.WriteString(w, `<html><script>var t='`+pendingSecret+`';fetch('/already');</script></html>`)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	dir := t.TempDir()
+	state := filepath.Join(dir, "resume.json")
+	seed := normalizeCrawlURL(ts.URL)
+	cp := crawlCheckpoint{
+		Version:  crawlCheckpointVersion,
+		Seed:     seed,
+		Pages:    1,
+		Visited:  []string{ts.URL + "/already"},
+		Enqueued: []string{ts.URL + "/already", ts.URL + "/pending"},
+		Frontier: []checkpointTarget{{URL: ts.URL + "/pending", Depth: 1}},
+		Matches:  []Match{{Source: ts.URL + "/seed.js", Pattern: "jwt", Value: priorSecret, Severity: "high"}},
+	}
+	if err := writeCheckpoint(state, cp); err != nil {
+		t.Fatal(err)
+	}
+
+	e := NewExtractor(true, false)
+	opts := CrawlOptions{MaxDepth: 3, MaxPages: 50, SameScopeOnly: true, ResumeFile: state}
+	ms, err := e.ScanURLCrawl(ts.URL, false, false, false, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	found := func(v string) bool {
+		for _, m := range ms {
+			if m.Value == v {
+				return true
+			}
+		}
+		return false
+	}
+	if !found(priorSecret) {
+		t.Error("prior run's match was not carried forward from the checkpoint")
+	}
+	if !found(pendingSecret) {
+		t.Error("secret on the pending frontier page was not reached after resume")
+	}
+	if pendingHits != 1 {
+		t.Errorf("/pending fetched %d times, want 1", pendingHits)
+	}
+	if alreadyHits != 0 {
+		t.Errorf("/already was fetched %d times; a checkpoint-visited page must not be re-fetched", alreadyHits)
+	}
+	if _, err := os.Stat(state); !os.IsNotExist(err) {
+		t.Error("checkpoint file should be removed after clean completion")
+	}
+}
+
+// TestScanURLCrawlConcurrentCheckpointing exercises the concurrent driver's
+// checkpoint path (with its in-flight bookkeeping) end to end under -race: a full
+// crawl with a resume file must complete, reach every secret, and clean up.
+func TestScanURLCrawlConcurrentCheckpointing(t *testing.T) {
+	const n = 30
+	ts := fanOutServer(n)
+	defer ts.Close()
+
+	dir := t.TempDir()
+	state := filepath.Join(dir, "resume.json")
+
+	e := NewExtractor(true, false)
+	opts := CrawlOptions{MaxDepth: 2, MaxPages: 0, SameScopeOnly: true, Concurrency: 8, ResumeFile: state}
+	ms, err := e.ScanURLCrawl(ts.URL, false, false, false, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(jwtValues(ms)); got != n {
+		t.Fatalf("found %d distinct JWTs, want %d", got, n)
+	}
+	if _, err := os.Stat(state); !os.IsNotExist(err) {
+		t.Error("checkpoint file should be removed after clean completion")
+	}
+}
+
+// TestScanURLCrawlIgnoresCheckpointForDifferentSeed verifies a checkpoint written
+// for another seed is ignored, so the crawl starts fresh rather than crawling a
+// stale frontier that belongs to a different target.
+func TestScanURLCrawlIgnoresCheckpointForDifferentSeed(t *testing.T) {
+	var seedHits int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			seedHits++
+		}
+		w.Header().Set("Content-Type", "text/html")
+		io.WriteString(w, `<html><body>fresh</body></html>`)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	dir := t.TempDir()
+	state := filepath.Join(dir, "resume.json")
+	cp := crawlCheckpoint{
+		Version:  crawlCheckpointVersion,
+		Seed:     "https://some-other-host.example",
+		Frontier: []checkpointTarget{{URL: "https://some-other-host.example/x", Depth: 1}},
+	}
+	if err := writeCheckpoint(state, cp); err != nil {
+		t.Fatal(err)
+	}
+
+	e := NewExtractor(true, false)
+	opts := CrawlOptions{MaxDepth: 0, MaxPages: 5, SameScopeOnly: true, ResumeFile: state}
+	if _, err := e.ScanURLCrawl(ts.URL, false, false, false, opts); err != nil {
+		t.Fatal(err)
+	}
+	// The seed of THIS target must have been crawled (fresh start), not the stale
+	// off-host frontier.
+	if seedHits != 1 {
+		t.Fatalf("seed fetched %d times; a mismatched checkpoint should start fresh", seedHits)
+	}
+}

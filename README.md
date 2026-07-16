@@ -109,6 +109,13 @@ Flags:
   busy worker runs its own browser, so higher values also cost more memory;
   lower it on constrained hosts or raise it for network-bound (non-render)
   crawls.
+- `-crawl-resume` checkpoint file for a resumable crawl (default off). When set,
+  the crawl periodically writes its whole recoverable state — pages visited, URLs
+  still queued, matches found so far — to this file, and a later run with the same
+  seed reloads it and continues instead of starting from zero. This makes a large
+  `-crawl-all` survive being killed part way through. The file is written
+  atomically and removed on clean completion; a checkpoint for a different seed is
+  ignored so the crawl starts fresh.
 - `-methods` comma-separated HTTP methods each crawled URL is probed with
   (default `GET,POST,PUT,PATCH,DELETE,OPTIONS`). The methods that work — judged
   against the per-method error logic learned by auto-calibration — are reported

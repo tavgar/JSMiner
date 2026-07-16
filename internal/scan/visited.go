@@ -36,3 +36,25 @@ func (v *visitedSet) visit(u string) bool {
 	v.m[u] = struct{}{}
 	return true
 }
+
+// snapshot returns the visited URLs as a slice. It is used to persist a crawl
+// checkpoint and is safe to call while workers are visiting concurrently.
+func (v *visitedSet) snapshot() []string {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	out := make([]string, 0, len(v.m))
+	for u := range v.m {
+		out = append(out, u)
+	}
+	return out
+}
+
+// addAll marks every URL in us as visited, used to preload a resumed crawl so
+// already-fetched pages are not fetched again.
+func (v *visitedSet) addAll(us []string) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for _, u := range us {
+		v.m[u] = struct{}{}
+	}
+}
