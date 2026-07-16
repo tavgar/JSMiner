@@ -45,6 +45,7 @@ type autoCalibrator struct {
 	wildcard   map[string]struct{}            // status|words|lines of the root catch-all responses (GET)
 	levelWild  map[string]map[string]struct{} // per-directory-level catch-all signatures (GET)
 	levelDone  map[string]struct{}            // levels already probed (even if they learned nothing)
+	levelBusy  map[string]chan struct{}       // levels currently being probed; closed after publication
 	seenBodies map[uint64]struct{}            // hashes of bodies already accepted
 	base       string                         // scheme://host origin used to build level probes
 	seedURL    string                         // normalized requested seed URL
@@ -55,9 +56,11 @@ type autoCalibrator struct {
 	// and directory level, so the crawler knows what a "this verb is not handled
 	// here" response looks like independently for GET, POST, PUT, and so on. The
 	// key is method+"\x00"+level. methodDone tracks which (method, level) pairs
-	// have already been probed so each is fingerprinted at most once per crawl.
+	// have already been probed; methodBusy lets concurrent consumers wait for the
+	// worker performing the probe to publish its result.
 	methodWild map[string]map[string]struct{}
 	methodDone map[string]struct{}
+	methodBusy map[string]chan struct{}
 
 	// structMax and structCounts implement templated-duplicate suppression on the
 	// body itself. Exact-body and coarse (status|words|lines) signatures collapse
@@ -76,9 +79,11 @@ func newAutoCalibrator() *autoCalibrator {
 		wildcard:     make(map[string]struct{}),
 		levelWild:    make(map[string]map[string]struct{}),
 		levelDone:    make(map[string]struct{}),
+		levelBusy:    make(map[string]chan struct{}),
 		seenBodies:   make(map[uint64]struct{}),
 		methodWild:   make(map[string]map[string]struct{}),
 		methodDone:   make(map[string]struct{}),
+		methodBusy:   make(map[string]chan struct{}),
 		structCounts: make(map[string]int),
 	}
 }
@@ -266,9 +271,19 @@ func (c *autoCalibrator) ensureLevel(lvl string) {
 		c.mu.Unlock()
 		return
 	}
+	if ready, ok := c.levelBusy[lvl]; ok {
+		c.mu.Unlock()
+		// A different worker owns this calibration. Wait until it has published
+		// levelWild (or recorded that no stable signature exists) before the caller
+		// decides whether its page is a catch-all.
+		<-ready
+		return
+	}
 	// Claim the level under the lock so only one worker probes it, then release the
-	// lock for the duration of the (potentially slow) HTTP probes.
-	c.levelDone[lvl] = struct{}{}
+	// lock for the duration of the (potentially slow) HTTP probes. The level is not
+	// marked done until its result has been published.
+	ready := make(chan struct{})
+	c.levelBusy[lvl] = ready
 	c.mu.Unlock()
 
 	counts := make(map[string]int)
@@ -290,11 +305,14 @@ func (c *autoCalibrator) ensureLevel(lvl string) {
 			sigs[sig] = struct{}{}
 		}
 	}
+	c.mu.Lock()
 	if sigs != nil {
-		c.mu.Lock()
 		c.levelWild[lvl] = sigs
-		c.mu.Unlock()
 	}
+	c.levelDone[lvl] = struct{}{}
+	delete(c.levelBusy, lvl)
+	close(ready)
+	c.mu.Unlock()
 }
 
 // methodKey builds the map key for a (method, level) fingerprint.
@@ -318,8 +336,18 @@ func (c *autoCalibrator) ensureMethodLevel(method, lvl string) {
 		c.mu.Unlock()
 		return
 	}
+	if ready, ok := c.methodBusy[key]; ok {
+		c.mu.Unlock()
+		// Do not treat "another worker is calibrating" as "calibration found no
+		// catch-all." Wait until that worker publishes methodWild and marks the key
+		// complete, otherwise concurrent method probes can report soft-404s as live.
+		<-ready
+		return
+	}
 	// Claim the (method, level) pair under the lock, then probe without it held.
-	c.methodDone[key] = struct{}{}
+	// Completion is published only after methodWild has been populated.
+	ready := make(chan struct{})
+	c.methodBusy[key] = ready
 	c.mu.Unlock()
 
 	counts := make(map[string]int)
@@ -341,11 +369,14 @@ func (c *autoCalibrator) ensureMethodLevel(method, lvl string) {
 			sigs[sig] = struct{}{}
 		}
 	}
+	c.mu.Lock()
 	if sigs != nil {
-		c.mu.Lock()
 		c.methodWild[key] = sigs
-		c.mu.Unlock()
 	}
+	c.methodDone[key] = struct{}{}
+	delete(c.methodBusy, key)
+	close(ready)
+	c.mu.Unlock()
 }
 
 // methodCatchAll reports whether a response to method at pageURL's directory

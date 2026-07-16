@@ -4,7 +4,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestPageSig(t *testing.T) {
@@ -59,6 +62,120 @@ func TestAutoCalibratorExemptsConfiguredSeedAfterOtherPages(t *testing.T) {
 	}
 	if c.skipPage("http://x/account/login?session=1", "http://x/account/login", 200, catchAll) {
 		t.Fatal("configured seed must be accepted after another page is processed")
+	}
+}
+
+// TestAutoCalibratorWaitsForConcurrentLevelCalibration verifies that a second
+// worker reaching the same directory level waits for the first worker's lazy
+// calibration to finish. Returning while the first worker is still probing would
+// expose an empty levelWild map and accept the soft-404 as a real page.
+func TestAutoCalibratorWaitsForConcurrentLevelCalibration(t *testing.T) {
+	const catchAll = `<html><body>this section page does not exist here</body></html>`
+
+	var hits atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		once.Do(func() {
+			close(started)
+			<-release
+		})
+		w.Header().Set("Content-Type", "text/html")
+		io.WriteString(w, catchAll)
+	}))
+	defer srv.Close()
+
+	c := newAutoCalibrator()
+	c.setBase(srv.URL + "/")
+
+	first := make(chan bool, 1)
+	go func() {
+		first <- c.skipPage(srv.URL+"/section/a", srv.URL+"/section/a", 200, []byte(catchAll))
+	}()
+	<-started
+
+	secondStarted := make(chan struct{})
+	second := make(chan bool, 1)
+	go func() {
+		close(secondStarted)
+		second <- c.skipPage(srv.URL+"/section/b", srv.URL+"/section/b", 200, []byte(catchAll))
+	}()
+	<-secondStarted
+
+	select {
+	case got := <-second:
+		t.Fatalf("second worker returned before level calibration completed (skip=%v)", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	if !<-first {
+		t.Fatal("first worker should skip the learned section catch-all")
+	}
+	if !<-second {
+		t.Fatal("second worker should use the published section catch-all")
+	}
+	if got := hits.Load(); got != 3 {
+		t.Fatalf("directory level was calibrated with %d probes, want exactly 3", got)
+	}
+}
+
+// TestAutoCalibratorWaitsForConcurrentMethodCalibration covers the gathered-URL
+// failure mode: concurrent method probes at one level must all wait for the first
+// per-method calibration, rather than reading methodWild before it is published
+// and reporting a soft-200 catch-all as a working method.
+func TestAutoCalibratorWaitsForConcurrentMethodCalibration(t *testing.T) {
+	const catchAll = `<html><body>this method and path are handled by the not found shell</body></html>`
+
+	var hits atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		once.Do(func() {
+			close(started)
+			<-release
+		})
+		w.Header().Set("Content-Type", "text/html")
+		io.WriteString(w, catchAll)
+	}))
+	defer srv.Close()
+
+	c := newAutoCalibrator()
+	c.setBase(srv.URL + "/")
+
+	first := make(chan bool, 1)
+	go func() {
+		first <- c.methodCatchAll(http.MethodGet, srv.URL+"/.well-known/one", 200, []byte(catchAll))
+	}()
+	<-started
+
+	secondStarted := make(chan struct{})
+	second := make(chan bool, 1)
+	go func() {
+		close(secondStarted)
+		second <- c.methodCatchAll(http.MethodGet, srv.URL+"/.well-known/two", 200, []byte(catchAll))
+	}()
+	<-secondStarted
+
+	select {
+	case got := <-second:
+		t.Fatalf("second worker returned before method calibration completed (catch-all=%v)", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	if !<-first {
+		t.Fatal("first worker should match the learned method catch-all")
+	}
+	if !<-second {
+		t.Fatal("second worker should use the published method catch-all")
+	}
+	if got := hits.Load(); got != 3 {
+		t.Fatalf("method level was calibrated with %d probes, want exactly 3", got)
 	}
 }
 
