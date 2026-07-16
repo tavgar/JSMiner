@@ -1,11 +1,14 @@
 package scan
 
 import (
+	"context"
 	"net/url"
 	"path"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tavgar/JSMiner/internal/ai"
 )
 
 // CrawlOptions configures a breadth-first crawl seeded from a single URL.
@@ -126,6 +129,17 @@ type CrawlOptions struct {
 	// setting also trades memory for speed. Zero means serial in a zero-value
 	// CrawlOptions; DefaultCrawlOptions sets it to defaultCrawlConcurrency.
 	Concurrency int
+
+	// AIPolicy, when non-nil and enabled, turns on AI-assisted frontier
+	// prioritisation: before the crawl loop begins, a language model is consulted
+	// once to turn a compact digest of the site's discovered URL structure into a
+	// deterministic scoring policy (see the ai package), which is then applied to
+	// the frontier so the page budget is spent on the highest-yield shapes first.
+	// It is entirely optional and fail-open — a nil/disabled config, a missing API
+	// key, or any synthesis error leaves the crawl on the built-in scorer, so the
+	// default and offline behaviour are unchanged. The per-URL scoring it installs
+	// is pure Go and deterministic; the model is not consulted per URL.
+	AIPolicy *ai.Config
 
 	// Progress, when non-nil, is invoked once per fetched page with the page
 	// URL, its depth from the seed and the running page count. It lets the CLI
@@ -448,6 +462,18 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 			vlog(1, "[crawl] checkpoint write failed: %v", err)
 		} else {
 			vlog(2, "[crawl] checkpoint written to %s (%d done, %d queued)", opts.ResumeFile, cp.Pages, len(cp.Frontier))
+		}
+	}
+
+	// AI-assisted frontier prioritisation. Consult the model once, from the
+	// structure already discovered (seed + robots.txt/sitemap seeds), to synthesise
+	// a scoring policy and install it on the frontier before any page is dequeued.
+	// This runs for fresh and resumed crawls alike; a cache hit makes a resume free
+	// and deterministic. It is strictly fail-open — synthesizeCrawlPolicy returns
+	// nil on any problem and the frontier keeps its built-in ordering.
+	if opts.AIPolicy != nil && opts.AIPolicy.Enabled {
+		if p := synthesizeCrawlPolicy(origin, enqueued, *opts.AIPolicy); p != nil {
+			frontier.setPolicy(p)
 		}
 	}
 
@@ -857,4 +883,111 @@ func crawlableTarget(u *url.URL) bool {
 	}
 	_, skip := nonCrawlableExts[ext]
 	return !skip
+}
+
+// synthesizeCrawlPolicy builds a site digest from the currently-queued URLs and
+// turns it into a prioritisation policy, preferring a cached policy and falling
+// back silently to none on any problem. The returned policy (possibly empty) is
+// safe to install on the frontier; a nil return means keep the built-in scorer.
+func synthesizeCrawlPolicy(origin string, enqueued map[string]struct{}, cfg ai.Config) *ai.Policy {
+	digest := buildSiteDigest(origin, enqueued)
+	if digest.Empty() {
+		vlog(1, "[crawl] ai-prioritize: no structure to analyse yet; using built-in scorer")
+		return nil
+	}
+	fp := digest.Fingerprint(cfg.EffectiveModel())
+	if p, ok := ai.LoadCachedPolicy(fp); ok {
+		vlog(1, "[crawl] ai-prioritize: using cached policy (%d rule(s)) for %s", p.Len(), origin)
+		logCrawlPolicy(p)
+		return p
+	}
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	p, err := ai.NewHTTPSynthesizer(cfg).Synthesize(ctx, digest)
+	if err != nil {
+		vlog(1, "[crawl] ai-prioritize: synthesis failed (%v); using built-in scorer", err)
+		return nil
+	}
+	if err := ai.SaveCachedPolicy(fp, p); err != nil {
+		vlog(2, "[crawl] ai-prioritize: cache write failed: %v", err)
+	}
+	vlog(1, "[crawl] ai-prioritize: synthesised policy with %d rule(s) for %s", p.Len(), origin)
+	logCrawlPolicy(p)
+	return p
+}
+
+// logCrawlPolicy prints each policy rule at the per-item trace level, so an
+// operator can see exactly how the model chose to bias the crawl.
+func logCrawlPolicy(p *ai.Policy) {
+	if !vEnabled(3) {
+		return
+	}
+	for _, r := range p.Rules() {
+		vlog(3, "[crawl] ai-policy rule: %+d  %s  (%s)", r.Weight, r.Pattern, r.Reason)
+	}
+}
+
+// buildSiteDigest summarises the queued URLs into the compact structural digest
+// the synthesizer consumes: the template class of each URL (with instance counts),
+// the directory levels seen, and a few sample URLs. It reuses the crawl's own
+// urlTemplateKey so the digest speaks the same template vocabulary as template
+// deduplication.
+func buildSiteDigest(origin string, enqueued map[string]struct{}) ai.SiteDigest {
+	d := ai.SiteDigest{Origin: origin, Counts: make(map[string]int)}
+	levels := make(map[string]struct{})
+	samples := make([]string, 0, len(enqueued))
+	for raw := range enqueued {
+		u, err := url.Parse(raw)
+		if err != nil {
+			continue
+		}
+		d.Counts[urlTemplateKey(raw)]++
+		for _, lv := range dirLevels(u.Path) {
+			levels[lv] = struct{}{}
+		}
+		samples = append(samples, raw)
+	}
+	for k := range d.Counts {
+		d.Templates = append(d.Templates, k)
+	}
+	for lv := range levels {
+		d.Levels = append(d.Levels, lv)
+	}
+	d.Samples = samples
+	// Compact sorts, dedupes and caps every field, so the digest (and therefore the
+	// cache fingerprint) is deterministic regardless of map iteration order.
+	return d.Compact()
+}
+
+// dirLevels returns the cumulative directory prefixes of a URL path — "/", then
+// each parent directory down to (but not including) the leaf — e.g. /api/v2/users
+// yields ["/", "/api/", "/api/v2/"]. These are the path-prefix vocabulary the
+// model reasons about when weighting API/internal sections.
+func dirLevels(p string) []string {
+	levels := []string{"/"}
+	trimmed := strings.Trim(p, "/")
+	if trimmed == "" {
+		return levels
+	}
+	segs := strings.Split(trimmed, "/")
+	// A path ending in "/" has no leaf resource — every segment is a directory; a
+	// path ending in a resource name excludes that final segment as the leaf.
+	last := len(segs) - 1
+	if strings.HasSuffix(p, "/") {
+		last = len(segs)
+	}
+	cur := "/"
+	for i := 0; i < last; i++ {
+		if segs[i] == "" {
+			continue
+		}
+		cur += segs[i] + "/"
+		levels = append(levels, cur)
+	}
+	return levels
 }

@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/tavgar/JSMiner/internal/ai"
 	"github.com/tavgar/JSMiner/internal/output"
 	"github.com/tavgar/JSMiner/internal/proxy"
 	"github.com/tavgar/JSMiner/internal/scan"
@@ -30,6 +31,52 @@ func (h *headerSlice) Set(v string) error {
 }
 
 const version = "0.01v"
+
+// buildAIConfig resolves the AI-prioritisation configuration from the CLI flags
+// and the JSMINER_AI_* environment, following the same flag-then-env pattern the
+// rest of the tool uses (e.g. -chrome-path / $JSMINER_CHROME). It returns nil —
+// leaving the crawl on its built-in scorer — when no API key can be resolved,
+// printing a single notice so the run is never silently degraded. Provider
+// precedence is flag, then $JSMINER_AI_PROVIDER, then the default "anthropic".
+func buildAIConfig(providerFlag, modelFlag string, insecure bool) *ai.Config {
+	provider := providerFlag
+	if provider == "" {
+		provider = os.Getenv("JSMINER_AI_PROVIDER")
+	}
+	if provider == "" {
+		provider = ai.ProviderAnthropic
+	}
+	model := modelFlag
+	if model == "" {
+		model = os.Getenv("JSMINER_AI_MODEL")
+	}
+	apiKey := resolveAIKey(provider)
+	if apiKey == "" {
+		fmt.Fprintln(os.Stderr, "[crawl] -ai-prioritize set but no API key found (set $JSMINER_AI_API_KEY, or $ANTHROPIC_API_KEY / $OPENAI_API_KEY); continuing with the built-in scorer")
+		return nil
+	}
+	return &ai.Config{
+		Enabled:     true,
+		Provider:    provider,
+		Model:       model,
+		BaseURL:     os.Getenv("JSMINER_AI_BASE_URL"),
+		APIKey:      apiKey,
+		InsecureTLS: insecure,
+	}
+}
+
+// resolveAIKey returns the API key for the chosen provider, preferring the
+// provider-neutral $JSMINER_AI_API_KEY and falling back to the provider's
+// conventional variable so existing environments work without extra setup.
+func resolveAIKey(provider string) string {
+	if k := os.Getenv("JSMINER_AI_API_KEY"); k != "" {
+		return k
+	}
+	if provider == ai.ProviderOpenAI {
+		return os.Getenv("OPENAI_API_KEY")
+	}
+	return os.Getenv("ANTHROPIC_API_KEY")
+}
 
 func main() {
 	format := flag.String("format", "pretty", "output format: pretty or json")
@@ -77,6 +124,9 @@ func main() {
 	downloadBrowser := flag.Bool("download-browser", false, "provision the bundled Chromium now (download if needed) and print its path, then exit if no target is given")
 	noDownloadBrowser := flag.Bool("no-download-browser", false, "never download a Chromium; only use -chrome-path, a bundled or cached browser, or one on PATH")
 	browserDest := flag.String("browser-dest", "", "with -download-browser, extract Chromium into <dir>/chromium so <dir> (binary + chromium/) ships as a self-contained bundle")
+	aiPrioritize := flag.Bool("ai-prioritize", false, "with -crawl, consult a language model once to prioritise which discovered URLs are fetched first (off by default; needs an API key via $JSMINER_AI_API_KEY, or $ANTHROPIC_API_KEY / $OPENAI_API_KEY for the chosen provider)")
+	aiProvider := flag.String("ai-provider", "", "AI provider for -ai-prioritize: 'anthropic' (default) or 'openai' (openai also reaches any OpenAI-compatible endpoint via $JSMINER_AI_BASE_URL); also honours $JSMINER_AI_PROVIDER")
+	aiModel := flag.String("ai-model", "", "model id for -ai-prioritize (default: claude-haiku-4-5 for anthropic, gpt-4o-mini for openai); also honours $JSMINER_AI_MODEL")
 	var headerFlags headerSlice
 	flag.Var(&headerFlags, "header", "HTTP header in 'Key: Value' format. May be repeated")
 	flag.Parse()
@@ -530,6 +580,9 @@ func main() {
 					if len(ms) > 0 {
 						opts.RequestMethods = ms
 					}
+				}
+				if *aiPrioritize {
+					opts.AIPolicy = buildAIConfig(*aiProvider, *aiModel, *insecure)
 				}
 				// The level-0 progress lines are superseded by the richer -v/-vv/-vvv
 				// output the scan package emits, so only install them when verbose

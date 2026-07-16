@@ -138,6 +138,15 @@ Flags:
   honoured as a per-host pacing floor (clamped to 30s), combined with — never
   loosening — any `-rate-limit` you set. Disabling well-known discovery also
   stops the `Crawl-delay` from being read.
+- `-ai-prioritize` consult a language model once at the start of a crawl to
+  prioritise which discovered URLs are fetched first. Off by default. See
+  [AI-assisted prioritization](#ai-assisted-prioritization) below.
+- `-ai-provider` provider for `-ai-prioritize`: `anthropic` (default) or `openai`.
+  The `openai` provider also reaches any OpenAI-compatible endpoint via
+  `$JSMINER_AI_BASE_URL` (a local model, a gateway, OpenRouter, Azure, …). Also
+  honours `$JSMINER_AI_PROVIDER`.
+- `-ai-model` model id for `-ai-prioritize` (default `claude-haiku-4-5` for
+  anthropic, `gpt-4o-mini` for openai). Also honours `$JSMINER_AI_MODEL`.
 - `-rate-limit` cap outbound HTTP at N requests per second across the whole scan
   (default `0`, no proactive limit). Independent of this, adaptive backoff is
   always on: a `429`/`503` response — seen on the Go request path or by the
@@ -278,6 +287,45 @@ one form:
   every crawl alongside the site declarations above; disable with `-no-well-known`.
 - **Source maps** — original, pre-bundled sources recovered from any source map a
   scanned bundle advertises (see [Source map recovery](#source-map-recovery)).
+
+### AI-assisted prioritization
+
+Under a page cap (`-crawl-max-pages`, default 200), **what a crawl fetches first is
+what it finds**. The built-in scorer orders the frontier from each URL's extension
+and a fixed keyword list — good, but blind to a site's own conventions. `-ai-prioritize`
+lets a language model tune that ordering to the target.
+
+It is designed to be cheap, deterministic, and optional:
+
+- **One call, not per-URL.** After the seed and the site's `robots.txt`/sitemap
+  declarations are gathered, JSMiner sends the model a *compact digest of the site's
+  URL structure* — its route templates (with how often each recurs), directory
+  levels, and a few sample URLs — **once**. The model returns a small set of
+  `regex → weight` rules (a *scoring policy*). Those weights are then added to the
+  built-in score for every URL **in pure Go**, so per-URL scoring stays zero-token
+  and fully reproducible. The model never sees or ranks individual URLs at fetch
+  time.
+- **Cheap.** A synthesis is a few thousand tokens — roughly `$0.02` per crawl on
+  Haiku 4.5, `$0.10` on Opus 4.8. The policy is cached on disk per site (under the
+  per-user cache dir), so **reruns cost nothing** and are byte-for-byte deterministic.
+- **Fails open.** With the flag off, no API key, or any error/timeout, the crawl
+  silently uses the built-in scorer — so JSMiner's offline, zero-dependency default
+  is unchanged. The policy only *reorders within a depth level*; it never changes
+  the crawl's scope, budget, or breadth-first depth ordering.
+- **Provider-agnostic.** `-ai-provider anthropic` (default) or `openai`; the `openai`
+  path also reaches any OpenAI-compatible endpoint via `$JSMINER_AI_BASE_URL`.
+
+Configuration (flags override environment):
+
+| Flag | Environment | Purpose |
+| --- | --- | --- |
+| `-ai-prioritize` | — | Enable the feature (off by default). |
+| `-ai-provider` | `$JSMINER_AI_PROVIDER` | `anthropic` (default) or `openai`. |
+| `-ai-model` | `$JSMINER_AI_MODEL` | Model id (defaults: `claude-haiku-4-5` / `gpt-4o-mini`). |
+| — | `$JSMINER_AI_BASE_URL` | Override the API endpoint (local models, gateways). |
+| — | `$JSMINER_AI_API_KEY` | API key; falls back to `$ANTHROPIC_API_KEY` / `$OPENAI_API_KEY`. |
+
+Run with `-vvv` to see the synthesized policy and per-rule weights.
 
 ### Rate limiting
 
