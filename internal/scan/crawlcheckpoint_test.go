@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,6 +13,9 @@ import (
 func TestCrawlCheckpointRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
+	perm := newPermuter("https://x.com", "x.com", 10)
+	perm.observe([]string{"https://x.com/admin/config.js", "https://x.com/api/status"})
+	perm.recordAdmission(true)
 	cp := crawlCheckpoint{
 		Version:      crawlCheckpointVersion,
 		Seed:         "https://x.com",
@@ -19,8 +23,9 @@ func TestCrawlCheckpointRoundTrip(t *testing.T) {
 		CrawlDelayMS: 2500,
 		Visited:      []string{"https://x.com/a", "https://x.com/b"},
 		Enqueued:     []string{"https://x.com/c"},
-		Frontier:     []checkpointTarget{{URL: "https://x.com/c", Depth: 2}},
+		Frontier:     []checkpointTarget{{URL: "https://x.com/c", Depth: 2, Permuted: true}},
 		Matches:      []Match{{Source: "https://x.com/a", Pattern: "jwt", Value: "tok", Severity: "high"}},
+		Permuter:     perm.snapshot(),
 	}
 	if err := writeCheckpoint(path, cp); err != nil {
 		t.Fatal(err)
@@ -30,8 +35,9 @@ func TestCrawlCheckpointRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.Seed != cp.Seed || got.Pages != cp.Pages || got.CrawlDelayMS != cp.CrawlDelayMS ||
-		len(got.Visited) != 2 || len(got.Frontier) != 1 || got.Frontier[0].Depth != 2 ||
-		len(got.Matches) != 1 || got.Matches[0].Value != "tok" {
+		len(got.Visited) != 2 || len(got.Frontier) != 1 || got.Frontier[0].Depth != 2 || !got.Frontier[0].Permuted ||
+		len(got.Matches) != 1 || got.Matches[0].Value != "tok" ||
+		got.Permuter == nil || got.Permuter.Stats.Admitted != 1 || len(got.Permuter.Pools) == 0 {
 		t.Fatalf("round-trip mismatch: %+v", got)
 	}
 
@@ -42,6 +48,58 @@ func TestCrawlCheckpointRoundTrip(t *testing.T) {
 	}
 	if _, err := readCheckpoint(path); err == nil {
 		t.Fatal("expected an error reading an incompatible-version checkpoint")
+	}
+}
+
+// TestScanURLCrawlResumeRestoresPermuterState verifies a URL path learned before
+// interruption can still combine with a level learned after resume.
+func TestScanURLCrawlResumeRestoresPermuterState(t *testing.T) {
+	const secret = "eyJhbGciOiJIUzI1NiJ9.eyJyZXN1bWVkIjoxfQ.permuterResumeSignature"
+	var secretHits int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		io.WriteString(w, `<html><body>status</body></html>`)
+	})
+	mux.HandleFunc("/api/admin/config.js", func(w http.ResponseWriter, r *http.Request) {
+		secretHits++
+		w.Header().Set("Content-Type", "application/javascript")
+		io.WriteString(w, `const token="`+secret+`";`)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	seedURL, err := url.Parse(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	perm := newPermuter(ts.URL, seedURL.Hostname(), 20)
+	perm.observe([]string{ts.URL + "/admin/config.js"})
+
+	state := filepath.Join(t.TempDir(), "resume-permute.json")
+	cp := crawlCheckpoint{
+		Version:  crawlCheckpointVersion,
+		Seed:     normalizeCrawlURL(ts.URL),
+		Pages:    1,
+		Enqueued: []string{ts.URL + "/api/status"},
+		Frontier: []checkpointTarget{{URL: ts.URL + "/api/status", Depth: 1}},
+		Permuter: perm.snapshot(),
+	}
+	if err := writeCheckpoint(state, cp); err != nil {
+		t.Fatal(err)
+	}
+
+	e := NewExtractor(true, false)
+	opts := CrawlOptions{
+		MaxDepth: 3, MaxPages: 20, SameScopeOnly: true,
+		Permute: true, PermuteMax: 20, ResumeFile: state,
+	}
+	ms, err := e.ScanURLCrawl(ts.URL, false, false, false, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secretHits != 1 || !hasPattern(ms, "jwt") {
+		t.Fatalf("restored permuter did not reach secret: hits=%d matches=%+v", secretHits, ms)
 	}
 }
 

@@ -17,7 +17,7 @@ import (
 
 // crawlCheckpointVersion is bumped when the on-disk format changes; a checkpoint
 // written by a different version is ignored rather than misread.
-const crawlCheckpointVersion = 1
+const crawlCheckpointVersion = 2
 
 // crawlCheckpointInterval is how many completed pages pass between checkpoint
 // writes. Small enough that a kill loses little progress, large enough that the
@@ -26,8 +26,9 @@ const crawlCheckpointInterval = 20
 
 // checkpointTarget is a queued page persisted in a checkpoint.
 type checkpointTarget struct {
-	URL   string `json:"url"`
-	Depth int    `json:"depth"`
+	URL      string `json:"url"`
+	Depth    int    `json:"depth"`
+	Permuted bool   `json:"permuted,omitempty"`
 }
 
 // crawlCheckpoint is the serialised, resumable state of a crawl.
@@ -40,6 +41,7 @@ type crawlCheckpoint struct {
 	Enqueued     []string           `json:"enqueued"`
 	Frontier     []checkpointTarget `json:"frontier"`
 	Matches      []Match            `json:"matches"`
+	Permuter     *permuterState     `json:"permuter,omitempty"`
 }
 
 // checkpointCompletedPages converts the live coordinator's dispatch count into
