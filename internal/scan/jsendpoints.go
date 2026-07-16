@@ -31,6 +31,15 @@ var endpointRe = regexp.MustCompile("(?i)[\"'`](?:\\$\\{[^}]+\\})*((?:(?:https?|
 // incomplete anyway.
 var bareRelEndpointRe = regexp.MustCompile("(?i)(?:\\bfetch|\\baxios(?:\\.\\w+)?|\\$\\.(?:ajax|get|post)|\\.(?:get|post|put|patch|delete|open|request|ajax))\\s*\\(\\s*[\"'`]([a-z0-9_][a-z0-9_.-]*(?:/[a-z0-9_.-]+)+)(?:[?#][^\"'`]*)?[\"'`]")
 
+// wsEventSourceRe captures the URL argument of a WebSocket or EventSource
+// constructor — new WebSocket("wss://…"), new WebSocket("realtime/feed"),
+// EventSource("/stream"), new EventSource("events"). Absolute ws(s):// URLs and
+// rooted paths are already caught by endpointRe, but the bare-relative forms are
+// not (bareRelEndpointRe only fires in fetch/axios/XHR call context), and real-time
+// endpoints are exactly the kind of surface a secret scan wants surfaced. Matching
+// the constructor makes the capture precise, so it does not add noise.
+var wsEventSourceRe = regexp.MustCompile("(?i)(?:new\\s+)?(?:WebSocket|EventSource)\\s*\\(\\s*[\"'`]((?:\\$\\{[^}]+\\})*[^\"'`\\s]+)[\"'`]")
+
 // jsEndpoint holds an endpoint string and whether it is an absolute URL.
 // jsEndpoint holds an endpoint string, whether it is an absolute URL and any
 // associated POST request parameters if available.
@@ -82,6 +91,11 @@ func parseJSEndpoints(data []byte) []jsEndpoint {
 	// Bare relative request paths (no leading slash), only in request-call context.
 	for _, m := range bareRelEndpointRe.FindAllSubmatch(data, -1) {
 		add(string(m[1]), false)
+	}
+	// WebSocket / EventSource (SSE) endpoints, including bare-relative forms.
+	for _, m := range wsEventSourceRe.FindAllSubmatch(data, -1) {
+		val := string(m[1])
+		add(val, isAbsoluteEndpoint(val))
 	}
 	return out
 }

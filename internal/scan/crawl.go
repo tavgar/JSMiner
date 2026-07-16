@@ -4,6 +4,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -105,10 +106,32 @@ type CrawlOptions struct {
 	// library callers and existing tests are unaffected.
 	DiscoverWellKnown bool
 
+	// ResumeFile, when non-empty, turns on crawl checkpointing: the crawl reloads
+	// its state from this file at start (when it holds a checkpoint for the same
+	// seed) and periodically writes its state back to it, so a run killed part way
+	// through — the risk on a large -crawl-all — can be resumed instead of started
+	// over. The file is removed on clean completion. Empty (the default) disables
+	// checkpointing entirely.
+	ResumeFile string
+
+	// Concurrency is how many pages the crawl fetches and scans in parallel. A
+	// crawl is dominated by per-page I/O — the HTTP fetch and, when rendering is
+	// on, a headless-Chrome render that can take seconds — so processing several
+	// pages at once is the main throughput win. Values <= 1 run the crawl serially
+	// (the original, fully deterministic behaviour); higher values dispatch that
+	// many pages to a worker pool. Per-host pacing and adaptive backoff (see
+	// requestThrottle) still bound the load any single host sees, so raising this
+	// speeds up render-heavy and multi-host crawls without abandoning politeness.
+	// Note that with rendering on each worker may run its own browser, so the
+	// setting also trades memory for speed. Zero means serial in a zero-value
+	// CrawlOptions; DefaultCrawlOptions sets it to defaultCrawlConcurrency.
+	Concurrency int
+
 	// Progress, when non-nil, is invoked once per fetched page with the page
 	// URL, its depth from the seed and the running page count. It lets the CLI
 	// surface crawl progress without the scan package depending on the output
-	// layer.
+	// layer. During a concurrent crawl it is called as each page is dispatched, so
+	// the page numbers stay monotonic even though pages then complete out of order.
 	Progress func(pageURL string, depth, pageNum int)
 
 	// OnCalibrated, when non-nil, is invoked once after auto-calibration with
@@ -151,16 +174,24 @@ type CrawlStats struct {
 	Duration time.Duration
 }
 
+// defaultCrawlConcurrency is how many pages a default interactive crawl fetches
+// and scans in parallel. It is a modest fan-out: enough to hide per-page fetch
+// and render latency, while keeping the number of concurrent headless-Chrome
+// renders (one per busy worker) reasonable on an ordinary machine. Per-host
+// pacing still bounds the load any single host sees.
+const defaultCrawlConcurrency = 8
+
 // DefaultCrawlOptions returns sensible defaults for interactive use: follow two
-// hops beyond the seed, stay on the seed host, stop after 200 pages and
-// auto-calibrate to suppress catch-all/soft-404 and duplicate pages.
+// hops beyond the seed, stay on the seed host, stop after 200 pages,
+// auto-calibrate to suppress catch-all/soft-404 and duplicate pages, and fetch
+// several pages in parallel.
 func DefaultCrawlOptions() CrawlOptions {
 	return CrawlOptions{
 		MaxDepth: 2, MaxPages: 200, SameScopeOnly: true, AutoCalibrate: true,
 		ProbeMethods: true, RequestMethods: defaultRequestMethods(),
 		ParamReplay: true, ParamReplayMax: 500,
 		TemplateDedup: true, TemplateSampleMax: defaultTemplateSampleMax,
-		DiscoverWellKnown: true,
+		DiscoverWellKnown: true, Concurrency: defaultCrawlConcurrency,
 	}
 }
 
@@ -185,7 +216,7 @@ type crawlTarget struct {
 // whether off-scope script/import references are followed while scanning an
 // individual page; the page-to-page crawl itself is governed by opts.
 func (e *Extractor) ScanURLCrawl(urlStr string, endpoints, external, render bool, opts CrawlOptions) ([]Match, error) {
-	scanPage := func(u, baseHost string, visited map[string]struct{}) ([]Match, error) {
+	scanPage := func(u, baseHost string, visited *visitedSet) ([]Match, error) {
 		return e.scanURL(u, baseHost, endpoints, visited, external, render)
 	}
 	return e.crawlBFS(urlStr, opts, scanPage)
@@ -194,7 +225,7 @@ func (e *Extractor) ScanURLCrawl(urlStr string, endpoints, external, render bool
 // ScanURLPostsCrawl behaves like ScanURLCrawl but scans each page for HTTP POST
 // request endpoints, following the discovered endpoints to reach deeper pages.
 func (e *Extractor) ScanURLPostsCrawl(urlStr string, external, render bool, opts CrawlOptions) ([]Match, error) {
-	scanPage := func(u, baseHost string, visited map[string]struct{}) ([]Match, error) {
+	scanPage := func(u, baseHost string, visited *visitedSet) ([]Match, error) {
 		return e.scanURLPosts(u, baseHost, visited, external, render)
 	}
 	return e.crawlBFS(urlStr, opts, scanPage)
@@ -207,7 +238,7 @@ func (e *Extractor) ScanURLPostsCrawl(urlStr string, external, render bool, opts
 // The visited map is shared across every scanPage call so a JS bundle
 // referenced from many pages is fetched and scanned only once. The enqueued map
 // tracks page-level targets so each page is crawled at most once.
-func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u, baseHost string, visited map[string]struct{}) ([]Match, error)) ([]Match, error) {
+func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u, baseHost string, visited *visitedSet) ([]Match, error)) ([]Match, error) {
 	seed, err := url.Parse(seedURL)
 	if err != nil {
 		return nil, err
@@ -263,135 +294,457 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 		classer = newTemplateClasser(templateSampleMax(opts))
 	}
 
-	visited := make(map[string]struct{})
+	visited := newVisitedSet()
 	enqueued := make(map[string]struct{})
 
 	start := normalizeCrawlURL(seed.String())
-	queue := []crawlTarget{{url: start, depth: 0}}
-	enqueued[start] = struct{}{}
-	// The seed is always crawled; register it so it counts toward its own class.
-	classer.admit(start)
-
-	// Seed from the site's own declarations (robots.txt / sitemaps) so the crawl
-	// reaches server-published paths that nothing links to. They enter at depth 0,
-	// like the seed, so their own discovered links get the full depth budget.
-	if opts.DiscoverWellKnown {
-		for _, raw := range discoverWellKnownURLs(origin) {
-			u, err := url.Parse(raw)
-			if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
-				continue
-			}
-			if opts.SameScopeOnly && !sameScope(baseHost, u.Hostname()) {
-				continue
-			}
-			if !crawlableTarget(u) {
-				continue
-			}
-			n := normalizeCrawlURL(u.String())
-			if _, ok := enqueued[n]; ok {
-				continue
-			}
-			if !classer.admit(n) {
-				continue
-			}
-			enqueued[n] = struct{}{}
-			queue = append(queue, crawlTarget{url: n, depth: 0})
-			vlog(1, "[crawl] well-known seed %s", n)
-		}
-		stats.WellKnownSeeds = len(queue) - 1
-		vlog(1, "[crawl] seeded %d URL(s) from robots.txt/sitemaps", stats.WellKnownSeeds)
-	}
+	frontier := newCrawlFrontier()
 
 	var all []Match
 	pages := 0
-	for len(queue) > 0 {
-		if opts.MaxPages > 0 && pages >= opts.MaxPages {
-			break
-		}
-		t := queue[0]
-		queue = queue[1:]
-		pages++
-		if opts.Progress != nil {
-			opts.Progress(t.url, t.depth, pages)
-		}
-		vlog(1, "[crawl] (%d) depth %d fetching %s", pages, t.depth, t.url)
+	// crawlDelayForCheckpoint is the robots.txt Crawl-delay (as a per-host floor)
+	// carried through the checkpoint, so a resumed run re-establishes the same
+	// pacing without re-fetching robots.txt.
+	var crawlDelayForCheckpoint time.Duration
 
-		ms, err := scanPage(t.url, baseHost, visited)
-		if err != nil {
-			stats.PagesErrored++
-			vlog(1, "[crawl] (%d) depth %d %s -> error: %v", pages, t.depth, t.url, err)
-			continue
+	// Resume from a checkpoint when one is configured and matches this seed;
+	// otherwise seed the crawl normally.
+	resumed := false
+	if opts.ResumeFile != "" {
+		cp, err := readCheckpoint(opts.ResumeFile)
+		switch {
+		case err != nil:
+			// Absent/unreadable/old checkpoint: start fresh (this is the first run).
+		case cp.Seed != start:
+			vlog(1, "[crawl] checkpoint %s is for a different seed (%s); starting fresh", opts.ResumeFile, cp.Seed)
+		default:
+			visited.addAll(cp.Visited)
+			for _, e := range cp.Enqueued {
+				enqueued[e] = struct{}{}
+			}
+			for _, ct := range cp.Frontier {
+				frontier.push(crawlTarget{url: ct.URL, depth: ct.Depth})
+			}
+			all = cp.Matches
+			pages = cp.Pages
+			crawlDelayForCheckpoint = time.Duration(cp.CrawlDelayMS) * time.Millisecond
+			if crawlDelayForCheckpoint > 0 {
+				SetHostRateFloor(baseHost, crawlDelayForCheckpoint)
+			}
+			resumed = true
+			vlog(1, "[crawl] resumed from %s: %d page(s) done, %d queued, %d visited, %d match(es)",
+				opts.ResumeFile, pages, frontier.len(), len(cp.Visited), len(all))
 		}
-		stats.PagesFetched++
-		all = append(all, ms...)
-		vlog(1, "[crawl] (%d) %s -> %d match(es)", pages, t.url, len(ms))
+	}
 
-		// Report which request methods this page accepts, judged against the
-		// per-method error logic learned for its level.
-		if opts.ProbeMethods {
-			if worked := probeURLMethods(cal, t.url, methods, ""); worked != nil {
-				vlog(3, "[crawl] probe %s -> methods %s", t.url, strings.Join(worked, ","))
-				if gm, ok := gatheredMatch(t.url, worked, ""); ok {
-					all = append(all, gm)
-				}
-			}
-		}
+	if !resumed {
+		frontier.push(crawlTarget{url: start, depth: 0})
+		enqueued[start] = struct{}{}
+		// The seed is always crawled; register it so it counts toward its own class.
+		classer.admit(start)
 
-		// A negative MaxDepth means unlimited depth, so only the page budget and
-		// scope bound the crawl; otherwise stop harvesting once the cap is hit.
-		if opts.MaxDepth >= 0 && t.depth >= opts.MaxDepth {
-			continue
-		}
-		targets := crawlTargetsFromMatches(ms, t.url, baseHost, opts)
-		stats.TargetsFound += len(targets)
-		vlog(1, "[crawl] %s -> %d in-scope target(s) discovered", t.url, len(targets))
-
-		// Replay parameters discovered on this page against every level seen so
-		// far, and this page's levels against every parameter seen so far; keep
-		// the replays that work against each level's learned per-method logic.
-		if replay != nil {
-			// Include this page's own URL so its directory level is registered even
-			// when nothing under it was discovered as a crawl target.
-			levelURLs := make([]string, 0, len(targets)+1)
-			levelURLs = append(levelURLs, targets...)
-			levelURLs = append(levelURLs, t.url)
-			for _, rt := range replay.observe(paramsFromMatches(ms), levelURLs) {
-				worked := probeURLMethods(cal, rt.url, methods, rt.params)
-				if gm, ok := gatheredMatch(rt.url, worked, rt.params); ok {
-					vlog(3, "[crawl] param-replay %s params=%s -> methods %s", rt.url, rt.params, strings.Join(worked, ","))
-					all = append(all, gm)
-				}
+		// Seed from the site's own declarations (robots.txt / sitemaps) so the crawl
+		// reaches server-published paths that nothing links to. They enter at depth 0,
+		// like the seed, so their own discovered links get the full depth budget.
+		if opts.DiscoverWellKnown {
+			wkURLs, crawlDelay := discoverWellKnownURLs(origin)
+			crawlDelayForCheckpoint = crawlDelay
+			// Honour the site's robots.txt Crawl-delay as a per-host pacing floor, so
+			// the crawl never requests faster than the site asked for. It is combined
+			// with (never lowers) any -rate-limit the user set and, per the throttle's
+			// own logic, staying under the limit protects secret recall by keeping
+			// pages from coming back as 429 shells.
+			if crawlDelay > 0 {
+				SetHostRateFloor(baseHost, crawlDelay)
+				vlog(1, "[crawl] honouring robots.txt Crawl-delay %s for %s", crawlDelay, baseHost)
 			}
-		}
-		for _, next := range targets {
-			if _, ok := enqueued[next]; ok {
-				vlog(3, "[crawl] skip (already queued) %s", next)
-				continue
-			}
-			if !classer.admit(next) {
-				vlog(3, "[crawl] skip (template dedup) %s", next)
-				continue
-			}
-			enqueued[next] = struct{}{}
-			queue = append(queue, crawlTarget{url: next, depth: t.depth + 1})
-			vlog(3, "[crawl] enqueue depth %d %s", t.depth+1, next)
-		}
-		// Cross-level permutation reuses every path discovered so far under every
-		// level seen so far, enqueuing the fresh combinations at the next depth.
-		if perm != nil {
-			for _, next := range perm.observe(targets) {
-				if _, ok := enqueued[next]; ok {
+			for _, raw := range wkURLs {
+				u, err := url.Parse(raw)
+				if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 					continue
 				}
-				if !classer.admit(next) {
-					vlog(3, "[crawl] skip permuted (template dedup) %s", next)
+				if opts.SameScopeOnly && !sameScope(baseHost, u.Hostname()) {
 					continue
 				}
-				enqueued[next] = struct{}{}
-				queue = append(queue, crawlTarget{url: next, depth: t.depth + 1})
-				vlog(3, "[crawl] enqueue permuted depth %d %s", t.depth+1, next)
+				if !crawlableTarget(u) {
+					continue
+				}
+				n := normalizeCrawlURL(u.String())
+				if _, ok := enqueued[n]; ok {
+					continue
+				}
+				if !classer.admit(n) {
+					continue
+				}
+				enqueued[n] = struct{}{}
+				frontier.push(crawlTarget{url: n, depth: 0})
+				vlog(1, "[crawl] well-known seed %s", n)
+			}
+			stats.WellKnownSeeds = frontier.len() - 1
+			vlog(1, "[crawl] seeded %d URL(s) from robots.txt/sitemaps", stats.WellKnownSeeds)
+		}
+	}
+
+	// admit records a discovered next-hop URL as queued, applying the same
+	// already-queued and template-class limits both drivers share. It is only ever
+	// called from the single goroutine that owns the queue (the serial loop, or the
+	// concurrent coordinator), so it needs no lock.
+	admit := func(next string) bool {
+		if _, ok := enqueued[next]; ok {
+			vlog(3, "[crawl] skip (already queued) %s", next)
+			return false
+		}
+		if !classer.admit(next) {
+			vlog(3, "[crawl] skip (template dedup) %s", next)
+			return false
+		}
+		enqueued[next] = struct{}{}
+		return true
+	}
+
+	// saveCheckpoint persists the crawl's recoverable state so a killed run can be
+	// resumed. inflight are pages dispatched but not yet completed (the concurrent
+	// driver's in-flight jobs; nil for the serial driver): they are written back
+	// into the frontier and excluded from the visited snapshot, so the checkpoint
+	// stays self-consistent — every persisted page is either fully done (visited,
+	// its matches in `all`) or still pending (queued, not visited) — and a resume
+	// re-fetches the in-flight pages cleanly rather than skipping them. It is called
+	// only from the goroutine that owns the crawl state (serial loop or concurrent
+	// coordinator), so reading that state needs no lock; visited snapshots itself.
+	saveCheckpoint := func(inflight []crawlTarget) {
+		if opts.ResumeFile == "" {
+			return
+		}
+		vis := visited.snapshot()
+		if len(inflight) > 0 {
+			exclude := make(map[string]struct{}, len(inflight))
+			for _, t := range inflight {
+				exclude[t.url] = struct{}{}
+			}
+			kept := vis[:0]
+			for _, u := range vis {
+				if _, skip := exclude[u]; !skip {
+					kept = append(kept, u)
+				}
+			}
+			vis = kept
+		}
+		cp := crawlCheckpoint{
+			Version:      crawlCheckpointVersion,
+			Seed:         start,
+			Pages:        pages,
+			CrawlDelayMS: crawlDelayForCheckpoint.Milliseconds(),
+			Visited:      vis,
+			Enqueued:     mapKeys(enqueued),
+			Matches:      all,
+		}
+		for _, t := range frontier.snapshot() {
+			cp.Frontier = append(cp.Frontier, checkpointTarget{URL: t.url, Depth: t.depth})
+		}
+		for _, t := range inflight {
+			cp.Frontier = append(cp.Frontier, checkpointTarget{URL: t.url, Depth: t.depth})
+		}
+		if err := writeCheckpoint(opts.ResumeFile, cp); err != nil {
+			vlog(1, "[crawl] checkpoint write failed: %v", err)
+		} else {
+			vlog(2, "[crawl] checkpoint written to %s (%d done, %d queued)", opts.ResumeFile, cp.Pages, len(cp.Frontier))
+		}
+	}
+
+	if opts.Concurrency > 1 {
+		// Concurrent crawl. A pool of workers fetches and scans pages — and probes
+		// their methods and parameter replays — in parallel, while this goroutine
+		// acts as the sole coordinator: it owns the queue, the enqueue/template
+		// bookkeeping, the permutation and parameter-replay accumulators, the stats
+		// and the match list, so none of that needs a lock. Workers only touch the
+		// pieces that are already synchronised — the shared HTTP path, the visited
+		// set and the calibrator — so the shared visited set still fetches a bundle
+		// linked from several pages once, and the calibrator's per-level fingerprints
+		// are still shared across the whole crawl. Pages complete out of order, so
+		// the visit order (and, once MaxPages caps the run, exactly which pages fall
+		// outside the budget) is no longer deterministic; the depth budget, scope and
+		// page budget still bound the crawl the same way.
+		workers := opts.Concurrency
+
+		// A job is either a page to fetch+scan or a parameter replay to probe. Replay
+		// probing is HTTP-bound too, so it rides the same pool instead of blocking
+		// the coordinator on network I/O.
+		type crawlJob struct {
+			page     crawlTarget
+			replay   replayTarget
+			isReplay bool
+		}
+		// A result carries the matches to record and, for a page, the harvested
+		// next-hop targets and discovered parameters the coordinator needs to grow
+		// the crawl. targets/params are computed in the worker — they are pure
+		// functions of the page's matches — so the coordinator's turn stays short.
+		type crawlResult struct {
+			job     crawlJob
+			matches []Match
+			targets []string
+			params  []string
+			err     error
+		}
+
+		jobCh := make(chan crawlJob)
+		resultCh := make(chan crawlResult, workers)
+		var wg sync.WaitGroup
+		for i := 0; i < workers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for job := range jobCh {
+					if job.isReplay {
+						worked := probeURLMethods(cal, job.replay.url, methods, job.replay.params)
+						var ms []Match
+						if gm, ok := gatheredMatch(job.replay.url, worked, job.replay.params); ok {
+							vlog(3, "[crawl] param-replay %s params=%s -> methods %s", job.replay.url, job.replay.params, strings.Join(worked, ","))
+							ms = append(ms, gm)
+						}
+						resultCh <- crawlResult{job: job, matches: ms}
+						continue
+					}
+					t := job.page
+					ms, err := scanPage(t.url, baseHost, visited)
+					if err != nil {
+						resultCh <- crawlResult{job: job, err: err}
+						continue
+					}
+					out := ms
+					// Report which request methods this page accepts, judged against
+					// the per-method error logic learned for its level.
+					if opts.ProbeMethods {
+						if worked := probeURLMethods(cal, t.url, methods, ""); worked != nil {
+							vlog(3, "[crawl] probe %s -> methods %s", t.url, strings.Join(worked, ","))
+							if gm, ok := gatheredMatch(t.url, worked, ""); ok {
+								out = append(out, gm)
+							}
+						}
+						// A GraphQL endpoint: confirm it and map its schema surface by
+						// sending an introspection query.
+						if isGraphQLEndpoint(t.url) {
+							if gm, ok := probeGraphQLIntrospection(t.url); ok {
+								vlog(1, "[crawl] graphql introspection enabled at %s", t.url)
+								out = append(out, gm)
+							}
+						}
+					}
+					// A negative MaxDepth means unlimited depth; otherwise stop
+					// harvesting next hops once the depth cap is reached.
+					var targets, params []string
+					if opts.MaxDepth < 0 || t.depth < opts.MaxDepth {
+						targets = crawlTargetsFromMatches(ms, t.url, baseHost, opts)
+						params = paramsFromMatches(ms)
+					}
+					resultCh <- crawlResult{job: job, matches: out, targets: targets, params: params}
+				}
+			}()
+		}
+
+		var replayQueue []replayTarget
+		pending := 0 // jobs dispatched but not yet completed
+		// inFlight tracks pages dispatched but not yet completed, keyed by URL, so a
+		// checkpoint can persist them as still-pending (see saveCheckpoint).
+		inFlight := make(map[string]crawlTarget)
+		sinceCheckpoint := 0 // completed pages since the last checkpoint write
+
+		for {
+			// Drain replay probes (they never grow the crawl) before dispatching new
+			// pages, and only dispatch a page while under the page budget. pages counts
+			// all page dispatches — including those restored from a checkpoint — so the
+			// budget holds across a resume.
+			var (
+				job     crawlJob
+				haveJob bool
+			)
+			switch {
+			case len(replayQueue) > 0:
+				job = crawlJob{isReplay: true, replay: replayQueue[0]}
+				haveJob = true
+			case frontier.len() > 0 && (opts.MaxPages <= 0 || pages < opts.MaxPages):
+				job = crawlJob{page: frontier.peek()}
+				haveJob = true
+			}
+
+			if !haveJob && pending == 0 {
+				break // nothing left to dispatch and nothing in flight
+			}
+
+			// Disable the send case when there is no job ready, so the coordinator
+			// only waits for results; the receive case is always live while work is
+			// in flight, which is what keeps the pipeline deadlock-free.
+			sendCh := jobCh
+			if !haveJob {
+				sendCh = nil
+			}
+
+			select {
+			case sendCh <- job:
+				pending++
+				if job.isReplay {
+					replayQueue = replayQueue[1:]
+				} else {
+					frontier.pop()
+					inFlight[job.page.url] = job.page
+					pages++
+					if opts.Progress != nil {
+						opts.Progress(job.page.url, job.page.depth, pages)
+					}
+					vlog(1, "[crawl] (%d) depth %d fetching %s", pages, job.page.depth, job.page.url)
+				}
+			case res := <-resultCh:
+				pending--
+				if res.job.isReplay {
+					all = append(all, res.matches...)
+					continue
+				}
+				t := res.job.page
+				delete(inFlight, t.url)
+				if res.err != nil {
+					stats.PagesErrored++
+					vlog(1, "[crawl] depth %d %s -> error: %v", t.depth, t.url, res.err)
+					continue
+				}
+				stats.PagesFetched++
+				all = append(all, res.matches...)
+				stats.TargetsFound += len(res.targets)
+				vlog(1, "[crawl] %s -> %d match(es), %d in-scope target(s)", t.url, len(res.matches), len(res.targets))
+
+				// Replay this page's parameters against every level seen so far, and
+				// its levels against every parameter seen so far; the actual probing
+				// happens on the worker pool via the replay jobs queued here.
+				if replay != nil {
+					levelURLs := make([]string, 0, len(res.targets)+1)
+					levelURLs = append(levelURLs, res.targets...)
+					levelURLs = append(levelURLs, t.url)
+					replayQueue = append(replayQueue, replay.observe(res.params, levelURLs)...)
+				}
+				for _, next := range res.targets {
+					if admit(next) {
+						frontier.push(crawlTarget{url: next, depth: t.depth + 1})
+						vlog(3, "[crawl] enqueue depth %d %s", t.depth+1, next)
+					}
+				}
+				// Cross-level permutation reuses every path discovered so far under
+				// every level seen so far, enqueuing the fresh combinations.
+				if perm != nil {
+					for _, next := range perm.observe(res.targets) {
+						if admit(next) {
+							frontier.push(crawlTarget{url: next, depth: t.depth + 1})
+							vlog(3, "[crawl] enqueue permuted depth %d %s", t.depth+1, next)
+						}
+					}
+				}
+				// Checkpoint periodically, re-queuing the still-in-flight pages so the
+				// snapshot is self-consistent.
+				if sinceCheckpoint++; opts.ResumeFile != "" && sinceCheckpoint >= crawlCheckpointInterval {
+					sinceCheckpoint = 0
+					flight := make([]crawlTarget, 0, len(inFlight))
+					for _, ft := range inFlight {
+						flight = append(flight, ft)
+					}
+					saveCheckpoint(flight)
+				}
 			}
 		}
+		close(jobCh)
+		wg.Wait()
+	} else {
+		for frontier.len() > 0 {
+			if opts.MaxPages > 0 && pages >= opts.MaxPages {
+				break
+			}
+			t := frontier.pop()
+			pages++
+			if opts.Progress != nil {
+				opts.Progress(t.url, t.depth, pages)
+			}
+			vlog(1, "[crawl] (%d) depth %d fetching %s", pages, t.depth, t.url)
+
+			ms, err := scanPage(t.url, baseHost, visited)
+			if err != nil {
+				stats.PagesErrored++
+				vlog(1, "[crawl] (%d) depth %d %s -> error: %v", pages, t.depth, t.url, err)
+				continue
+			}
+			stats.PagesFetched++
+			all = append(all, ms...)
+			vlog(1, "[crawl] (%d) %s -> %d match(es)", pages, t.url, len(ms))
+
+			// Report which request methods this page accepts, judged against the
+			// per-method error logic learned for its level.
+			if opts.ProbeMethods {
+				if worked := probeURLMethods(cal, t.url, methods, ""); worked != nil {
+					vlog(3, "[crawl] probe %s -> methods %s", t.url, strings.Join(worked, ","))
+					if gm, ok := gatheredMatch(t.url, worked, ""); ok {
+						all = append(all, gm)
+					}
+				}
+				// A GraphQL endpoint: confirm it and map its schema surface by sending
+				// an introspection query.
+				if isGraphQLEndpoint(t.url) {
+					if gm, ok := probeGraphQLIntrospection(t.url); ok {
+						vlog(1, "[crawl] graphql introspection enabled at %s", t.url)
+						all = append(all, gm)
+					}
+				}
+			}
+
+			// A negative MaxDepth means unlimited depth, so only the page budget and
+			// scope bound the crawl; otherwise stop harvesting once the cap is hit.
+			if opts.MaxDepth >= 0 && t.depth >= opts.MaxDepth {
+				continue
+			}
+			targets := crawlTargetsFromMatches(ms, t.url, baseHost, opts)
+			stats.TargetsFound += len(targets)
+			vlog(1, "[crawl] %s -> %d in-scope target(s) discovered", t.url, len(targets))
+
+			// Replay parameters discovered on this page against every level seen so
+			// far, and this page's levels against every parameter seen so far; keep
+			// the replays that work against each level's learned per-method logic.
+			if replay != nil {
+				// Include this page's own URL so its directory level is registered even
+				// when nothing under it was discovered as a crawl target.
+				levelURLs := make([]string, 0, len(targets)+1)
+				levelURLs = append(levelURLs, targets...)
+				levelURLs = append(levelURLs, t.url)
+				for _, rt := range replay.observe(paramsFromMatches(ms), levelURLs) {
+					worked := probeURLMethods(cal, rt.url, methods, rt.params)
+					if gm, ok := gatheredMatch(rt.url, worked, rt.params); ok {
+						vlog(3, "[crawl] param-replay %s params=%s -> methods %s", rt.url, rt.params, strings.Join(worked, ","))
+						all = append(all, gm)
+					}
+				}
+			}
+			for _, next := range targets {
+				if admit(next) {
+					frontier.push(crawlTarget{url: next, depth: t.depth + 1})
+					vlog(3, "[crawl] enqueue depth %d %s", t.depth+1, next)
+				}
+			}
+			// Cross-level permutation reuses every path discovered so far under every
+			// level seen so far, enqueuing the fresh combinations at the next depth.
+			if perm != nil {
+				for _, next := range perm.observe(targets) {
+					if admit(next) {
+						frontier.push(crawlTarget{url: next, depth: t.depth + 1})
+						vlog(3, "[crawl] enqueue permuted depth %d %s", t.depth+1, next)
+					}
+				}
+			}
+			// Checkpoint periodically. The serial loop fully processes each page
+			// before the next, so there are no in-flight pages to re-queue.
+			if opts.ResumeFile != "" && pages%crawlCheckpointInterval == 0 {
+				saveCheckpoint(nil)
+			}
+		}
+	}
+
+	// The crawl reached this point without being killed, so it is complete: there
+	// is nothing left to resume, and leaving the checkpoint behind would make the
+	// next run wrongly resume a finished crawl. Remove it.
+	if opts.ResumeFile != "" {
+		removeCheckpoint(opts.ResumeFile)
 	}
 
 	out := UniqueMatches(all)

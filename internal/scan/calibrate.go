@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // autoCalibrator implements ffuf-style auto-calibration for crawls. Before the
@@ -32,6 +33,14 @@ import (
 // level it probes that level with random paths and learns its own catch-all
 // fingerprint, then skips pages under that level that match it.
 type autoCalibrator struct {
+	// mu guards every map below. A concurrent crawl consults one shared calibrator
+	// from all of its workers — skipPage on each fetched page, methodCatchAll on
+	// each method probe — so the maps must be synchronised. The HTTP probes that
+	// ensureLevel/ensureMethodLevel issue are deliberately performed without the
+	// lock held (the level is "claimed" under the lock first, then probed), so a
+	// slow probe against one level never blocks workers scanning other pages.
+	mu sync.Mutex
+
 	wildcard   map[string]struct{}            // status|words|lines of the root catch-all responses (GET)
 	levelWild  map[string]map[string]struct{} // per-directory-level catch-all signatures (GET)
 	levelDone  map[string]struct{}            // levels already probed (even if they learned nothing)
@@ -135,18 +144,29 @@ func (c *autoCalibrator) calibrate(seedURL string) int {
 // accepted. pageURL identifies the level to check (and to lazily calibrate on
 // first sight).
 func (c *autoCalibrator) skipPage(pageURL string, status int, body []byte) bool {
+	sig := pageSig(status, body)
+
+	c.mu.Lock()
 	if !c.primed {
 		c.primed = true
 		c.seenBodies[hashBody(body)] = struct{}{}
-		c.countStructural(pageURL, body)
+		c.countStructuralLocked(pageURL, body)
+		c.mu.Unlock()
 		return false
 	}
-	sig := pageSig(status, body)
 	if _, ok := c.wildcard[sig]; ok {
+		c.mu.Unlock()
 		return true
 	}
+	c.mu.Unlock()
+
+	// ensureLevel synchronises itself and runs its HTTP probes without the lock, so
+	// a first-visit level probe here does not stall other workers' skipPage calls.
 	lvl := levelOf(pageURL)
 	c.ensureLevel(lvl)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if sigs, ok := c.levelWild[lvl]; ok {
 		if _, hit := sigs[sig]; hit {
 			return true
@@ -160,7 +180,28 @@ func (c *autoCalibrator) skipPage(pageURL string, status int, body []byte) bool 
 	// enough already-scanned pages — same layout, different data — is dropped even
 	// though its bytes are new. This is the check that exact-body and coarse
 	// signatures miss.
-	if c.structMax > 0 && c.structuralClassFull(pageURL, body) {
+	if c.structMax > 0 && c.structuralClassFullLocked(pageURL, body) {
+		return true
+	}
+	c.seenBodies[h] = struct{}{}
+	return false
+}
+
+// skipContent reports whether a non-HTML resource body has already been scanned
+// in this crawl, recording its hash the first time it is seen. It lets the crawl
+// skip re-scanning a JS bundle served under a second content-hashed filename
+// (app.a1b2.js vs app.c3d4.js) — identical bytes yield identical rule, AST and
+// source-map matches, which UniqueMatches would collapse anyway — so the expensive
+// scan and source-map recovery run once per distinct bundle instead of once per
+// name. It shares seenBodies with page dedup, which is safe: a JS bundle and an
+// HTML page never share a body hash. Callers still follow the bundle's imports
+// after a skip, so a relative chunk that resolves under this bundle's own path is
+// not missed.
+func (c *autoCalibrator) skipContent(body []byte) bool {
+	h := hashBody(body)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.seenBodies[h]; ok {
 		return true
 	}
 	c.seenBodies[h] = struct{}{}
@@ -178,20 +219,21 @@ func (c *autoCalibrator) structuralKey(pageURL string, body []byte) string {
 	return host + "\x00" + structuralSig(body)
 }
 
-// countStructural records one representative of a page's structural class,
+// countStructuralLocked records one representative of a page's structural class,
 // without capping. It is used to enrol the always-accepted seed page so its
-// class starts from one.
-func (c *autoCalibrator) countStructural(pageURL string, body []byte) {
+// class starts from one. The caller must hold c.mu.
+func (c *autoCalibrator) countStructuralLocked(pageURL string, body []byte) {
 	if c.structMax <= 0 {
 		return
 	}
 	c.structCounts[c.structuralKey(pageURL, body)]++
 }
 
-// structuralClassFull reports whether the page's structural class has already
-// reached its representative cap. When it has, the page is a templated duplicate
-// and is left uncounted; otherwise it is recorded as a fresh representative.
-func (c *autoCalibrator) structuralClassFull(pageURL string, body []byte) bool {
+// structuralClassFullLocked reports whether the page's structural class has
+// already reached its representative cap. When it has, the page is a templated
+// duplicate and is left uncounted; otherwise it is recorded as a fresh
+// representative. The caller must hold c.mu.
+func (c *autoCalibrator) structuralClassFullLocked(pageURL string, body []byte) bool {
 	key := c.structuralKey(pageURL, body)
 	if c.structCounts[key] >= c.structMax {
 		return true
@@ -207,13 +249,20 @@ func (c *autoCalibrator) structuralClassFull(pageURL string, body []byte) bool {
 // so the extra requests scale with the number of distinct directories visited,
 // not with the whole URL space.
 func (c *autoCalibrator) ensureLevel(lvl string) {
+	// c.base is set once before the crawl starts and never mutated afterwards, so
+	// reading it without the lock is safe.
 	if c.base == "" {
 		return
 	}
+	c.mu.Lock()
 	if _, ok := c.levelDone[lvl]; ok {
+		c.mu.Unlock()
 		return
 	}
+	// Claim the level under the lock so only one worker probes it, then release the
+	// lock for the duration of the (potentially slow) HTTP probes.
 	c.levelDone[lvl] = struct{}{}
+	c.mu.Unlock()
 
 	counts := make(map[string]int)
 	for _, p := range levelProbePaths(lvl) {
@@ -235,7 +284,9 @@ func (c *autoCalibrator) ensureLevel(lvl string) {
 		}
 	}
 	if sigs != nil {
+		c.mu.Lock()
 		c.levelWild[lvl] = sigs
+		c.mu.Unlock()
 	}
 }
 
@@ -255,10 +306,14 @@ func (c *autoCalibrator) ensureMethodLevel(method, lvl string) {
 		return
 	}
 	key := methodKey(method, lvl)
+	c.mu.Lock()
 	if _, ok := c.methodDone[key]; ok {
+		c.mu.Unlock()
 		return
 	}
+	// Claim the (method, level) pair under the lock, then probe without it held.
 	c.methodDone[key] = struct{}{}
+	c.mu.Unlock()
 
 	counts := make(map[string]int)
 	for _, p := range levelProbePaths(lvl) {
@@ -280,7 +335,9 @@ func (c *autoCalibrator) ensureMethodLevel(method, lvl string) {
 		}
 	}
 	if sigs != nil {
+		c.mu.Lock()
 		c.methodWild[key] = sigs
+		c.mu.Unlock()
 	}
 }
 
@@ -293,6 +350,8 @@ func (c *autoCalibrator) ensureMethodLevel(method, lvl string) {
 func (c *autoCalibrator) methodCatchAll(method, pageURL string, status int, body []byte) bool {
 	lvl := levelOf(pageURL)
 	c.ensureMethodLevel(method, lvl)
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if sigs, ok := c.methodWild[methodKey(method, lvl)]; ok {
 		if _, hit := sigs[pageSig(status, body)]; hit {
 			return true

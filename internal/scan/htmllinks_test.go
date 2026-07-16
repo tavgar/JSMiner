@@ -60,6 +60,54 @@ func TestExtractHTMLLinkMatches(t *testing.T) {
 	}
 }
 
+// TestExtractHTMLLinkSrcsetAndCSS verifies srcset candidate URLs (on <img> and
+// <source>) and CSS url() references (in <style> blocks and inline style) are
+// surfaced — occasionally a config/data path hides there — while descriptors and
+// data: URIs are not.
+func TestExtractHTMLLinkSrcsetAndCSS(t *testing.T) {
+	page := "https://site.test/dir/page"
+	html := []byte(`<html><head><style>
+  .hero { background: url("/assets/bg.webp"); }
+  .cfg  { --data: url(/config/app.json); }
+  .b64  { background: url("data:image/png;base64,AAAA"); }
+</style></head><body>
+<img srcset="/img/small.jpg 480w, /img/large.jpg 800w" src="/img/fallback.jpg">
+<picture><source srcset="/img/hero.avif 1x, /img/hero@2x.avif 2x"></picture>
+<div style="background-image:url('/theme/skin.css')"></div>
+</body></html>`)
+
+	got := map[string]bool{}
+	for _, m := range extractHTMLLinkMatches(html, page) {
+		got[m.Value] = true
+	}
+
+	for _, w := range []string{
+		"https://site.test/assets/bg.webp",   // css url() double-quoted
+		"https://site.test/config/app.json",  // css url() bare
+		"https://site.test/theme/skin.css",   // inline style url() single-quoted
+		"https://site.test/img/small.jpg",    // srcset candidate 1
+		"https://site.test/img/large.jpg",    // srcset candidate 2
+		"https://site.test/img/fallback.jpg", // plain src still works
+		"https://site.test/img/hero.avif",    // <source> srcset candidate 1
+		"https://site.test/img/hero@2x.avif", // <source> srcset candidate 2
+	} {
+		if !got[w] {
+			t.Errorf("missing expected link %q", w)
+		}
+	}
+	// The data: URI and the width/density descriptors must not leak as endpoints.
+	for v := range got {
+		if len(v) >= 5 && v[:5] == "data:" {
+			t.Errorf("data: URI surfaced as endpoint: %q", v)
+		}
+		for _, desc := range []string{"480w", "800w", "1x", "2x"} {
+			if v == desc {
+				t.Errorf("srcset descriptor surfaced as endpoint: %q", v)
+			}
+		}
+	}
+}
+
 // TestExtractHTMLLinkTemplatePlaceholders verifies unresolved template
 // expressions in href/src are not emitted as garbage endpoints.
 func TestExtractHTMLLinkTemplatePlaceholders(t *testing.T) {

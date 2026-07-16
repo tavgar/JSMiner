@@ -48,7 +48,7 @@ func TestParseRobots(t *testing.T) {
 		"sitemap: https://example.test/news-sitemap.xml",
 	}, "\n")
 
-	dirs, sitemaps := parseRobots(body, "https://example.test")
+	dirs, sitemaps, _ := parseRobots(body, "https://example.test")
 	wantDirs := map[string]bool{
 		"https://example.test/admin/":     true,
 		"https://example.test/tmp/":       true,
@@ -132,7 +132,8 @@ func TestDiscoverWellKnownURLs(t *testing.T) {
 	origin = srv.URL
 
 	got := map[string]bool{}
-	for _, u := range discoverWellKnownURLs(origin) {
+	urls, _ := discoverWellKnownURLs(origin)
+	for _, u := range urls {
 		got[u] = true
 	}
 	want := []string{
@@ -180,7 +181,8 @@ func TestDiscoverWellKnownURLsGzipped(t *testing.T) {
 	origin = srv.URL
 
 	got := map[string]bool{}
-	for _, u := range discoverWellKnownURLs(origin) {
+	urls, _ := discoverWellKnownURLs(origin)
+	for _, u := range urls {
 		got[u] = true
 	}
 	for _, want := range []string{origin + "/gz-page-1", origin + "/gz-page-2"} {
@@ -249,7 +251,7 @@ func TestWellKnownSameOriginStillFollowed(t *testing.T) {
 	seed := httptest.NewServer(mux)
 	defer seed.Close()
 
-	got := discoverWellKnownURLs(seed.URL)
+	got, _ := discoverWellKnownURLs(seed.URL)
 	found := false
 	for _, u := range got {
 		if strings.HasSuffix(u, "/legit-page") {

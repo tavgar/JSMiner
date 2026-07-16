@@ -6,7 +6,9 @@ import (
 	"io"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // Well-known discovery reads the URLs a site declares about itself — robots.txt
@@ -39,15 +41,27 @@ var (
 	robotsDirectiveRe = regexp.MustCompile(`(?i)^\s*(?:dis)?allow\s*:\s*(\S+)`)
 	// robotsSitemapRe captures a Sitemap: URL from a robots.txt line.
 	robotsSitemapRe = regexp.MustCompile(`(?i)^\s*sitemap\s*:\s*(\S+)`)
+	// robotsUserAgentRe captures a User-agent token, so Crawl-delay is read from the
+	// group that applies to everyone (`*`) rather than one meant for a named bot.
+	robotsUserAgentRe = regexp.MustCompile(`(?i)^\s*user-agent\s*:\s*(\S+)`)
+	// robotsCrawlDelayRe captures a Crawl-delay value (whole or fractional seconds).
+	robotsCrawlDelayRe = regexp.MustCompile(`(?i)^\s*crawl-delay\s*:\s*([0-9]*\.?[0-9]+)`)
 	// sitemapLocRe captures a <loc> URL from a sitemap or sitemap index document.
 	sitemapLocRe = regexp.MustCompile(`(?is)<loc>\s*(.*?)\s*</loc>`)
 )
+
+// maxRobotsCrawlDelay caps how long a robots.txt Crawl-delay can pace the crawl.
+// A legitimate delay is a handful of seconds; a much larger value (whether a
+// mistake or a hostile stall) is clamped so honouring it cannot freeze a scan.
+const maxRobotsCrawlDelay = 30 * time.Second
 
 // discoverWellKnownURLs fetches robots.txt and the sitemaps it (and convention)
 // advertise for origin, returning the absolute in-origin URLs it found. origin is
 // scheme://host with no trailing slash. The result is de-duplicated and capped at
 // wellKnownMaxURLs; ordering follows discovery so robots directories come first.
-func discoverWellKnownURLs(origin string) []string {
+// crawlDelay is the robots.txt Crawl-delay for the catch-all group (zero when
+// none), so the caller can pace the crawl to what the site asked for.
+func discoverWellKnownURLs(origin string) (out []string, crawlDelay time.Duration) {
 	// Sitemap documents are fetched here, and the sitemap targets that get fetched
 	// are drawn from target-controlled input: robots.txt Sitemap: pointers and the
 	// <loc> children of sitemap indexes. Left unchecked, a hostile robots.txt could
@@ -62,7 +76,6 @@ func discoverWellKnownURLs(origin string) []string {
 	inScope := func(raw string) bool { return wellKnownInScope(originHost, raw) }
 
 	seen := make(map[string]struct{})
-	var out []string
 	add := func(raw string) bool {
 		raw = strings.TrimSpace(raw)
 		if raw == "" {
@@ -79,7 +92,8 @@ func discoverWellKnownURLs(origin string) []string {
 	// robots.txt: directory hints plus explicit sitemap pointers.
 	sitemaps := []string{origin + "/sitemap.xml"}
 	if body, ok := fetchWellKnownBody(origin + "/robots.txt"); ok {
-		dirs, sm := parseRobots(body, origin)
+		dirs, sm, cd := parseRobots(body, origin)
+		crawlDelay = cd
 		for _, s := range sm {
 			if inScope(s) {
 				sitemaps = append(sitemaps, s)
@@ -89,7 +103,7 @@ func discoverWellKnownURLs(origin string) []string {
 		}
 		for _, d := range dirs {
 			if !add(d) {
-				return out
+				return out, crawlDelay
 			}
 		}
 	}
@@ -130,11 +144,11 @@ func discoverWellKnownURLs(origin string) []string {
 				continue
 			}
 			if !add(locURL) {
-				return out
+				return out, crawlDelay
 			}
 		}
 	}
-	return out
+	return out, crawlDelay
 }
 
 // wellKnownInScope reports whether a sitemap URL advertised by the target (a
@@ -155,14 +169,37 @@ func wellKnownInScope(originHost, raw string) bool {
 // values are reduced to the concrete prefix before their first wildcard so a rule
 // like "Disallow: /admin/*" still yields the real "/admin/" directory, while a
 // value that reduces to nothing useful (e.g. "/" or "/*.php$") is dropped.
-func parseRobots(body, origin string) (dirs, sitemaps []string) {
+//
+// crawlDelay is the Crawl-delay the file requests for the catch-all (`User-agent:
+// *`) group, converted to a per-request gap and clamped to maxRobotsCrawlDelay;
+// it is zero when none is stated. Only the `*` group is honoured so a delay meant
+// for a single named bot never throttles this crawl. Directory and sitemap
+// extraction stays group-agnostic, matching the prior behaviour.
+func parseRobots(body, origin string) (dirs, sitemaps []string, crawlDelay time.Duration) {
+	// starGroup is true while the lines being read belong to a `User-agent: *`
+	// block (or precede any User-agent line, which sloppy files sometimes rely on).
+	starGroup := true
 	for _, line := range strings.Split(body, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+		if m := robotsUserAgentRe.FindStringSubmatch(line); m != nil {
+			starGroup = strings.TrimSpace(m[1]) == "*"
+			continue
+		}
 		if m := robotsSitemapRe.FindStringSubmatch(line); m != nil {
 			sitemaps = append(sitemaps, strings.TrimSpace(m[1]))
+			continue
+		}
+		if m := robotsCrawlDelayRe.FindStringSubmatch(line); m != nil {
+			if starGroup {
+				if secs, err := strconv.ParseFloat(m[1], 64); err == nil && secs > 0 {
+					if d := time.Duration(secs * float64(time.Second)); d > crawlDelay {
+						crawlDelay = d
+					}
+				}
+			}
 			continue
 		}
 		if m := robotsDirectiveRe.FindStringSubmatch(line); m != nil {
@@ -175,7 +212,10 @@ func parseRobots(body, origin string) (dirs, sitemaps []string) {
 			}
 		}
 	}
-	return dedupeStrings(dirs), dedupeStrings(sitemaps)
+	if crawlDelay > maxRobotsCrawlDelay {
+		crawlDelay = maxRobotsCrawlDelay
+	}
+	return dedupeStrings(dirs), dedupeStrings(sitemaps), crawlDelay
 }
 
 // robotsPathPrefix reduces a robots.txt path value to the concrete, crawlable
