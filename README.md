@@ -230,7 +230,20 @@ one form:
 - **JavaScript** — endpoints and paths in inline scripts, linked bundles and
   dynamic `import()`s, including template-literal bases (`` `/api/user/${id}` `` →
   `/api/user/`) and bare-relative request paths in call context
-  (`fetch("api/search?q=" + q)` → `api/search`).
+  (`fetch("api/search?q=" + q)` → `api/search`). WebSocket and SSE endpoints
+  (`new WebSocket("wss://…")`, `EventSource("/stream")`) are surfaced too,
+  including their bare-relative forms.
+- **HTML assets** — beyond the navigational attributes below, `srcset` candidates
+  on `<img>`/`<source>` and CSS `url(…)` references in `<style>` blocks and inline
+  styles, where a config or data path occasionally hides.
+- **JSON API responses** — when a crawled endpoint returns JSON, its hypermedia
+  links (`href`/`self`/`next`, JSON:API `links`, HAL `_links`) are followed to
+  reach paginated and related resources nothing else references. Endpoint
+  extraction keys on the content, so this works even for an extensionless API URL.
+- **GraphQL** — a discovered `/graphql` (or `/graphiql`) endpoint is confirmed
+  with an introspection query; when introspection is enabled the schema surface is
+  reported as a `graphql_introspection` finding (a misconfiguration worth
+  flagging). Runs under active probing; disable with `-no-methods`.
 - **Live requests** — the XHR/`fetch` URLs the page actually calls while rendering
   in headless Chrome, so endpoints built at runtime (from an id, a router param, a
   template) that appear in no shipped string are still reached.

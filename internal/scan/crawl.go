@@ -425,6 +425,14 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 								out = append(out, gm)
 							}
 						}
+						// A GraphQL endpoint: confirm it and map its schema surface by
+						// sending an introspection query.
+						if isGraphQLEndpoint(t.url) {
+							if gm, ok := probeGraphQLIntrospection(t.url); ok {
+								vlog(1, "[crawl] graphql introspection enabled at %s", t.url)
+								out = append(out, gm)
+							}
+						}
 					}
 					// A negative MaxDepth means unlimited depth; otherwise stop
 					// harvesting next hops once the depth cap is reached.
@@ -558,6 +566,14 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 				if worked := probeURLMethods(cal, t.url, methods, ""); worked != nil {
 					vlog(3, "[crawl] probe %s -> methods %s", t.url, strings.Join(worked, ","))
 					if gm, ok := gatheredMatch(t.url, worked, ""); ok {
+						all = append(all, gm)
+					}
+				}
+				// A GraphQL endpoint: confirm it and map its schema surface by sending
+				// an introspection query.
+				if isGraphQLEndpoint(t.url) {
+					if gm, ok := probeGraphQLIntrospection(t.url); ok {
+						vlog(1, "[crawl] graphql introspection enabled at %s", t.url)
 						all = append(all, gm)
 					}
 				}
