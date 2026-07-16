@@ -549,6 +549,13 @@ func (e *Extractor) scanHTMLState(finalURL, baseHost string, data []byte, dynami
 	// in JavaScript, missing the link graph of server-rendered and multi-page
 	// sites entirely.
 	matches = append(matches, extractHTMLLinkMatches(data, finalURL)...)
+	// During a crawl, harvest POST forms as post_url matches carrying their field
+	// names, so cross-level parameter replay can exercise inputs that appear nowhere
+	// in the page's JavaScript. Gated on an active crawl (calibrator set) so a plain
+	// single-page scan's output is unchanged.
+	if e.calibrator != nil {
+		matches = append(matches, extractHTMLFormMatches(data, finalURL)...)
+	}
 	for _, src := range extractInlineScripts(data) {
 		ms, err := e.ScanReaderWithEndpoints("inline.js", bytes.NewReader([]byte(src)))
 		if err == nil {
@@ -592,6 +599,10 @@ func (e *Extractor) scanHTMLStatePosts(finalURL, baseHost string, data []byte, d
 	// POST-endpoint output via FilterPostMatches.
 	if e.calibrator != nil {
 		matches = append(matches, extractHTMLLinkMatches(data, finalURL)...)
+		// Harvest POST forms too: their action drives navigation and their field
+		// names feed cross-level parameter replay of the POST endpoints this crawl
+		// is looking for.
+		matches = append(matches, extractHTMLFormMatches(data, finalURL)...)
 	}
 	base := documentBase(data, finalURL)
 	sources := extractScriptSrcs(data)

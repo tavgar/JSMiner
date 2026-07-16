@@ -408,9 +408,12 @@ Any parameters JSMiner discovers on `POST`/`PUT`/`PATCH` endpoints are also
 **replayed across every directory level** the crawl has seen (bounded by an
 internal cap): a body found under `/api/` is retried under `/`, `/v2/`, and every
 other level, and a replay that works against that level's per-method error logic
-is reported as a gathered URL with the parameters that produced it. Pass
-`-no-methods` to turn the whole segment off, or `-no-param-replay` to keep
-method probing but skip the cross-level parameter replay.
+is reported as a gathered URL with the parameters that produced it. Those
+parameters come both from the request bodies mined out of JavaScript and from the
+**field names of `POST` forms** in a page's HTML markup (`<input>`/`<select>`/
+`<textarea>`/`<button>` `name`s), so form inputs that appear nowhere in the site's
+scripts are exercised too. Pass `-no-methods` to turn the whole segment off, or
+`-no-param-replay` to keep method probing but skip the cross-level parameter replay.
 
 ### Code snippets
 

@@ -146,6 +146,98 @@ func extractHTMLLinkMatches(data []byte, pageURL string) []Match {
 	return out
 }
 
+// formTagRe matches an HTML <form> element and captures its opening-tag attributes
+// (group 1) and body (group 2). formFieldRe captures the `name` of a form control
+// (input/select/textarea/button) inside that body, and attrValueRe reads a single
+// named attribute out of a tag's attribute string.
+// formActionRe (the action attribute) is declared in jspost.go and reused here.
+var formTagRe = regexp.MustCompile(`(?is)<form\b([^>]*)>(.*?)</form>`)
+var formFieldRe = regexp.MustCompile(`(?is)<(?:input|select|textarea|button)\b[^>]*?\bname\s*=\s*["']([^"']+)["']`)
+var formMethodRe = regexp.MustCompile(`(?is)\bmethod\s*=\s*["']([^"']*)["']`)
+
+// attrMatch reads the first submatch of a precompiled attribute regex out of a
+// tag's attribute string, entity-decoded and trimmed, or "" when absent.
+func attrMatch(re *regexp.Regexp, attrs string) string {
+	m := re.FindStringSubmatch(attrs)
+	if m == nil {
+		return ""
+	}
+	return decodeXMLEntities(strings.TrimSpace(m[1]))
+}
+
+// extractHTMLFormMatches finds the POST forms in a page's markup and emits each as
+// a post_url match whose Params carries the form's field names. Modern apps drive
+// state changes through forms whose field names appear nowhere in the JavaScript
+// the crawler otherwise mines parameters from; surfacing them lets the crawl's
+// cross-level parameter replay exercise those inputs against the levels it has seen.
+//
+// Only method="post" forms are emitted: a GET form encodes its inputs in the query
+// string and its action is already harvested as a navigable endpoint by
+// extractHTMLLinkMatches, so replaying it would add nothing. The action is resolved
+// against the document base (a self-posting form with no action posts to the page
+// itself). The Params body is form-encoded with empty values (name1=&name2=), which
+// is what the replayer submits; a form with no named field still yields the action
+// as a discovered POST endpoint worth crawling and probing.
+func extractHTMLFormMatches(data []byte, pageURL string) []Match {
+	base := documentBase(data, pageURL)
+	seen := make(map[string]struct{})
+	var out []Match
+	for _, f := range formTagRe.FindAllSubmatch(data, -1) {
+		attrs := string(f[1])
+		if !strings.EqualFold(attrMatch(formMethodRe, attrs), "post") {
+			continue
+		}
+		action := attrMatch(formActionRe, attrs)
+		if action == "" {
+			action = pageURL
+		} else if isTemplatePlaceholder(action) {
+			continue
+		}
+		low := strings.ToLower(action)
+		skip := false
+		for _, s := range nonNavSchemes {
+			if strings.HasPrefix(low, s) {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+		abs := resolveURL(base, action)
+		u, err := url.Parse(abs)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			continue
+		}
+		u.Fragment = ""
+		actionURL := u.String()
+
+		// Collect the form's distinct field names into a form-encoded body.
+		fieldSeen := make(map[string]struct{})
+		var fields []string
+		for _, nm := range formFieldRe.FindAllSubmatch(f[2], -1) {
+			name := strings.TrimSpace(string(nm[1]))
+			if name == "" {
+				continue
+			}
+			if _, ok := fieldSeen[name]; ok {
+				continue
+			}
+			fieldSeen[name] = struct{}{}
+			fields = append(fields, name+"=")
+		}
+		params := strings.Join(fields, "&")
+
+		key := actionURL + "|" + params
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, Match{Source: pageURL, Pattern: "post_url", Value: actionURL, Params: params, Severity: "info"})
+	}
+	return out
+}
+
 // parseSrcset pulls the URLs out of a srcset attribute value. srcset is a
 // comma-separated list of candidates, each a URL optionally followed by whitespace
 // and a width ("480w") or density ("2x") descriptor; the URL is the first
