@@ -149,10 +149,10 @@ Flags:
   `10`). Raise it for enterprise crawls of large bundles over slow links; lower
   it so a single stalled request cannot hold up the crawl. Independent of the
   render wait controlled by `-timeout`.
-- `-retries` extra attempts for a bodyless HTTP fetch that fails with a transient
+- `-retries` extra attempts for a safe, bodyless HTTP read that fails with a transient
   transport error — a connection reset, DNS blip or timeout (default `2`, `0` to
-  disable). Only idempotent, bodyless requests are retried, so a discovered
-  POST/PUT/PATCH parameter replay is never re-sent; this keeps a crawl of
+  disable). Only GET/HEAD/OPTIONS reads are retried, so active
+  POST/PUT/PATCH/DELETE probes and parameter replays are never re-sent; this keeps a crawl of
   thousands of requests from dropping pages to one-off network hiccups.
 - `-no-source-maps` disable recovering original source from JavaScript source
   maps. By default, when a scanned bundle advertises a source map (via a
@@ -218,7 +218,7 @@ The crawl stays on the target host and its subdomains, skips binary assets
 (images, fonts, media, archives — by URL extension *and* by response
 `Content-Type`, so an extensionless URL that returns an image or PDF is skipped
 too) that cannot yield secrets, fetches each resource at most once over a pooled
-keep-alive connection, retries transient network errors on idempotent fetches
+keep-alive connection, retries transient network errors on safe reads
 (see `-retries`), and stops at `-crawl-depth` hops or `-crawl-max-pages` pages.
 Progress is printed to stderr unless `-quiet` is set, followed by a one-line
 run summary — pages fetched, errors, targets discovered, pages enqueued, matches

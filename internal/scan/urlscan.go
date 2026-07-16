@@ -3,6 +3,7 @@ package scan
 import (
 	"bytes"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -77,7 +78,21 @@ func sharedHTTPClient() *http.Client {
 // fetchURLResponse retrieves a URL with GET and returns the http.Response
 // with limited redirects and a default User-Agent.
 func fetchURLResponse(u string) (*http.Response, error) {
-	return fetchURLResponseMethod(u, "GET", "")
+	return fetchURLResponseMethodPolicy(u, "GET", "", nil)
+}
+
+// fetchURLResponseScoped retrieves u while preventing redirects from escaping
+// baseHost when external is false. Redirect scope has to be enforced by the HTTP
+// client, before the redirected request is sent; checking resp.Request.URL after
+// the fact would already have fetched the off-scope resource.
+func fetchURLResponseScoped(u, baseHost string, external bool) (*http.Response, error) {
+	if external {
+		return fetchURLResponse(u)
+	}
+	return fetchURLResponseMethodPolicy(u, "GET", "", func(next *url.URL) bool {
+		return (next.Scheme == "http" || next.Scheme == "https") &&
+			sameScope(baseHost, next.Hostname())
+	})
 }
 
 // fetchURLResponseMethod retrieves u with the given HTTP method and returns the
@@ -87,6 +102,28 @@ func fetchURLResponse(u string) (*http.Response, error) {
 // parameters against a target. The default User-Agent and any extra headers still
 // apply.
 func fetchURLResponseMethod(u, method, body string) (*http.Response, error) {
+	return fetchURLResponseMethodPolicy(u, method, body, nil)
+}
+
+// fetchURLResponseMethodSameScope runs an active method request while keeping
+// redirects within the request URL's host scope. Method probes, calibration and
+// GraphQL checks are target-controlled requests too and must not become a
+// redirect-based SSRF path.
+func fetchURLResponseMethodSameScope(u, method, body string) (*http.Response, error) {
+	parsed, err := url.Parse(u)
+	if err != nil || parsed.Hostname() == "" {
+		return nil, fmt.Errorf("invalid scoped URL %q", u)
+	}
+	baseHost := parsed.Hostname()
+	return fetchURLResponseMethodPolicy(u, method, body, func(next *url.URL) bool {
+		return (next.Scheme == "http" || next.Scheme == "https") &&
+			sameScope(baseHost, next.Hostname())
+	})
+}
+
+// fetchURLResponseMethodPolicy is the common request path. allowRedirect, when
+// non-nil, is checked before every redirect request is sent.
+func fetchURLResponseMethodPolicy(u, method, body string, allowRedirect func(*url.URL) bool) (*http.Response, error) {
 	var rdr io.Reader
 	if body != "" {
 		rdr = strings.NewReader(body)
@@ -100,13 +137,25 @@ func fetchURLResponseMethod(u, method, body string) (*http.Response, error) {
 		req.Header.Set("Content-Type", inferContentType(body))
 	}
 	// A transient transport error (connection reset, DNS blip, timeout) is retried
-	// on the idempotent, bodyless fetch path so a single network hiccup does not
-	// drop a page from the crawl. Requests that carry a body — discovered POST/PUT/
-	// PATCH parameter replays — are attempted exactly once so a retry can never
-	// double-submit them against the target.
+	// only for safe, bodyless reads. Mutation probes must run exactly once even
+	// when their body is empty: retrying a POST/PATCH/DELETE after an ambiguous
+	// transport failure can execute a state change twice.
 	attempts := 1
-	if body == "" {
+	if body == "" && retryableMethod(method) {
 		attempts += FetchRetries
+	}
+	client := sharedHTTPClient()
+	if allowRedirect != nil {
+		// Shallow-copy the client so this request can install a scope-aware redirect
+		// policy while still sharing the underlying keep-alive transport.
+		scoped := *client
+		scoped.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			if len(via) >= MaxRedirects || !allowRedirect(req.URL) {
+				return http.ErrUseLastResponse
+			}
+			return nil
+		}
+		client = &scoped
 	}
 	var resp *http.Response
 	for attempt := 0; ; attempt++ {
@@ -116,7 +165,7 @@ func fetchURLResponseMethod(u, method, body string) (*http.Response, error) {
 		// observe() adapts the gap to the response.
 		host := hostOf(u)
 		globalThrottle.waitHost(host)
-		resp, err = sharedHTTPClient().Do(req)
+		resp, err = client.Do(req)
 		globalThrottle.observeHost(host, resp, err)
 		if err == nil {
 			break
@@ -129,6 +178,19 @@ func fetchURLResponseMethod(u, method, body string) (*http.Response, error) {
 	}
 	vlog(2, "http %s %s -> %s", method, u, resp.Status)
 	return resp, nil
+}
+
+// retryableMethod reports whether a bodyless request is safe to repeat after a
+// transport error. GET/HEAD/OPTIONS do not request a state mutation; active
+// POST/PUT/PATCH/DELETE probes are deliberately excluded even where HTTP calls a
+// verb idempotent, because a dropped response cannot prove what the target did.
+func retryableMethod(method string) bool {
+	switch strings.ToUpper(method) {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	default:
+		return false
+	}
 }
 
 // readCappedBody reads at most MaxResponseBodyBytes from a fetched response
@@ -211,11 +273,26 @@ func sameScope(baseHost, otherHost string) bool {
 }
 
 func isHTMLContent(urlStr, ct string) bool {
-	if strings.Contains(ct, "html") {
+	if strings.Contains(strings.ToLower(ct), "html") {
 		return true
 	}
-	ext := strings.ToLower(path.Ext(urlStr))
+	urlPath := urlStr
+	if u, err := url.Parse(urlStr); err == nil && u.Path != "" {
+		urlPath = u.Path
+	}
+	ext := strings.ToLower(path.Ext(urlPath))
 	return ext == ".html" || ext == ".htm"
+}
+
+// isJavaScriptContentType reports whether ct identifies JavaScript regardless of
+// header casing or optional parameters.
+func isJavaScriptContentType(ct string) bool {
+	ct = strings.ToLower(ct)
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = ct[:i]
+	}
+	ct = strings.TrimSpace(ct)
+	return strings.Contains(ct, "javascript") || strings.Contains(ct, "ecmascript")
 }
 
 // binaryContentTypes are the exact media types that carry no JavaScript, endpoint
@@ -289,7 +366,7 @@ func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited *vi
 		return nil, nil
 	}
 
-	resp, err := fetchURLResponse(urlStr)
+	resp, err := fetchURLResponseScoped(urlStr, baseHost, external)
 	if err != nil {
 		return nil, err
 	}
@@ -374,8 +451,8 @@ func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited *vi
 	if e.calibrator != nil && e.calibrator.skipContent(data) {
 		vlog(1, "[crawl] skip re-scan (duplicate content) %s", finalURL)
 	} else {
-		reader := bytes.NewReader(data)
-		ms, err := e.ScanReaderWithEndpoints(finalURL, reader)
+		ms, err := e.scanDataWithEndpoints(finalURL, data,
+			isJSFile(finalURL) || isJavaScriptContentType(resp.Header.Get("Content-Type")))
 		if err != nil {
 			return nil, err
 		}
@@ -436,7 +513,7 @@ func (e *Extractor) scanURLPosts(urlStr, baseHost string, visited *visitedSet, e
 		return nil, nil
 	}
 
-	resp, err := fetchURLResponse(urlStr)
+	resp, err := fetchURLResponseScoped(urlStr, baseHost, external)
 	if err != nil {
 		return nil, err
 	}
@@ -506,8 +583,8 @@ func (e *Extractor) scanURLPosts(urlStr, baseHost string, visited *visitedSet, e
 	if e.calibrator != nil && e.calibrator.skipContent(data) {
 		vlog(1, "[crawl] skip re-scan (duplicate content) %s", finalURL)
 	} else {
-		reader := bytes.NewReader(data)
-		ms, err := e.ScanReaderPostRequests(finalURL, reader)
+		ms, err := e.scanDataPostRequests(finalURL, data,
+			isJSFile(finalURL) || isJavaScriptContentType(resp.Header.Get("Content-Type")))
 		if err != nil {
 			return nil, err
 		}

@@ -58,6 +58,11 @@ func TestDecodeDataURI(t *testing.T) {
 	if got, ok := decodeDataURI(plain); !ok || string(got) != payload {
 		t.Fatalf("plain decode = %q ok=%v, want %q", got, ok, payload)
 	}
+	withPlus := `{"source":"const sum=a+b"}`
+	plainPlus := "data:application/json,%7B%22source%22%3A%22const%20sum%3Da+b%22%7D"
+	if got, ok := decodeDataURI(plainPlus); !ok || string(got) != withPlus {
+		t.Fatalf("plain plus decode = %q ok=%v, want %q", got, ok, withPlus)
+	}
 	if _, ok := decodeDataURI("data:application/json"); ok {
 		t.Fatal("expected failure on data URI with no comma")
 	}

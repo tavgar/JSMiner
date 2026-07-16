@@ -16,6 +16,41 @@ import (
 	"github.com/tavgar/JSMiner/internal/scan"
 )
 
+type trackingReadCloser struct {
+	io.Reader
+	closed bool
+}
+
+func (r *trackingReadCloser) Close() error {
+	r.closed = true
+	return nil
+}
+
+func TestScanPrefixBoundsMemoryAndPreservesBody(t *testing.T) {
+	original := []byte("0123456789abcdef")
+	body := &trackingReadCloser{Reader: bytes.NewReader(original)}
+	prefix, replayed, err := scanPrefix(body, 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(prefix); got != "012345" {
+		t.Fatalf("scanned prefix = %q, want %q", got, "012345")
+	}
+	forwarded, err := io.ReadAll(replayed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(forwarded, original) {
+		t.Fatalf("forwarded body = %q, want original %q", forwarded, original)
+	}
+	if err := replayed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !body.closed {
+		t.Fatal("closing replayed body did not close the upstream response")
+	}
+}
+
 func TestProxyScansResponses(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, "token eyJabc.def.ghi")

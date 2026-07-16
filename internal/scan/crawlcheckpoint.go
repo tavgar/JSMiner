@@ -42,6 +42,18 @@ type crawlCheckpoint struct {
 	Matches      []Match            `json:"matches"`
 }
 
+// checkpointCompletedPages converts the live coordinator's dispatch count into
+// the completed count persisted in a checkpoint. In-flight pages are placed back
+// on the saved frontier, so counting them in Pages as well would consume their
+// budget twice after a resume.
+func checkpointCompletedPages(dispatched, inflight int) int {
+	done := dispatched - inflight
+	if done < 0 {
+		return 0
+	}
+	return done
+}
+
 // writeCheckpoint serialises cp to path atomically: it writes a sibling temp file
 // and renames it over path, so a reader (or a resume after a crash) never sees a
 // half-written file.

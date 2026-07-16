@@ -430,9 +430,13 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 			vis = kept
 		}
 		cp := crawlCheckpoint{
-			Version:      crawlCheckpointVersion,
-			Seed:         start,
-			Pages:        pages,
+			Version: crawlCheckpointVersion,
+			Seed:    start,
+			// `pages` counts dispatches so the live coordinator can enforce its
+			// budget. In-flight pages are also persisted back onto the frontier;
+			// counting them here as completed would make a capped resumed crawl
+			// refuse to dispatch them. Persist only fully completed dispatches.
+			Pages:        checkpointCompletedPages(pages, len(inflight)),
 			CrawlDelayMS: crawlDelayForCheckpoint.Milliseconds(),
 			Visited:      vis,
 			Enqueued:     mapKeys(enqueued),

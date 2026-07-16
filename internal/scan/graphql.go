@@ -61,7 +61,7 @@ type graphqlSchemaResponse struct {
 // answer, is not GraphQL, or has introspection disabled — so the crawl reports the
 // finding only when it is real. It issues a single POST and reads a bounded body.
 func probeGraphQLIntrospection(endpointURL string) (Match, bool) {
-	resp, err := fetchURLResponseMethod(endpointURL, "POST", graphqlIntrospectionQuery)
+	resp, err := fetchURLResponseMethodSameScope(endpointURL, "POST", graphqlIntrospectionQuery)
 	if err != nil {
 		return Match{}, false
 	}

@@ -165,7 +165,7 @@ func (e *Extractor) fetchInScope(abs, baseHost string, external bool, visited *v
 	if !visited.visit(abs) {
 		return nil, false
 	}
-	resp, err := fetchURLResponse(abs)
+	resp, err := fetchURLResponseScoped(abs, baseHost, external)
 	if err != nil {
 		return nil, false
 	}
@@ -195,7 +195,10 @@ func decodeDataURI(uri string) ([]byte, bool) {
 		}
 		return nil, false
 	}
-	if s, err := url.QueryUnescape(payload); err == nil {
+	// A data URI payload uses percent-encoding, not HTML form encoding. QueryUnescape
+	// turns a literal '+' into a space and corrupts JavaScript expressions and
+	// base64-like strings embedded in a plain source map; PathUnescape preserves it.
+	if s, err := url.PathUnescape(payload); err == nil {
 		return []byte(s), true
 	}
 	return []byte(payload), true

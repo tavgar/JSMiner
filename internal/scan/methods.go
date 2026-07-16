@@ -88,7 +88,7 @@ func probeURLMethods(cal *autoCalibrator, pageURL string, methods []string, body
 		if body != "" && bodyMethods[m] {
 			reqBody = body
 		}
-		resp, err := fetchURLResponseMethod(pageURL, m, reqBody)
+		resp, err := fetchURLResponseMethodSameScope(pageURL, m, reqBody)
 		if err != nil {
 			continue
 		}

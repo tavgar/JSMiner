@@ -293,6 +293,28 @@ func TestDiscoverWellKnownStandardPaths(t *testing.T) {
 	}
 }
 
+func TestFetchWellKnownBodyBlocksOffScopeRedirect(t *testing.T) {
+	externalHits := 0
+	external := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		externalHits++
+		io.WriteString(w, "User-agent: *")
+	}))
+	defer external.Close()
+	externalURL := strings.Replace(external.URL, "127.0.0.1", "localhost", 1)
+
+	seed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, externalURL+"/robots.txt", http.StatusFound)
+	}))
+	defer seed.Close()
+
+	if _, ok := fetchWellKnownBody(seed.URL + "/robots.txt"); ok {
+		t.Fatal("off-scope redirected well-known document was accepted")
+	}
+	if externalHits != 0 {
+		t.Fatalf("well-known fetch sent %d request(s) to off-scope redirect target", externalHits)
+	}
+}
+
 // TestCrawlFollowsOpenIDConfiguration verifies a crawl seeded from the standard
 // .well-known set fetches /.well-known/openid-configuration and follows the OAuth
 // endpoints it advertises to reach a token endpoint holding a secret — API surface

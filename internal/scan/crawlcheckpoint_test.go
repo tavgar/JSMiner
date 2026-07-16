@@ -143,6 +143,49 @@ func TestScanURLCrawlConcurrentCheckpointing(t *testing.T) {
 	}
 }
 
+// TestScanURLCrawlResumeReplaysInflightAtPageCap models a checkpoint written
+// while the only budgeted page was in flight. The pending page is persisted on
+// the frontier and must not also count as completed, otherwise a resume at the
+// exact page cap exits without ever fetching it.
+func TestScanURLCrawlResumeReplaysInflightAtPageCap(t *testing.T) {
+	const secret = "eyJhbGciOiJIUzI1NiJ9.eyJpbmZsaWdodCI6MX0.resumePendingSignature"
+	var hits int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/javascript")
+		io.WriteString(w, `const token="`+secret+`";`)
+	}))
+	defer ts.Close()
+
+	state := filepath.Join(t.TempDir(), "resume.json")
+	seed := normalizeCrawlURL(ts.URL + "/app.js")
+	if got := checkpointCompletedPages(1, 1); got != 0 {
+		t.Fatalf("checkpoint counted an in-flight dispatch as completed: got %d", got)
+	}
+	// This is the state produced by the fixed checkpoint writer: an in-flight
+	// dispatch is on the frontier but not included in completed Pages.
+	cp := crawlCheckpoint{
+		Version:  crawlCheckpointVersion,
+		Seed:     seed,
+		Pages:    0,
+		Enqueued: []string{seed},
+		Frontier: []checkpointTarget{{URL: seed, Depth: 0}},
+	}
+	if err := writeCheckpoint(state, cp); err != nil {
+		t.Fatal(err)
+	}
+
+	e := NewExtractor(true, false)
+	opts := CrawlOptions{MaxPages: 1, SameScopeOnly: true, ResumeFile: state, Concurrency: 2}
+	ms, err := e.ScanURLCrawl(seed, false, false, false, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hits != 1 || !hasPattern(ms, "jwt") {
+		t.Fatalf("pending page was not replayed within budget: hits=%d matches=%+v", hits, ms)
+	}
+}
+
 // TestScanURLCrawlIgnoresCheckpointForDifferentSeed verifies a checkpoint written
 // for another seed is ignored, so the crawl starts fresh rather than crawling a
 // stale frontier that belongs to a different target.

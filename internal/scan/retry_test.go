@@ -77,6 +77,33 @@ func TestFetchNoRetryForBodyRequests(t *testing.T) {
 	}
 }
 
+// TestFetchNoRetryForBodylessMutation verifies active method probes are not
+// repeated merely because they carry no body. A server may have applied the POST
+// before the connection failed, so retrying it risks executing the mutation twice.
+func TestFetchNoRetryForBodylessMutation(t *testing.T) {
+	resetSharedClient()
+	defer resetSharedClient()
+	SetSkipTLSVerification(true)
+	orig := FetchRetries
+	SetFetchRetries(3)
+	defer SetFetchRetries(orig)
+	ResetThrottle()
+
+	var n int64
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&n, 1)
+		hijackClose(w)
+	}))
+	defer ts.Close()
+
+	if _, err := fetchURLResponseMethod(ts.URL, "POST", ""); err == nil {
+		t.Fatal("expected error from an always-failing POST")
+	}
+	if got := atomic.LoadInt64(&n); got != 1 {
+		t.Fatalf("bodyless POST attempted %d times; mutation probes must run once", got)
+	}
+}
+
 // TestFetchRetriesDisabled verifies SetFetchRetries(0) restores single-attempt
 // behaviour on the bodyless path.
 func TestFetchRetriesDisabled(t *testing.T) {

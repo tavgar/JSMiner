@@ -15,6 +15,21 @@ import (
 	"github.com/tavgar/JSMiner/internal/scan"
 )
 
+// scanPrefix reads at most limit bytes for inspection and rebuilds a response
+// body that replays that prefix before streaming the untouched remainder. This
+// keeps proxy scanning memory-bounded without truncating what the client receives.
+func scanPrefix(body io.ReadCloser, limit int64) ([]byte, io.ReadCloser, error) {
+	data, err := io.ReadAll(io.LimitReader(body, limit))
+	replayed := struct {
+		io.Reader
+		io.Closer
+	}{
+		Reader: io.MultiReader(bytes.NewReader(data), body),
+		Closer: body,
+	}
+	return data, replayed, err
+}
+
 // Run starts an HTTP proxy server that scans all HTTP responses using the
 // provided Extractor. Matches are printed live with the given Printer.
 func Run(ctx context.Context, addr string, ext *scan.Extractor, printer *output.Printer, out io.Writer, endpoints bool) error {
@@ -37,20 +52,10 @@ func Run(ctx context.Context, addr string, ext *scan.Extractor, printer *output.
 		if resp == nil || resp.Body == nil || resp.Request == nil {
 			return resp
 		}
-		data, err := io.ReadAll(resp.Body)
+		scanData, replayedBody, err := scanPrefix(resp.Body, scan.MaxResponseBodyBytes)
+		resp.Body = replayedBody
 		if err != nil {
 			return resp
-		}
-		resp.Body.Close()
-		resp.Body = io.NopCloser(bytes.NewBuffer(data))
-
-		// The full body above is forwarded to the client untouched; bound only the
-		// slice handed to the scanner so an oversized response cannot make rule and
-		// endpoint matching run over an unbounded input, matching the cap the rest
-		// of the package applies to every network read.
-		scanData := data
-		if len(scanData) > scan.MaxResponseBodyBytes {
-			scanData = scanData[:scan.MaxResponseBodyBytes]
 		}
 
 		ms, err := ext.ScanReaderWithEndpoints(resp.Request.URL.String(), bytes.NewReader(scanData))

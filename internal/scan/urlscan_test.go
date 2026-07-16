@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -95,6 +96,51 @@ func TestScanURLExternal(t *testing.T) {
 	}
 }
 
+// TestScanURLRedirectHonorsExternal verifies scope is enforced before a redirect
+// request is sent. A post-response final-URL check is too late: the external body
+// would already have been fetched and scanned.
+func TestScanURLRedirectHonorsExternal(t *testing.T) {
+	const key = "AIzaSyD1ad_UKyHFErfLeO_3aoBoNrX1W4bsmac"
+	var externalHits int64
+	externalServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&externalHits, 1)
+		w.Header().Set("Content-Type", "application/javascript")
+		io.WriteString(w, `const key="`+key+`";`)
+	}))
+	defer externalServer.Close()
+	// The servers share an IP in tests; use a different hostname so sameScope
+	// treats the redirect as external while it still resolves locally.
+	externalURL := strings.Replace(externalServer.URL, "127.0.0.1", "localhost", 1)
+
+	seed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, externalURL+"/outside.js", http.StatusFound)
+	}))
+	defer seed.Close()
+
+	e := NewExtractor(false, false)
+	restricted, err := e.ScanURL(seed.URL+"/inside.js", false, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt64(&externalHits); got != 0 {
+		t.Fatalf("external=false sent %d request(s) to an off-scope redirect", got)
+	}
+	if hasPattern(restricted, "google_api") {
+		t.Fatal("external=false scanned the off-scope redirect body")
+	}
+
+	allowed, err := e.ScanURL(seed.URL+"/inside.js", false, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt64(&externalHits); got != 1 {
+		t.Fatalf("external=true sent %d request(s) to the redirect target, want 1", got)
+	}
+	if !hasPattern(allowed, "google_api") {
+		t.Fatal("external=true did not scan the external redirect target")
+	}
+}
+
 // Test ScanURL with rendering to detect dynamically inserted script
 func TestScanURLRender(t *testing.T) {
 	mux := http.NewServeMux()
@@ -123,6 +169,46 @@ func TestScanURLRender(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected endpoint from dynamic script")
+	}
+}
+
+func TestScanURLRecognizesMixedCaseHTMLContentType(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "Text/HTML; Charset=UTF-8")
+		io.WriteString(w, `<html><script src="/app.js"></script></html>`)
+	})
+	mux.HandleFunc("/app.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript")
+		io.WriteString(w, `fetch("/api/mixed-case")`)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	e := NewExtractor(true, false)
+	ms, err := e.ScanURL(ts.URL, true, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasPattern(ms, "endpoint_path") {
+		t.Fatalf("mixed-case HTML Content-Type prevented script discovery: %+v", ms)
+	}
+}
+
+func TestScanURLExtensionlessJavaScriptUsesContentType(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "Application/JavaScript; Charset=UTF-8")
+		io.WriteString(w, `fetch("/api/extensionless")`)
+	}))
+	defer ts.Close()
+
+	e := NewExtractor(true, false)
+	ms, err := e.ScanURL(ts.URL+"/bundle", true, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasPattern(ms, "endpoint_path") {
+		t.Fatalf("extensionless JavaScript response yielded no endpoint: %+v", ms)
 	}
 }
 

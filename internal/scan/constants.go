@@ -82,13 +82,13 @@ func SetSkipTLSVerification(skip bool) {
 // FetchRetries is how many extra attempts the shared HTTP fetch path makes when a
 // request fails with a transport error — a connection reset, DNS blip or timeout,
 // the kind of transient failure an enterprise crawl of thousands of requests hits
-// routinely. Only bodyless (idempotent, GET-style) requests are retried, so a
-// discovered POST/PUT/PATCH parameter replay is never double-submitted against a
-// target. Zero disables retries.
+// routinely. Only safe, bodyless GET/HEAD/OPTIONS requests are retried, so active
+// mutation probes and discovered parameter replays are never double-submitted
+// against a target. Zero disables retries.
 var FetchRetries = 2
 
 // SetFetchRetries configures how many extra attempts a transient transport error
-// earns on the bodyless fetch path. A negative value is treated as zero.
+// earns on the safe, bodyless read path. A negative value is treated as zero.
 func SetFetchRetries(n int) {
 	if n < 0 {
 		n = 0

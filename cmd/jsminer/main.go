@@ -31,6 +31,64 @@ func (h *headerSlice) Set(v string) error {
 
 const version = "0.01v"
 
+// reorderFlagArgs moves recognized flags (and their values) before positional
+// arguments so Go's standard flag parser accepts the documented
+// `jsminer target -flag=value` form. The standard parser stops at the first
+// positional argument; preprocessing avoids maintaining a second, incomplete
+// flag parser and keeps all flags working identically on either side of targets.
+func reorderFlagArgs(args []string, fs *flag.FlagSet) []string {
+	var flags, positional []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			positional = append(positional, args[i+1:]...)
+			break
+		}
+		if arg == "-" || !strings.HasPrefix(arg, "-") {
+			positional = append(positional, arg)
+			continue
+		}
+
+		rawName := strings.TrimLeft(arg, "-")
+		name, hasInlineValue := rawName, false
+		if before, _, ok := strings.Cut(rawName, "="); ok {
+			name, hasInlineValue = before, true
+		}
+		f := fs.Lookup(name)
+		if f == nil {
+			// Let flag.Parse produce its normal "flag provided but not defined"
+			// error, including for an unknown flag written after a target.
+			flags = append(flags, arg)
+			continue
+		}
+		if hasInlineValue {
+			flags = append(flags, arg)
+			continue
+		}
+
+		if bf, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && bf.IsBoolFlag() {
+			// Preserve the historically accepted `-render false` spelling, but
+			// consume the following token only when it is actually a boolean.
+			if i+1 < len(args) {
+				if v, err := strconv.ParseBool(args[i+1]); err == nil {
+					flags = append(flags, arg+"="+strconv.FormatBool(v))
+					i++
+					continue
+				}
+			}
+			flags = append(flags, arg)
+			continue
+		}
+
+		flags = append(flags, arg)
+		if i+1 < len(args) {
+			flags = append(flags, args[i+1])
+			i++
+		}
+	}
+	return append(flags, positional...)
+}
+
 func main() {
 	format := flag.String("format", "pretty", "output format: pretty or json")
 	safe := flag.Bool("safe", false, "safe mode - only scan JS")
@@ -79,237 +137,10 @@ func main() {
 	browserDest := flag.String("browser-dest", "", "with -download-browser, extract Chromium into <dir>/chromium so <dir> (binary + chromium/) ships as a self-contained bundle")
 	var headerFlags headerSlice
 	flag.Var(&headerFlags, "header", "HTTP header in 'Key: Value' format. May be repeated")
-	flag.Parse()
-
-	// handle flags placed after positional arguments
-	args := flag.Args()
-	leftover := make([]string, 0, len(args))
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if !strings.HasPrefix(a, "-") {
-			leftover = append(leftover, a)
-			continue
-		}
-		name := strings.TrimLeft(a, "-")
-		parts := strings.SplitN(name, "=", 2)
-		name = parts[0]
-		switch name {
-		case "endpoints":
-			*endpoints = true
-		case "posts":
-			*posts = true
-		case "render":
-			val := "true"
-			if len(parts) == 2 {
-				val = parts[1]
-			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				val = args[i+1]
-				i++
-			}
-			if b, err := strconv.ParseBool(val); err == nil {
-				*render = b
-			} else {
-				*render = true
-			}
-		case "external":
-			val := "true"
-			if len(parts) == 2 {
-				val = parts[1]
-			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				val = args[i+1]
-				i++
-			}
-			if b, err := strconv.ParseBool(val); err == nil {
-				*external = b
-			} else {
-				*external = true
-			}
-		case "safe":
-			*safe = true
-		case "longsecret":
-			*longSecret = true
-		case "quiet":
-			*quiet = true
-		case "v":
-			*verbose1 = true
-		case "vv":
-			*verbose2 = true
-		case "vvv":
-			*verbose3 = true
-		case "show-source":
-			*showSourceFlag = true
-		case "snippet":
-			*snippet = true
-		case "crawl":
-			*crawl = true
-		case "crawl-all":
-			*crawlAll = true
-		case "crawl-permute":
-			*crawlPermute = true
-		case "no-methods":
-			*noMethods = true
-		case "no-param-replay":
-			*noParamReplay = true
-		case "no-template-dedup":
-			*noTemplateDedup = true
-		case "no-well-known":
-			*noWellKnown = true
-		case "download-browser":
-			*downloadBrowser = true
-		case "no-download-browser":
-			*noDownloadBrowser = true
-		case "no-source-maps":
-			*noSourceMaps = true
-		case "methods":
-			val := ""
-			if len(parts) == 2 {
-				val = parts[1]
-			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				val = args[i+1]
-				i++
-			}
-			if val != "" {
-				*methods = val
-			}
-		case "crawl-resume":
-			val := ""
-			if len(parts) == 2 {
-				val = parts[1]
-			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				val = args[i+1]
-				i++
-			}
-			if val != "" {
-				*crawlResume = val
-			}
-		case "rate-limit":
-			val := ""
-			if len(parts) == 2 {
-				val = parts[1]
-			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				val = args[i+1]
-				i++
-			}
-			if f, err := strconv.ParseFloat(val, 64); err == nil {
-				*rateLimit = f
-			}
-		case "rate-limit-jitter":
-			val := ""
-			if len(parts) == 2 {
-				val = parts[1]
-			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				val = args[i+1]
-				i++
-			}
-			if f, err := strconv.ParseFloat(val, 64); err == nil {
-				*rateLimitJitter = f
-			}
-		case "retries":
-			val := ""
-			if len(parts) == 2 {
-				val = parts[1]
-			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				val = args[i+1]
-				i++
-			}
-			if n, err := strconv.Atoi(val); err == nil {
-				*retries = n
-			}
-		case "crawl-depth", "crawl-max-pages", "crawl-workers", "crawl-permute-max", "template-sample-max":
-			val := ""
-			if len(parts) == 2 {
-				val = parts[1]
-			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				val = args[i+1]
-				i++
-			}
-			if n, err := strconv.Atoi(val); err == nil {
-				switch name {
-				case "crawl-depth":
-					*crawlDepth = n
-				case "crawl-max-pages":
-					*crawlMaxPages = n
-				case "crawl-workers":
-					*crawlWorkers = n
-				case "template-sample-max":
-					*templateSampleMax = n
-				default:
-					*crawlPermuteMax = n
-				}
-			}
-		case "insecure":
-			val := "true"
-			if len(parts) == 2 {
-				val = parts[1]
-			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				val = args[i+1]
-				i++
-			}
-			if b, err := strconv.ParseBool(val); err == nil {
-				*insecure = b
-			} else {
-				*insecure = true
-			}
-		case "timeout":
-			val := ""
-			if len(parts) == 2 {
-				val = parts[1]
-			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				val = args[i+1]
-				i++
-			}
-			if t, err := strconv.Atoi(val); err == nil {
-				*timeout = t
-			}
-		case "http-timeout":
-			val := ""
-			if len(parts) == 2 {
-				val = parts[1]
-			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				val = args[i+1]
-				i++
-			}
-			if t, err := strconv.Atoi(val); err == nil {
-				*httpTimeout = t
-			}
-		case "header":
-			val := ""
-			if len(parts) == 2 {
-				val = parts[1]
-			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				val = args[i+1]
-				i++
-			}
-			if val != "" {
-				headerFlags = append(headerFlags, val)
-			}
-		case "format", "allow", "rules", "output", "targets", "plugins", "chrome-path", "browser-dest":
-			if i+1 < len(args) {
-				val := args[i+1]
-				i++
-				switch name {
-				case "format":
-					*format = val
-				case "allow":
-					*allowFile = val
-				case "rules":
-					*rulesFile = val
-				case "output":
-					*outFile = val
-				case "targets":
-					*targetsFile = val
-				case "plugins":
-					*pluginsFlag = val
-				case "chrome-path":
-					*chromePath = val
-				case "browser-dest":
-					*browserDest = val
-				}
-			}
-		default:
-			leftover = append(leftover, a)
-		}
+	if err := flag.CommandLine.Parse(reorderFlagArgs(os.Args[1:], flag.CommandLine)); err != nil {
+		log.Fatal(err)
 	}
+	leftover := flag.Args()
 
 	// Browser provisioning must be configured before any render (or an explicit
 	// -download-browser) resolves a browser. An explicit -chrome-path wins;

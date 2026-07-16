@@ -2,6 +2,7 @@ package jsast
 
 import (
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -53,5 +54,6 @@ func ExtractValues(data []byte) []string {
 	for v := range uniq {
 		out = append(out, v)
 	}
+	sort.Strings(out)
 	return out
 }

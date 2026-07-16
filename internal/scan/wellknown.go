@@ -307,7 +307,14 @@ func looksLikeSitemap(raw string) bool {
 // returns its body as a string, capped so a large sitemap cannot exhaust memory.
 // ok is false on any transport error or non-2xx status.
 func fetchWellKnownBody(u string) (string, bool) {
-	resp, err := fetchURLResponse(u)
+	parsed, err := url.Parse(u)
+	if err != nil || parsed.Hostname() == "" {
+		return "", false
+	}
+	// Sitemap and robots URLs are target-controlled. Keep their redirect chain in
+	// the original URL's scope so an apparently safe sitemap cannot redirect the
+	// scanner to a loopback, cloud-metadata or unrelated host.
+	resp, err := fetchURLResponseScoped(u, parsed.Hostname(), false)
 	if err != nil {
 		return "", false
 	}

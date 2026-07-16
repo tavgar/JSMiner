@@ -93,15 +93,15 @@ var baseJSRules = map[string]bool{
 	"jwt":        true,
 	"google_api": true,
 	// Provider token formats are JS-relevant secrets and run in safe mode too.
-	"github_token":  true,
-	"github_pat":    true,
-	"stripe_key":    true,
-	"slack_token":   true,
-	"gitlab_pat":    true,
-	"npm_token":     true,
-	"sendgrid_key":  true,
-	"google_oauth":  true,
-	"aws_akia":      true,
+	"github_token": true,
+	"github_pat":   true,
+	"stripe_key":   true,
+	"slack_token":  true,
+	"gitlab_pat":   true,
+	"npm_token":    true,
+	"sendgrid_key": true,
+	"google_oauth": true,
+	"aws_akia":     true,
 }
 
 // default patterns (simplified)
@@ -246,8 +246,15 @@ func (e *Extractor) LoadAllowlist(path string) error {
 	return sc.Err()
 }
 
-func isJSFile(path string) bool {
-	ext := strings.ToLower(filepath.Ext(path))
+func isJSFile(source string) bool {
+	// URL query strings and fragments are not part of the filename. Without
+	// stripping them, /app.js?v=123 is seen as having extension ".js?v=123" and
+	// safe mode silently skips a perfectly ordinary cache-busted bundle.
+	if u, err := url.Parse(source); err == nil && u.Path != "" &&
+		(u.Scheme != "" || u.RawQuery != "" || u.Fragment != "") {
+		source = u.Path
+	}
+	ext := strings.ToLower(filepath.Ext(source))
 	for _, e := range jsExts {
 		if ext == e {
 			return true
@@ -293,12 +300,19 @@ func (e *Extractor) isAllowed(source string) bool {
 
 // ScanReader scans an io.Reader and returns matches
 func (e *Extractor) ScanReader(source string, r io.Reader) ([]Match, error) {
+	return e.scanReader(source, r, source == "stdin" || isJSFile(source))
+}
+
+// scanReader is ScanReader with an explicit JavaScript classification. Network
+// responses can be JavaScript by Content-Type even when their URL is
+// extensionless, which cannot be expressed through the public source string.
+func (e *Extractor) scanReader(source string, r io.Reader, isJS bool) ([]Match, error) {
 	var matches []Match
 	if e.isAllowed(source) {
 		io.Copy(io.Discard, r)
 		return matches, nil
 	}
-	if e.safeMode && source != "stdin" && !isJSFile(source) {
+	if e.safeMode && !isJS {
 		io.Copy(io.Discard, r)
 		return matches, nil
 	}
@@ -385,13 +399,31 @@ func (e *Extractor) ScanReaderWithEndpoints(source string, r io.Reader) ([]Match
 	if err != nil {
 		return nil, err
 	}
+	return e.scanDataWithEndpoints(source, data, source == "stdin" || isJSFile(source))
+}
 
-	matches, err := e.ScanReader(source, bytes.NewReader(data))
+// scanDataWithEndpoints scans already-buffered data, using isJS as the
+// authoritative source classification. It combines raw regex scanning with the
+// lightweight AST/value pass so secrets assembled from adjacent string literals
+// are found during normal URL and CLI scans, not only through the standalone
+// ScanReaderAST test API.
+func (e *Extractor) scanDataWithEndpoints(source string, data []byte, isJS bool) ([]Match, error) {
+	if e.isAllowed(source) {
+		return nil, nil
+	}
+	matches, err := e.scanReader(source, bytes.NewReader(data), isJS)
 	if err != nil {
 		return nil, err
 	}
+	if isJS {
+		// Raw regex scanning already covers values that appear contiguously in the
+		// source. Limit the additional AST pass to reconstructed values so a large
+		// bundle does not run hundreds of rules over every ordinary string twice.
+		matches = append(matches, e.scanASTData(source, data, true)...)
+		matches = UniqueMatches(matches)
+	}
 
-	if source == "stdin" || isJSFile(source) || looksLikeJSON(data) {
+	if isJS || looksLikeJSON(data) {
 		seen := make(map[string]struct{})
 		for _, ep := range parseJSEndpoints(data) {
 			p := "endpoint_path"
@@ -421,16 +453,17 @@ func (e *Extractor) ScanReaderWithEndpoints(source string, r io.Reader) ([]Match
 // relative paths. Only JavaScript files are processed when safe mode is
 // enabled.
 func (e *Extractor) ScanReaderPostRequests(source string, r io.Reader) ([]Match, error) {
-	if e.safeMode && source != "stdin" && !isJSFile(source) {
-		io.Copy(io.Discard, r)
-		return nil, nil
-	}
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return nil, err
 	}
+	return e.scanDataPostRequests(source, data, source == "stdin" || isJSFile(source))
+}
 
-	if source != "stdin" && !isJSFile(source) {
+// scanDataPostRequests is the POST equivalent of scanDataWithEndpoints, accepting
+// an explicit JavaScript classification for extensionless network responses.
+func (e *Extractor) scanDataPostRequests(source string, data []byte, isJS bool) ([]Match, error) {
+	if e.isAllowed(source) || !isJS {
 		return nil, nil
 	}
 
@@ -649,9 +682,22 @@ func (e *Extractor) ScanReaderAST(source string, r io.Reader) ([]Match, error) {
 	if err != nil {
 		return nil, err
 	}
+	matches := e.scanASTData(source, data, false)
+	if e.snippet {
+		attachSnippets(data, matches)
+	}
+	return matches, nil
+}
+
+// scanASTData applies the configured rules to literal values and simple
+// literal-concatenation assignments recovered from JavaScript source.
+func (e *Extractor) scanASTData(source string, data []byte, reconstructedOnly bool) []Match {
 	var matches []Match
 	for _, val := range jsast.ExtractValues(data) {
 		b := []byte(val)
+		if reconstructedOnly && bytes.Contains(data, b) {
+			continue
+		}
 		for _, rule := range e.rules {
 			if e.safeMode && !e.isJSRule(rule.MatchName()) {
 				continue
@@ -662,8 +708,5 @@ func (e *Extractor) ScanReaderAST(source string, r io.Reader) ([]Match, error) {
 			}
 		}
 	}
-	if e.snippet {
-		attachSnippets(data, matches)
-	}
-	return matches, nil
+	return matches
 }

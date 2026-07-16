@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"hash/fnv"
 	"io"
+	"net/http"
 	"net/url"
 	"path"
 	"regexp"
@@ -121,7 +122,7 @@ func (c *autoCalibrator) calibrate(seedURL string) int {
 	c.levelDone["/"] = struct{}{}
 	counts := make(map[string]int)
 	for _, p := range calibrationProbePaths() {
-		resp, err := fetchURLResponse(base + p)
+		resp, err := fetchURLResponseMethodSameScope(base+p, http.MethodGet, "")
 		if err != nil {
 			continue
 		}
@@ -266,7 +267,7 @@ func (c *autoCalibrator) ensureLevel(lvl string) {
 
 	counts := make(map[string]int)
 	for _, p := range levelProbePaths(lvl) {
-		resp, err := fetchURLResponse(c.base + p)
+		resp, err := fetchURLResponseMethodSameScope(c.base+p, http.MethodGet, "")
 		if err != nil {
 			continue
 		}
@@ -317,7 +318,7 @@ func (c *autoCalibrator) ensureMethodLevel(method, lvl string) {
 
 	counts := make(map[string]int)
 	for _, p := range levelProbePaths(lvl) {
-		resp, err := fetchURLResponseMethod(c.base+p, method, "")
+		resp, err := fetchURLResponseMethodSameScope(c.base+p, method, "")
 		if err != nil {
 			continue
 		}
