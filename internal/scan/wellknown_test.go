@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -261,4 +262,78 @@ func TestWellKnownSameOriginStillFollowed(t *testing.T) {
 	if !found {
 		t.Fatalf("same-origin sitemap page not discovered; got %v", got)
 	}
+}
+
+// TestDiscoverWellKnownStandardPaths verifies the standardized .well-known URIs
+// (RFC 8615) are seeded even on a site with no robots.txt or sitemap, so their
+// server-published metadata documents are crawled.
+func TestDiscoverWellKnownStandardPaths(t *testing.T) {
+	ResetThrottle()
+	// A bare server: everything 404s. discoverWellKnownURLs should still return the
+	// standard .well-known seeds, since they are added unconditionally (the crawl,
+	// not discovery, is what drops the ones that 404).
+	srv := httptest.NewServer(http.NotFoundHandler())
+	defer srv.Close()
+
+	got := map[string]bool{}
+	urls, _ := discoverWellKnownURLs(srv.URL)
+	for _, u := range urls {
+		got[u] = true
+	}
+	for _, p := range []string{
+		"/.well-known/openid-configuration",
+		"/.well-known/oauth-authorization-server",
+		"/.well-known/security.txt",
+		"/.well-known/apple-app-site-association",
+		"/.well-known/assetlinks.json",
+	} {
+		if !got[srv.URL+p] {
+			t.Errorf("standard well-known seed %q missing (got %v)", p, keysOf(got))
+		}
+	}
+}
+
+// TestCrawlFollowsOpenIDConfiguration verifies a crawl seeded from the standard
+// .well-known set fetches /.well-known/openid-configuration and follows the OAuth
+// endpoints it advertises to reach a token endpoint holding a secret — API surface
+// nothing on the site links to.
+func TestCrawlFollowsOpenIDConfiguration(t *testing.T) {
+	ResetThrottle()
+	const secret = "eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoiYWRtaW4ifQ.openidTokenEndpointAAA"
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "text/html")
+			io.WriteString(w, `<html><body>home</body></html>`)
+		case "/.well-known/openid-configuration":
+			// A real discovery document uses absolute URLs; the test server's host is
+			// an IP literal (dropped by the endpoint validator as noise), so use rooted
+			// paths, which resolve against this same origin and exercise the same follow.
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{"issuer":"/","authorization_endpoint":"/oauth/authorize","token_endpoint":"/oauth/token"}`)
+		case "/oauth/token":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"note":"client secret %s"}`, secret)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	e := NewExtractor(false, false)
+	opts := DefaultCrawlOptions()
+	opts.Concurrency = 1 // deterministic for the test
+	ms, err := e.ScanURLCrawl(srv.URL, false, false, false, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range ms {
+		if m.Value == secret {
+			return
+		}
+	}
+	t.Fatalf("secret behind the OAuth token endpoint (via openid-configuration) was not reached")
 }
