@@ -256,6 +256,28 @@ func isJSFile(path string) bool {
 	return false
 }
 
+// looksLikeJSON reports whether data appears to be a JSON document — its first
+// non-whitespace byte is `{` or `[`. Crawled API responses are frequently JSON
+// served under an extensionless URL (no .js/.json in the path), so endpoint
+// extraction keys on the content here, not only the filename. That is what lets a
+// crawl follow the hypermedia links an API body carries — href/self/next and the
+// nested targets of JSON:API `links` or HAL `_links` — to reach paginated and
+// related resources nothing in the HTML or JS references. The links surface as
+// ordinary quoted URL/path strings, which the endpoint patterns already capture.
+func looksLikeJSON(data []byte) bool {
+	for _, b := range data {
+		switch b {
+		case ' ', '\t', '\r', '\n':
+			continue
+		case '{', '[':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
+}
+
 func (e *Extractor) isJSRule(name string) bool {
 	return e.jsRules[name]
 }
@@ -369,7 +391,7 @@ func (e *Extractor) ScanReaderWithEndpoints(source string, r io.Reader) ([]Match
 		return nil, err
 	}
 
-	if source == "stdin" || isJSFile(source) {
+	if source == "stdin" || isJSFile(source) || looksLikeJSON(data) {
 		seen := make(map[string]struct{})
 		for _, ep := range parseJSEndpoints(data) {
 			p := "endpoint_path"
