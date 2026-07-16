@@ -6,6 +6,8 @@ import (
 	"path"
 	"regexp"
 	"strings"
+
+	"github.com/tavgar/JSMiner/internal/ai"
 )
 
 // crawlFrontier is the priority queue of pending crawl targets. It preserves the
@@ -18,6 +20,11 @@ import (
 // first-out behaviour and the serial crawl stays deterministic.
 type crawlFrontier struct {
 	h *targetHeap
+	// policy, when non-nil, adds a per-URL bonus to the base score at push time so
+	// a synthesised prioritisation policy steers ordering. It is applied purely in
+	// Go and is deterministic given the policy; a nil policy leaves ordering on the
+	// built-in scorer alone.
+	policy *ai.Policy
 }
 
 func newCrawlFrontier() *crawlFrontier {
@@ -26,9 +33,26 @@ func newCrawlFrontier() *crawlFrontier {
 
 func (f *crawlFrontier) len() int { return f.h.Len() }
 
+// score rates a URL as the built-in yield score plus any policy bonus.
+func (f *crawlFrontier) score(rawURL string) int {
+	return targetScore(rawURL) + f.policy.Bonus(rawURL)
+}
+
+// setPolicy installs a prioritisation policy and re-scores the pending targets so
+// items already queued (the seed and well-known seeds) are reordered by it too. It
+// must be called before the crawl loop begins dequeuing, so the policy governs the
+// whole run rather than only targets discovered after it was set.
+func (f *crawlFrontier) setPolicy(p *ai.Policy) {
+	f.policy = p
+	for i := range f.h.items {
+		f.h.items[i].score = f.score(f.h.items[i].target.url)
+	}
+	heap.Init(f.h)
+}
+
 // push enqueues t, scoring it once from its URL so ordering costs nothing at pop.
 func (f *crawlFrontier) push(t crawlTarget) {
-	heap.Push(f.h, frontierItem{target: t, score: targetScore(t.url), seq: f.h.seq})
+	heap.Push(f.h, frontierItem{target: t, score: f.score(t.url), seq: f.h.seq})
 	f.h.seq++
 }
 
