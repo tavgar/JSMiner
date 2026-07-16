@@ -299,7 +299,17 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 	// reaches server-published paths that nothing links to. They enter at depth 0,
 	// like the seed, so their own discovered links get the full depth budget.
 	if opts.DiscoverWellKnown {
-		for _, raw := range discoverWellKnownURLs(origin) {
+		wkURLs, crawlDelay := discoverWellKnownURLs(origin)
+		// Honour the site's robots.txt Crawl-delay as a per-host pacing floor, so the
+		// crawl never requests faster than the site asked for. It is combined with
+		// (never lowers) any -rate-limit the user set and, per the throttle's own
+		// logic, staying under the limit protects secret recall by keeping pages from
+		// coming back as 429 shells.
+		if crawlDelay > 0 {
+			SetHostRateFloor(baseHost, crawlDelay)
+			vlog(1, "[crawl] honouring robots.txt Crawl-delay %s for %s", crawlDelay, baseHost)
+		}
+		for _, raw := range wkURLs {
 			u, err := url.Parse(raw)
 			if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 				continue

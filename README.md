@@ -122,7 +122,11 @@ Flags:
   default a crawl also fetches `robots.txt` (following its `Allow`/`Disallow`
   directories and `Sitemap:` pointers) and the XML sitemaps it and convention
   advertise, then enqueues those server-published URLs — reaching pages and API
-  roots that nothing links to and that static JS scanning never reveals.
+  roots that nothing links to and that static JS scanning never reveals. The
+  `robots.txt` `Crawl-delay` for the catch-all (`User-agent: *`) group is also
+  honoured as a per-host pacing floor (clamped to 30s), combined with — never
+  loosening — any `-rate-limit` you set. Disabling well-known discovery also
+  stops the `Crawl-delay` from being read.
 - `-rate-limit` cap outbound HTTP at N requests per second across the whole scan
   (default `0`, no proactive limit). Independent of this, adaptive backoff is
   always on: a `429`/`503` response — seen on the Go request path or by the

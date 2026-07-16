@@ -59,6 +59,13 @@ type requestThrottle struct {
 
 	hosts map[string]*hostThrottle // per-host pacing state, keyed by hostname
 
+	// hostFloor is a per-host minimum inter-request gap that no amount of decay
+	// drops below, used to honour a site's robots.txt Crawl-delay: the site has
+	// stated how fast it is willing to be crawled, so the crawl never paces faster
+	// than that against that host even when the global base gap is smaller. Keyed by
+	// hostname; absent hosts have no floor.
+	hostFloor map[string]time.Duration
+
 	// sleep is the blocking wait, indirected so tests can observe scheduling
 	// without spending wall-clock time. now and rnd are likewise injectable.
 	sleep func(time.Duration)
@@ -121,10 +128,22 @@ var globalThrottle = newRequestThrottle()
 func (t *requestThrottle) host(h string) *hostThrottle {
 	hs := t.hosts[h]
 	if hs == nil {
-		hs = &hostThrottle{curGap: t.baseGap}
+		hs = &hostThrottle{curGap: t.baseGapFor(h)}
 		t.hosts[h] = hs
 	}
 	return hs
+}
+
+// baseGapFor returns the effective base gap for host h: the larger of the global
+// configured base gap and any per-host robots.txt Crawl-delay floor. It is the
+// floor that adaptive decay eases back toward, so a host's pacing never recovers
+// below its stated Crawl-delay. The caller holds t.mu.
+func (t *requestThrottle) baseGapFor(h string) time.Duration {
+	g := t.baseGap
+	if f := t.hostFloor[h]; f > g {
+		g = f
+	}
+	return g
 }
 
 // hostOf extracts the hostname the throttle keys on from a raw URL. An unparseable
@@ -154,6 +173,31 @@ func SetRateLimit(perSecond float64) {
 		if hs.curGap < globalThrottle.baseGap {
 			hs.curGap = globalThrottle.baseGap
 		}
+	}
+}
+
+// SetHostRateFloor records a minimum inter-request gap for a single host, used to
+// honour that site's robots.txt Crawl-delay. The floor is combined with (never
+// lowers) the global base gap and is the level adaptive decay eases back toward,
+// so the crawl never paces faster than the site asked for that host. A larger
+// floor replaces a smaller one; a non-positive gap is ignored. Safe to call before
+// or during a scan.
+func SetHostRateFloor(host string, gap time.Duration) {
+	if gap <= 0 {
+		return
+	}
+	globalThrottle.mu.Lock()
+	defer globalThrottle.mu.Unlock()
+	if globalThrottle.hostFloor == nil {
+		globalThrottle.hostFloor = make(map[string]time.Duration)
+	}
+	if gap > globalThrottle.hostFloor[host] {
+		globalThrottle.hostFloor[host] = gap
+	}
+	// Apply immediately so the floor takes effect on the very next request.
+	hs := globalThrottle.host(host)
+	if hs.curGap < gap {
+		hs.curGap = gap
 	}
 }
 
@@ -191,6 +235,7 @@ func ResetThrottle() {
 	globalThrottle.mu.Lock()
 	defer globalThrottle.mu.Unlock()
 	globalThrottle.hosts = make(map[string]*hostThrottle)
+	globalThrottle.hostFloor = nil
 }
 
 // wait blocks until the throttle permits the next request to the empty-key host.
@@ -380,14 +425,15 @@ func (t *requestThrottle) decay(h string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	hs := t.host(h)
-	if hs.curGap <= t.baseGap {
+	base := t.baseGapFor(h)
+	if hs.curGap <= base {
 		return
 	}
 	hs.ok++
 	if hs.ok >= throttleDecayStreak {
 		hs.curGap /= 2
-		if hs.curGap < t.baseGap {
-			hs.curGap = t.baseGap
+		if hs.curGap < base {
+			hs.curGap = base
 		}
 		hs.ok = 0
 		vlog(3, "[throttle] %q recovered -> gap now %s", h, hs.curGap.Round(time.Millisecond))
