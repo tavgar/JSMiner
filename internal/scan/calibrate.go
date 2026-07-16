@@ -187,6 +187,27 @@ func (c *autoCalibrator) skipPage(pageURL string, status int, body []byte) bool 
 	return false
 }
 
+// skipContent reports whether a non-HTML resource body has already been scanned
+// in this crawl, recording its hash the first time it is seen. It lets the crawl
+// skip re-scanning a JS bundle served under a second content-hashed filename
+// (app.a1b2.js vs app.c3d4.js) — identical bytes yield identical rule, AST and
+// source-map matches, which UniqueMatches would collapse anyway — so the expensive
+// scan and source-map recovery run once per distinct bundle instead of once per
+// name. It shares seenBodies with page dedup, which is safe: a JS bundle and an
+// HTML page never share a body hash. Callers still follow the bundle's imports
+// after a skip, so a relative chunk that resolves under this bundle's own path is
+// not missed.
+func (c *autoCalibrator) skipContent(body []byte) bool {
+	h := hashBody(body)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.seenBodies[h]; ok {
+		return true
+	}
+	c.seenBodies[h] = struct{}{}
+	return false
+}
+
 // structuralKey identifies a page's structural class: its host paired with the
 // structural signature of its body. The host is included so that two hosts which
 // happen to share a template are never collapsed into one class.

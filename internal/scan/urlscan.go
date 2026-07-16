@@ -353,27 +353,54 @@ func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited *vi
 		return append(matches, e.scanHTMLState(finalURL, baseHost, data, nil, endpoints, visited, external, render)...), nil
 	}
 
-	// treat as JavaScript or other
-	reader := bytes.NewReader(data)
-	ms, err := e.ScanReaderWithEndpoints(finalURL, reader)
-	if err != nil {
-		return nil, err
-	}
-	if endpoints {
-		ms = FilterEndpointMatches(ms)
-	}
-	matches = append(matches, ms...)
-
-	// Recover and scan any original source the bundle advertises via a source
-	// map, so secrets and endpoints that only survive in the pre-bundled source
-	// are found too.
-	if rec := e.recoverSourceMap(finalURL, data, resp.Header, baseHost, external, visited, false); rec != nil {
-		if endpoints {
-			rec = FilterEndpointMatches(rec)
+	// Treat as JavaScript or other. When the same bytes have already been scanned
+	// in this crawl — a webpack bundle served under a second content-hashed name,
+	// say — its rule, AST and source-map matches were already produced (and any
+	// repeats collapse in UniqueMatches), so skip that work. Its imports are still
+	// followed below: a relative import resolves against this URL, so an identical
+	// bundle at a different path can still reach a fresh chunk.
+	if e.calibrator != nil && e.calibrator.skipContent(data) {
+		vlog(1, "[crawl] skip re-scan (duplicate content) %s", finalURL)
+	} else {
+		reader := bytes.NewReader(data)
+		ms, err := e.ScanReaderWithEndpoints(finalURL, reader)
+		if err != nil {
+			return nil, err
 		}
-		matches = append(matches, rec...)
+		if endpoints {
+			ms = FilterEndpointMatches(ms)
+		}
+		matches = append(matches, ms...)
+
+		// Recover and scan any original source the bundle advertises via a source
+		// map, so secrets and endpoints that only survive in the pre-bundled source
+		// are found too.
+		if rec := e.recoverSourceMap(finalURL, data, resp.Header, baseHost, external, visited, false); rec != nil {
+			if endpoints {
+				rec = FilterEndpointMatches(rec)
+			}
+			matches = append(matches, rec...)
+		}
 	}
 
+	for _, imp := range inScopeJSImports(data, finalURL, baseHost, external) {
+		vlog(3, "follow import %s (from %s)", imp, finalURL)
+		ms, err := e.scanURL(imp, baseHost, endpoints, visited, external, render)
+		if err != nil {
+			continue
+		}
+		matches = append(matches, ms...)
+	}
+	return matches, nil
+}
+
+// inScopeJSImports resolves the ES-module imports found in a JS body to the
+// absolute http(s) URLs the crawl should follow. Each import is resolved against
+// finalURL (the bundle's own location, so relative specifiers land under its
+// path), kept only when it is http(s), and — unless external is set — constrained
+// to the seed scope.
+func inScopeJSImports(data []byte, finalURL, baseHost string, external bool) []string {
+	var out []string
 	for _, imp := range extractJSImports(data) {
 		abs := resolveURL(finalURL, imp)
 		u, err := url.Parse(abs)
@@ -384,15 +411,10 @@ func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited *vi
 			continue
 		}
 		if external || sameScope(baseHost, u.Hostname()) {
-			vlog(3, "follow import %s (from %s)", u.String(), finalURL)
-			ms, err := e.scanURL(u.String(), baseHost, endpoints, visited, external, render)
-			if err != nil {
-				continue
-			}
-			matches = append(matches, ms...)
+			out = append(out, u.String())
 		}
 	}
-	return matches, nil
+	return out
 }
 
 // scanURLPosts performs recursive scanning like scanURL but returns only POST
@@ -457,35 +479,32 @@ func (e *Extractor) scanURLPosts(urlStr, baseHost string, visited *visitedSet, e
 		return append(matches, e.scanHTMLStatePosts(finalURL, baseHost, data, nil, visited, external, render)...), nil
 	}
 
-	reader := bytes.NewReader(data)
-	ms, err := e.ScanReaderPostRequests(finalURL, reader)
-	if err != nil {
-		return nil, err
-	}
-	matches = append(matches, ms...)
+	// Skip re-scanning a bundle whose bytes were already scanned in this crawl (the
+	// same content under a second content-hashed name); its imports are still
+	// followed below so reachability is unchanged.
+	if e.calibrator != nil && e.calibrator.skipContent(data) {
+		vlog(1, "[crawl] skip re-scan (duplicate content) %s", finalURL)
+	} else {
+		reader := bytes.NewReader(data)
+		ms, err := e.ScanReaderPostRequests(finalURL, reader)
+		if err != nil {
+			return nil, err
+		}
+		matches = append(matches, ms...)
 
-	// Recover POST endpoints from any original source the bundle advertises via
-	// a source map.
-	if rec := e.recoverSourceMap(finalURL, data, resp.Header, baseHost, external, visited, true); rec != nil {
-		matches = append(matches, rec...)
+		// Recover POST endpoints from any original source the bundle advertises via
+		// a source map.
+		if rec := e.recoverSourceMap(finalURL, data, resp.Header, baseHost, external, visited, true); rec != nil {
+			matches = append(matches, rec...)
+		}
 	}
 
-	for _, imp := range extractJSImports(data) {
-		abs := resolveURL(finalURL, imp)
-		u, err := url.Parse(abs)
+	for _, imp := range inScopeJSImports(data, finalURL, baseHost, external) {
+		ms, err := e.scanURLPosts(imp, baseHost, visited, external, render)
 		if err != nil {
 			continue
 		}
-		if u.Scheme != "http" && u.Scheme != "https" {
-			continue
-		}
-		if external || sameScope(baseHost, u.Hostname()) {
-			ms, err := e.scanURLPosts(u.String(), baseHost, visited, external, render)
-			if err != nil {
-				continue
-			}
-			matches = append(matches, ms...)
-		}
+		matches = append(matches, ms...)
 	}
 	return matches, nil
 }
