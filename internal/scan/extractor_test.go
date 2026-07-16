@@ -268,7 +268,7 @@ func TestSensitiveDefaults(t *testing.T) {
 	}
 	found := map[string]bool{}
 	for _, m := range matches {
-		if strings.HasPrefix(m.Pattern, "nuclei_") {
+		if strings.HasPrefix(m.Pattern, "nuclei-") {
 			continue
 		}
 		found[m.Pattern] = true
@@ -289,7 +289,7 @@ func TestShortPasswordIgnored(t *testing.T) {
 	}
 	var filtered []Match
 	for _, m := range matches {
-		if strings.HasPrefix(m.Pattern, "nuclei_") {
+		if strings.HasPrefix(m.Pattern, "nuclei-") {
 			continue
 		}
 		filtered = append(filtered, m)

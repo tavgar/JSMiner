@@ -2,6 +2,7 @@ package scan
 
 import (
 	"fmt"
+	"strings"
 )
 
 var nucleiRegexes = []string{
@@ -734,9 +735,97 @@ var nucleiRegexes = []string{
 	`glsa_[A-Za-z0-9]{32}_[A-Fa-f0-9]{8}`,
 }
 
+// nucleiSpecialNames maps the strict, self-describing patterns (private keys,
+// cloud access keys, webhook URLs, ...) to the provider/credential they detect.
+// These have no keyword to derive a name from, so they are named explicitly.
+// Prefixes were confirmed against public cloud-key references: LTAI=Alibaba,
+// AKID=Tencent, JDC_=JD Cloud, AKLT/AKTP=Volcengine, AIza=Google, glpat=GitLab,
+// ghp/gho/...=GitHub, eyJrIjoi/glc_/glsa_=Grafana, and the wx/ww/gh_ trio is the
+// WeChat family (AppID / WeCom CorpID / Official-Account original ID).
+var nucleiSpecialNames = map[string]string{
+	`["']?[-]+BEGIN \w+ PRIVATE KEY[-]+`: "private-key",
+	`LTAI[A-Za-z\d]{12,30}`:              "alibaba-cloud-access-key-id",
+	`AKID[A-Za-z\d]{13,40}`:              "tencent-cloud-secret-id",
+	`JDC_[0-9A-Z]{25,40}`:                "jd-cloud-access-key",
+	`["']?(?:A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}["']?`: "aws-access-key-id",
+	`(?:AKLT|AKTP)[a-zA-Z0-9]{35,50}`:                                               "volcengine-access-key",
+	`AKLT[a-zA-Z0-9-_]{16,28}`:                                                      "volcengine-access-key-short",
+	`AIza[0-9A-Za-z_\-]{35}`:                                                        "google-api-key",
+	`[Bb]earer\s+[a-zA-Z0-9\-=._+/\\]{20,500}`:                                      "bearer-token",
+	`[Bb]asic\s+[A-Za-z0-9+/]{18,}={0,2}`:                                           "basic-auth-header",
+	`["''\[]*[Aa]uthorization["''\]]*\s*[:=]\s*[''"]?\b(?:[Tt]oken\s+)?[a-zA-Z0-9\-_+/]{20,500}[''"]?`: "authorization-header",
+	`(glpat-[a-zA-Z0-9\-=_]{20,22})`:                            "gitlab-personal-access-token",
+	`((?:ghp|gho|ghu|ghs|ghr|github_pat)_[a-zA-Z0-9_]{36,255})`: "github-token",
+	`APID[a-zA-Z0-9]{32,42}`:                                    "apid-access-key",
+	`["'](wx[a-z0-9]{15,18})["']`:                               "wechat-appid",
+	`["'](ww[a-z0-9]{15,18})["']`:                               "wecom-corpid",
+	`["'](gh_[a-z0-9]{11,13})["']`:                              "wechat-official-account-id",
+	`(?:admin_?pass|password|[a-z]{3,15}_?password|user_?pass|user_?pwd|admin_?pwd)\\?['"]*\s*[:=]\s*\\?['"][a-z0-9!@#$%&*]{5,20}\\?['"]`: "password-in-source",
+	`https:\/\/qyapi\.weixin\.qq\.com\/cgi\-bin\/webhook\/send\?key=[a-zA-Z0-9\-]{25,50}`:                                                 "wecom-webhook",
+	`https:\/\/oapi\.dingtalk\.com\/robot\/send\?access_token=[a-z0-9]{50,80}`:                                                            "dingtalk-webhook",
+	`https:\/\/open\.feishu\.cn\/open\-apis\/bot\/v2\/hook\/[a-z0-9\-]{25,50}`:                                                            "feishu-webhook",
+	`https:\/\/hooks\.slack\.com\/services\/[a-zA-Z0-9\-_]{6,12}\/[a-zA-Z0-9\-_]{6,12}\/[a-zA-Z0-9\-_]{15,24}`:                            "slack-webhook",
+	`eyJrIjoi[a-zA-Z0-9\-_+/]{50,100}={0,2}`:                                                                                              "grafana-api-key",
+	`glc_[A-Za-z0-9\-_+/]{32,200}={0,2}`:                                                                                                  "grafana-cloud-access-policy-token",
+	`glsa_[A-Za-z0-9]{32}_[A-Fa-f0-9]{8}`:                                                                                                 "grafana-service-account-token",
+}
+
+// nucleiKeywordName derives a rule name from a "keyword <sep> value" pattern by
+// taking the keyword that precedes the `<sep> value` tail. The keyword is the
+// credential's actual name (e.g. `zopim[_-]?account[_-]?key` -> zopim-account-key),
+// which is exactly how the upstream nuclei credentials-disclosure template
+// identifies it. Returns "" if pat has no recognizable keyword.
+func nucleiKeywordName(pat string) string {
+	// The keyword is everything before the `[=:]` separator. Some variants put an
+	// optional-whitespace class (`[^\S\r\n]*`) right before it; drop that so it
+	// does not leak into the slug. slugify then strips the surrounding quote and
+	// character-class punctuation (`["']?`, `[_-]?`, `[-_]?`, ...).
+	i := strings.Index(pat, `[=:]`)
+	if i < 0 {
+		return ""
+	}
+	kw := strings.TrimSuffix(pat[:i], `[^\S\r\n]*`)
+	return slugify(kw)
+}
+
+// slugify lowercases s and collapses every run of non-alphanumeric characters
+// into a single dash, trimming leading/trailing dashes.
+func slugify(s string) string {
+	var b strings.Builder
+	dash := true // suppress a leading dash
+	for _, r := range strings.ToLower(s) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			dash = false
+			continue
+		}
+		if !dash {
+			b.WriteByte('-')
+			dash = true
+		}
+	}
+	return strings.TrimRight(b.String(), "-")
+}
+
 func init() {
+	// used tracks assigned names so two patterns never share a display name;
+	// a collision gets a numeric suffix (e.g. "-2").
+	used := make(map[string]int, len(nucleiRegexes))
 	for i, pat := range nucleiRegexes {
-		name := fmt.Sprintf("nuclei_%d", i)
+		name := nucleiSpecialNames[pat]
+		if name == "" {
+			name = nucleiKeywordName(pat)
+		}
+		if name == "" {
+			name = fmt.Sprintf("%d", i)
+		}
+		name = "nuclei-" + name
+		if n := used[name]; n > 0 {
+			used[name] = n + 1
+			name = fmt.Sprintf("%s-%d", name, n+1)
+		}
+		used[name]++
+
 		// Strict, self-describing formats (private keys, cloud tokens, webhook
 		// URLs) are High: their signature makes a match almost certainly a live
 		// secret. The broad "keyword <sep> value" rules match any identifier on
