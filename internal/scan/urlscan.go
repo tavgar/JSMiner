@@ -314,11 +314,18 @@ func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited *vi
 
 	var matches []Match
 
+	// Follow RFC 8288 `Link:` response headers (rel="next"/related/…) — the header
+	// form of the hypermedia links the JSON body follower already handles — so
+	// header-paginated APIs are crawled too. Held until past the soft-404 check so a
+	// skipped page contributes nothing.
+	linkHdr := extractLinkHeaderMatches(resp.Header, finalURL)
+
 	if isHTMLContent(finalURL, resp.Header.Get("Content-Type")) {
 		if e.calibrator != nil && e.calibrator.skipPage(finalURL, resp.StatusCode, data) {
 			vlog(1, "[crawl] skip (soft-404/duplicate) %s", finalURL)
 			return matches, nil
 		}
+		matches = append(matches, linkHdr...)
 		if render {
 			// Explore application state, not just the initial DOM: scan the seed
 			// render and every state exploration reaches through interaction, so a
@@ -353,12 +360,17 @@ func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited *vi
 		return append(matches, e.scanHTMLState(finalURL, baseHost, data, nil, endpoints, visited, external, render)...), nil
 	}
 
-	// Treat as JavaScript or other. When the same bytes have already been scanned
-	// in this crawl — a webpack bundle served under a second content-hashed name,
-	// say — its rule, AST and source-map matches were already produced (and any
-	// repeats collapse in UniqueMatches), so skip that work. Its imports are still
-	// followed below: a relative import resolves against this URL, so an identical
-	// bundle at a different path can still reach a fresh chunk.
+	// Treat as JavaScript or other. Its `Link:` header references (e.g. a JSON API's
+	// rel="next") still apply even when its body is duplicate content, so record
+	// them before the skip check.
+	matches = append(matches, linkHdr...)
+
+	// When the same bytes have already been scanned in this crawl — a webpack bundle
+	// served under a second content-hashed name, say — its rule, AST and source-map
+	// matches were already produced (and any repeats collapse in UniqueMatches), so
+	// skip that work. Its imports are still followed below: a relative import
+	// resolves against this URL, so an identical bundle at a different path can still
+	// reach a fresh chunk.
 	if e.calibrator != nil && e.calibrator.skipContent(data) {
 		vlog(1, "[crawl] skip re-scan (duplicate content) %s", finalURL)
 	} else {
@@ -449,11 +461,16 @@ func (e *Extractor) scanURLPosts(urlStr, baseHost string, visited *visitedSet, e
 
 	var matches []Match
 
+	// Follow RFC 8288 `Link:` response headers so a header-paginated API surface is
+	// reached in -posts crawls too. Held until past the soft-404 check.
+	linkHdr := extractLinkHeaderMatches(resp.Header, finalURL)
+
 	if isHTMLContent(finalURL, resp.Header.Get("Content-Type")) {
 		if e.calibrator != nil && e.calibrator.skipPage(finalURL, resp.StatusCode, data) {
 			vlog(1, "[crawl] skip (soft-404/duplicate) %s", finalURL)
 			return matches, nil
 		}
+		matches = append(matches, linkHdr...)
 		if render {
 			// Explore application state so POST endpoints fired only after a
 			// client-side navigation or form submission are captured too. The
@@ -478,6 +495,10 @@ func (e *Extractor) scanURLPosts(urlStr, baseHost string, visited *visitedSet, e
 		}
 		return append(matches, e.scanHTMLStatePosts(finalURL, baseHost, data, nil, visited, external, render)...), nil
 	}
+
+	// A `Link:` header (e.g. a JSON API's rel="next") applies even when the body is
+	// duplicate content, so record it before the skip check.
+	matches = append(matches, linkHdr...)
 
 	// Skip re-scanning a bundle whose bytes were already scanned in this crawl (the
 	// same content under a second content-hashed name); its imports are still

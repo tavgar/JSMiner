@@ -50,6 +50,37 @@ var (
 	sitemapLocRe = regexp.MustCompile(`(?is)<loc>\s*(.*?)\s*</loc>`)
 )
 
+// wellKnownStandardPaths are the standardized .well-known URIs (RFC 8615) worth
+// probing on every crawl. Like robots.txt and sitemaps these are server-published
+// metadata documents, not guesses, and they enumerate API surface that nothing on
+// the site links to:
+//
+//   - the OAuth 2.0 / OpenID Connect discovery documents list a provider's entire
+//     endpoint surface — authorization, token, JWKS, userinfo, revocation,
+//     introspection and registration URLs — which the JSON endpoint extraction then
+//     lifts out as crawlable targets;
+//   - apple-app-site-association / assetlinks.json expose the deep-link paths that
+//     back a site's mobile apps, i.e. real API routes;
+//   - security.txt, nodeinfo and host-meta carry further pointers (contact/policy
+//     URLs, federation API roots, XRD/JRD resource descriptors).
+//
+// They are added as ordinary depth-0 seeds; the crawl's auto-calibration and
+// soft-404 handling quietly drop the ones a given site does not serve, so probing
+// the whole set costs only a handful of requests on sites that publish none.
+var wellKnownStandardPaths = []string{
+	"/.well-known/openid-configuration",
+	"/.well-known/oauth-authorization-server",
+	"/.well-known/oauth-protected-resource",
+	"/.well-known/security.txt",
+	"/.well-known/apple-app-site-association",
+	"/apple-app-site-association",
+	"/.well-known/assetlinks.json",
+	"/.well-known/nodeinfo",
+	"/.well-known/host-meta",
+	"/.well-known/host-meta.json",
+	"/.well-known/change-password",
+}
+
 // maxRobotsCrawlDelay caps how long a robots.txt Crawl-delay can pace the crawl.
 // A legitimate delay is a handful of seconds; a much larger value (whether a
 // mistake or a hostile stall) is clamped so honouring it cannot freeze a scan.
@@ -103,6 +134,18 @@ func discoverWellKnownURLs(origin string) (out []string, crawlDelay time.Duratio
 		}
 		for _, d := range dirs {
 			if !add(d) {
+				return out, crawlDelay
+			}
+		}
+	}
+
+	// Standardized .well-known metadata documents (RFC 8615): server-published
+	// paths that enumerate API surface — chiefly the OAuth/OIDC discovery documents
+	// — which nothing on the site links to. Added as ordinary seeds; the crawl's
+	// calibration drops the ones this site does not serve.
+	for _, p := range wellKnownStandardPaths {
+		if abs := resolveWellKnownPath(origin, p); abs != "" {
+			if !add(abs) {
 				return out, crawlDelay
 			}
 		}

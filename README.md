@@ -247,6 +247,10 @@ one form:
   links (`href`/`self`/`next`, JSON:API `links`, HAL `_links`) are followed to
   reach paginated and related resources nothing else references. Endpoint
   extraction keys on the content, so this works even for an extensionless API URL.
+- **`Link:` response headers** — RFC 8288 web-linking headers
+  (`Link: <…>; rel="next"`), the header form of the hypermedia links above and the
+  dominant pagination mechanism for header-driven REST APIs. Navigable relations
+  are followed; asset/hint relations (`stylesheet`, `preload`, `self`, …) are not.
 - **GraphQL** — a discovered `/graphql` (or `/graphiql`) endpoint is confirmed
   with an introspection query; when introspection is enabled the schema surface is
   reported as a `graphql_introspection` finding (a misconfiguration worth
@@ -265,6 +269,13 @@ one form:
   gzipped (`sitemap.xml.gz`) and nested sitemap-index documents. These surface
   server-published pages and API roots that nothing links to. Disable with
   `-no-well-known`.
+- **`.well-known` metadata** — the standardized `.well-known` URIs (RFC 8615) a
+  site publishes about itself: the OAuth 2.0 / OpenID Connect discovery documents
+  (`openid-configuration`, `oauth-authorization-server`), which enumerate a
+  provider's entire authorization/token/JWKS/userinfo endpoint surface; the mobile
+  deep-link manifests (`apple-app-site-association`, `assetlinks.json`), which map
+  app-backing API routes; and `security.txt`, `nodeinfo` and `host-meta`. Probed on
+  every crawl alongside the site declarations above; disable with `-no-well-known`.
 - **Source maps** — original, pre-bundled sources recovered from any source map a
   scanned bundle advertises (see [Source map recovery](#source-map-recovery)).
 
