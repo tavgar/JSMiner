@@ -137,6 +137,43 @@ var defaultPatterns = map[string]string{
 	"aws_akia":     `\b(?:A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}\b`,
 }
 
+// defaultSeverities ranks the default rules. Distinctive provider/cloud
+// credential formats are High (a match is almost certainly a live secret);
+// generic keyword-anchored credentials are Medium (probable secrets that
+// warrant review); everything else — emails, generic high-entropy strings — is
+// Info. Any default rule not listed here falls back to Info via severityFor.
+var defaultSeverities = map[string]string{
+	"jwt":          SeverityHigh,
+	"aws_secret":   SeverityHigh,
+	"google_api":   SeverityHigh,
+	"github_token": SeverityHigh,
+	"github_pat":   SeverityHigh,
+	"stripe_key":   SeverityHigh,
+	"slack_token":  SeverityHigh,
+	"gitlab_pat":   SeverityHigh,
+	"npm_token":    SeverityHigh,
+	"sendgrid_key": SeverityHigh,
+	"google_oauth": SeverityHigh,
+	"aws_akia":     SeverityHigh,
+
+	"bearer":   SeverityMedium,
+	"api_key":  SeverityMedium,
+	"token":    SeverityMedium,
+	"password": SeverityMedium,
+
+	"email":       SeverityInfo,
+	"long_secret": SeverityInfo,
+}
+
+// severityFor returns the configured severity for a default rule name, or Info
+// when the rule is unranked.
+func severityFor(name string) string {
+	if s, ok := defaultSeverities[name]; ok {
+		return s
+	}
+	return SeverityInfo
+}
+
 // defaultFilters attaches a post-match validation to specific default rules to
 // suppress the false positives they generate on minified/bundled JavaScript.
 // (ipv4 is handled by the dedicated, context-aware ipv4Rule instead.)
@@ -181,7 +218,7 @@ func NewExtractor(safe bool, longSecret bool) *Extractor {
 		if name == "long_secret" && !longSecret {
 			continue
 		}
-		r := newRegexRule(name, pat, "info")
+		r := newRegexRule(name, pat, severityFor(name))
 		if f, ok := defaultFilters[name]; ok {
 			r.Filter = f
 		}

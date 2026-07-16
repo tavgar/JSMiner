@@ -483,7 +483,19 @@ path: "(?:/[A-Za-z0-9._-]+)+|[A-Za-z]:\\(?:[^\\\s]+\\)*[^\\\s]+"
 See `examples/rules.yaml` for a sample file.
 
 A URL, filesystem path or `-` for stdin must be provided, or use `-targets` to supply multiple inputs. The program exits with status `1` when matches are found.
-Each match also includes a `severity` level.
+
+Each match includes a `severity` level and findings are returned ranked from
+highest to lowest severity:
+
+- `high` — distinctive credential formats (provider tokens, cloud keys, JWTs)
+  whose signature alone makes a match almost certainly a live secret.
+- `medium` — keyword-anchored credentials (`api_key = ...`, `password: ...`)
+  that are probable secrets but carry more false positives and warrant review.
+- `info` — non-secret intelligence such as endpoints, URLs, emails, paths and
+  IPs.
+
+Within a severity band, discovery order is preserved. Gathered URLs are shown as
+their own segment beneath the ranked findings.
 When scanning a single input, the JSON output omits the `source` field.
 
 ### Endpoint scanning

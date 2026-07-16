@@ -51,6 +51,11 @@ func (p *Printer) Print(w io.Writer, matches []scan.Match) error {
 	// JavaScript findings, so split them out while preserving relative order.
 	findings, gathered := splitGathered(matches)
 
+	// Rank the findings so High severity leads, then Medium, then Info. The sort
+	// is stable, so discovery order is preserved within each severity band. The
+	// gathered-URL segment is left in place beneath the findings.
+	scan.SortBySeverity(findings)
+
 	if p.format == "pretty" {
 		useColor := p.snippet && isTerminal(w)
 		for _, m := range findings {

@@ -737,12 +737,16 @@ var nucleiRegexes = []string{
 func init() {
 	for i, pat := range nucleiRegexes {
 		name := fmt.Sprintf("nuclei_%d", i)
-		r := newRegexRule(name, pat, "info")
-		// The broad "keyword <sep> value" rules match any identifier on the
-		// value side and are the dominant source of false positives on minified
-		// bundles (e.g. `token:e`, `"password":"text"`). Require the value to
-		// look like a real secret. Strict self-describing formats are left as-is.
+		// Strict, self-describing formats (private keys, cloud tokens, webhook
+		// URLs) are High: their signature makes a match almost certainly a live
+		// secret. The broad "keyword <sep> value" rules match any identifier on
+		// the value side and are the dominant source of false positives on
+		// minified bundles (e.g. `token:e`, `"password":"text"`), so they are
+		// Medium and require the value to look like a real secret.
+		severity := SeverityHigh
+		r := newRegexRule(name, pat, severity)
 		if isKeywordValuePattern(pat) {
+			r.Severity = SeverityMedium
 			r.Filter = credentialValueFilter
 		}
 		RegisterRule(r)
