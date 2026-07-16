@@ -290,7 +290,8 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 	enqueued := make(map[string]struct{})
 
 	start := normalizeCrawlURL(seed.String())
-	queue := []crawlTarget{{url: start, depth: 0}}
+	frontier := newCrawlFrontier()
+	frontier.push(crawlTarget{url: start, depth: 0})
 	enqueued[start] = struct{}{}
 	// The seed is always crawled; register it so it counts toward its own class.
 	classer.admit(start)
@@ -328,10 +329,10 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 				continue
 			}
 			enqueued[n] = struct{}{}
-			queue = append(queue, crawlTarget{url: n, depth: 0})
+			frontier.push(crawlTarget{url: n, depth: 0})
 			vlog(1, "[crawl] well-known seed %s", n)
 		}
-		stats.WellKnownSeeds = len(queue) - 1
+		stats.WellKnownSeeds = frontier.len() - 1
 		vlog(1, "[crawl] seeded %d URL(s) from robots.txt/sitemaps", stats.WellKnownSeeds)
 	}
 
@@ -452,8 +453,8 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 			case len(replayQueue) > 0:
 				job = crawlJob{isReplay: true, replay: replayQueue[0]}
 				haveJob = true
-			case len(queue) > 0 && (opts.MaxPages <= 0 || dispatched < opts.MaxPages):
-				job = crawlJob{page: queue[0]}
+			case frontier.len() > 0 && (opts.MaxPages <= 0 || dispatched < opts.MaxPages):
+				job = crawlJob{page: frontier.peek()}
 				haveJob = true
 			}
 
@@ -475,7 +476,7 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 				if job.isReplay {
 					replayQueue = replayQueue[1:]
 				} else {
-					queue = queue[1:]
+					frontier.pop()
 					dispatched++
 					pages++
 					if opts.Progress != nil {
@@ -511,7 +512,7 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 				}
 				for _, next := range res.targets {
 					if admit(next) {
-						queue = append(queue, crawlTarget{url: next, depth: t.depth + 1})
+						frontier.push(crawlTarget{url: next, depth: t.depth + 1})
 						vlog(3, "[crawl] enqueue depth %d %s", t.depth+1, next)
 					}
 				}
@@ -520,7 +521,7 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 				if perm != nil {
 					for _, next := range perm.observe(res.targets) {
 						if admit(next) {
-							queue = append(queue, crawlTarget{url: next, depth: t.depth + 1})
+							frontier.push(crawlTarget{url: next, depth: t.depth + 1})
 							vlog(3, "[crawl] enqueue permuted depth %d %s", t.depth+1, next)
 						}
 					}
@@ -530,12 +531,11 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 		close(jobCh)
 		wg.Wait()
 	} else {
-		for len(queue) > 0 {
+		for frontier.len() > 0 {
 			if opts.MaxPages > 0 && pages >= opts.MaxPages {
 				break
 			}
-			t := queue[0]
-			queue = queue[1:]
+			t := frontier.pop()
 			pages++
 			if opts.Progress != nil {
 				opts.Progress(t.url, t.depth, pages)
@@ -591,7 +591,7 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 			}
 			for _, next := range targets {
 				if admit(next) {
-					queue = append(queue, crawlTarget{url: next, depth: t.depth + 1})
+					frontier.push(crawlTarget{url: next, depth: t.depth + 1})
 					vlog(3, "[crawl] enqueue depth %d %s", t.depth+1, next)
 				}
 			}
@@ -600,7 +600,7 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 			if perm != nil {
 				for _, next := range perm.observe(targets) {
 					if admit(next) {
-						queue = append(queue, crawlTarget{url: next, depth: t.depth + 1})
+						frontier.push(crawlTarget{url: next, depth: t.depth + 1})
 						vlog(3, "[crawl] enqueue permuted depth %d %s", t.depth+1, next)
 					}
 				}
