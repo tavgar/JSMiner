@@ -104,7 +104,8 @@ func main() {
 	quiet := flag.Bool("quiet", false, "suppress banner")
 	proxyAddr := flag.String("proxy", "", "run as proxy on address (e.g., :8080)")
 	crawl := flag.Bool("crawl", false, "crawl in-scope endpoints/paths discovered on each page to reach more JS and secrets")
-	crawlDepth := flag.Int("crawl-depth", 2, "max link hops to follow beyond the seed page when -crawl is set")
+	full := flag.Bool("full", false, "full discovery mode: enables -crawl, -crawl-passive and -crawl-permute")
+	crawlDepth := flag.Int("crawl-depth", 2, "max link hops to follow beyond the seed page in crawl/full mode")
 	crawlAll := flag.Bool("crawl-all", false, "crawl to unlimited depth until no new in-scope pages remain (still bounded by -crawl-max-pages; pair with -crawl-max-pages 0 for no page cap)")
 	crawlMaxPages := flag.Int("crawl-max-pages", 200, "max pages to fetch during a crawl (0 = unlimited)")
 	crawlWorkers := flag.Int("crawl-workers", 8, "pages to fetch/scan in parallel during a crawl (1 = serial; each busy worker may run its own headless-Chrome render)")
@@ -116,6 +117,9 @@ func main() {
 	noParamReplay := flag.Bool("no-param-replay", false, "disable replaying discovered parameters across every directory level during a crawl")
 	noTemplateDedup := flag.Bool("no-template-dedup", false, "disable collapsing templated duplicate pages (/product/1 vs /product/2, paginated/faceted URLs) during a crawl")
 	noWellKnown := flag.Bool("no-well-known", false, "disable seeding a crawl from the site's robots.txt and XML sitemaps")
+	crawlPassive := flag.Bool("crawl-passive", false, "gather historical paths from public web indexes, validate them live, and use validated paths in crawl permutations")
+	crawlPassiveSources := flag.String("crawl-passive-sources", "wayback,commoncrawl", "comma-separated passive URL sources: wayback,commoncrawl")
+	crawlPassiveMax := flag.Int("crawl-passive-max", 100, "max historical path hints admitted for live validation (values <= 0 use 100)")
 	templateSampleMax := flag.Int("template-sample-max", 3, "max representative pages to crawl per templated class when template dedup is on")
 	noSourceMaps := flag.Bool("no-source-maps", false, "disable recovering original source from JavaScript source maps advertised by scanned bundles")
 	targetsFile := flag.String("targets", "", "file with list of targets")
@@ -327,7 +331,7 @@ func main() {
 				}
 			}
 		} else if isURL(target) {
-			if *crawl {
+			if *crawl || *full {
 				opts := scan.DefaultCrawlOptions()
 				opts.MaxDepth = *crawlDepth
 				if *crawlAll {
@@ -336,7 +340,7 @@ func main() {
 				opts.MaxPages = *crawlMaxPages
 				opts.Concurrency = *crawlWorkers
 				opts.ResumeFile = *crawlResume
-				opts.Permute = *crawlPermute
+				opts.Permute = *crawlPermute || *full
 				opts.PermuteMax = *crawlPermuteMax
 				if *noMethods {
 					opts.ProbeMethods = false
@@ -349,6 +353,11 @@ func main() {
 				}
 				if *noWellKnown {
 					opts.DiscoverWellKnown = false
+				}
+				opts.DiscoverPassive = *crawlPassive || *full
+				opts.PassiveMax = *crawlPassiveMax
+				if *crawlPassiveSources != "" {
+					opts.PassiveSources = strings.Split(*crawlPassiveSources, ",")
 				}
 				opts.TemplateSampleMax = *templateSampleMax
 				if *methods != "" {
@@ -377,18 +386,21 @@ func main() {
 				// gated only on the banner being enabled, not on verbose logging.
 				if !*quiet {
 					opts.OnComplete = func(s scan.CrawlStats) {
+						fmt.Fprintf(os.Stderr,
+							"[crawl] done: %d page(s) fetched, %d error(s), %d target(s) discovered, %d enqueued, %d match(es)",
+							s.PagesFetched, s.PagesErrored, s.TargetsFound, s.Enqueued, s.Matches)
+						if s.PassiveFound > 0 {
+							fmt.Fprintf(os.Stderr,
+								"; passive %d/%d validated, %d rejected, %d enqueued",
+								s.PassiveValidated, s.PassiveFound, s.PassiveRejected, s.PassiveEnqueued)
+						}
 						if s.PermuteConsidered > 0 {
 							fmt.Fprintf(os.Stderr,
-								"[crawl] done: %d page(s) fetched, %d error(s), %d target(s) discovered, %d enqueued, %d match(es); permute %d/%d enqueued, %d fetched, %d yielded, %d known + %d admission skipped, %d pruned; in %s\n",
-								s.PagesFetched, s.PagesErrored, s.TargetsFound, s.Enqueued, s.Matches,
+								"; permute %d/%d enqueued, %d fetched, %d yielded, %d known + %d admission skipped, %d pruned",
 								s.PermuteEnqueued, s.PermuteConsidered, s.PermuteFetched, s.PermuteYielded,
-								s.PermuteSkippedKnown, s.PermuteSkippedAdmission, s.PermutePruned,
-								s.Duration.Round(time.Millisecond))
-							return
+								s.PermuteSkippedKnown, s.PermuteSkippedAdmission, s.PermutePruned)
 						}
-						fmt.Fprintf(os.Stderr,
-							"[crawl] done: %d page(s) fetched, %d error(s), %d target(s) discovered, %d enqueued, %d match(es) in %s\n",
-							s.PagesFetched, s.PagesErrored, s.TargetsFound, s.Enqueued, s.Matches, s.Duration.Round(time.Millisecond))
+						fmt.Fprintf(os.Stderr, "; in %s\n", s.Duration.Round(time.Millisecond))
 					}
 				}
 				if *posts {

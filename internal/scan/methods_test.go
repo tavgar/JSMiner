@@ -140,6 +140,40 @@ func TestScanURLCrawlMethodCatchAll(t *testing.T) {
 	}
 }
 
+// Gathered URL probing must use controls with the candidate's own path shape.
+// Framework routers can serve extensionless random paths as valid dynamic pages
+// while returning a distinct HTTP-200 not-found shell for every .js path.
+func TestProbeURLMethodsRejectsShapeSpecificSoft404(t *testing.T) {
+	const (
+		dynamicPage = "submit a new issue through this valid dynamic application route"
+		jsSoft404   = "page not found for this static-looking javascript resource"
+		realBundle  = "export const applicationBundle = true with several unique words"
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/new/real.js":
+			w.Header().Set("Content-Type", "application/javascript")
+			io.WriteString(w, realBundle)
+		case strings.HasSuffix(r.URL.Path, ".js"):
+			w.Header().Set("Content-Type", "text/html")
+			io.WriteString(w, jsSoft404)
+		default:
+			w.Header().Set("Content-Type", "text/html")
+			io.WriteString(w, dynamicPage)
+		}
+	}))
+	defer srv.Close()
+
+	cal := newAutoCalibrator()
+	cal.setBase(srv.URL)
+	if got := probeURLMethods(cal, srv.URL+"/new/firebase-messaging-sw.js", []string{"GET"}, ""); len(got) != 0 {
+		t.Fatalf("shape-specific soft-404 reported as gathered methods: %v", got)
+	}
+	if got := probeURLMethods(cal, srv.URL+"/new/real.js", []string{"GET"}, ""); !equalStrings(got, []string{"GET"}) {
+		t.Fatalf("real bundle sharing the calibrated .js level was suppressed: %v", got)
+	}
+}
+
 // TestProbeURLMethodsCollapsesMethodAgnostic verifies the GET-baseline collapse:
 // a resource that answers every verb with the same response (a CDN/static server
 // ignoring the method) is reported as GET only, while a real POST-only endpoint

@@ -42,15 +42,23 @@ type autoCalibrator struct {
 	// slow probe against one level never blocks workers scanning other pages.
 	mu sync.Mutex
 
-	wildcard   map[string]struct{}            // status|words|lines of the root catch-all responses (GET)
-	levelWild  map[string]map[string]struct{} // per-directory-level catch-all signatures (GET)
-	levelDone  map[string]struct{}            // levels already probed (even if they learned nothing)
-	levelBusy  map[string]chan struct{}       // levels currently being probed; closed after publication
-	seenBodies map[uint64]struct{}            // hashes of bodies already accepted
-	base       string                         // scheme://host origin used to build level probes
-	seedURL    string                         // normalized requested seed URL
-	seedSeen   bool                           // whether the requested seed was accepted
-	primed     bool                           // fallback first-page exemption when no seed is configured
+	wildcard  map[string]struct{}            // status|words|lines of the root catch-all responses (GET)
+	levelWild map[string]map[string]struct{} // per-directory-level catch-all signatures (GET)
+	levelDone map[string]struct{}            // levels already probed (even if they learned nothing)
+	levelBusy map[string]chan struct{}       // levels currently being probed; closed after publication
+	// levelShape* is the candidate-shaped fallback for a mixed level probe that
+	// learned no matching signature. Some routers send extensionless paths to a
+	// real dynamic route but return a soft-404 for every .js path. One .js sample
+	// in levelProbePaths is intentionally insufficient evidence, so the fallback
+	// confirms it with two controls carrying the candidate's own suffix/shape.
+	levelShapeWild map[string]map[string]struct{}
+	levelShapeDone map[string]struct{}
+	levelShapeBusy map[string]chan struct{}
+	seenBodies     map[uint64]struct{} // hashes of bodies already accepted
+	base           string              // scheme://host origin used to build level probes
+	seedURL        string              // normalized requested seed URL
+	seedSeen       bool                // whether the requested seed was accepted
+	primed         bool                // fallback first-page exemption when no seed is configured
 
 	// methodWild holds the catch-all/error fingerprint learned per request method
 	// and directory level, so the crawler knows what a "this verb is not handled
@@ -61,6 +69,11 @@ type autoCalibrator struct {
 	methodWild map[string]map[string]struct{}
 	methodDone map[string]struct{}
 	methodBusy map[string]chan struct{}
+	// methodShape* provides the same candidate-shaped fallback independently for
+	// each HTTP method used by gathered-URL probing.
+	methodShapeWild map[string]map[string]struct{}
+	methodShapeDone map[string]struct{}
+	methodShapeBusy map[string]chan struct{}
 
 	// structMax and structCounts implement templated-duplicate suppression on the
 	// body itself. Exact-body and coarse (status|words|lines) signatures collapse
@@ -76,15 +89,21 @@ type autoCalibrator struct {
 
 func newAutoCalibrator() *autoCalibrator {
 	return &autoCalibrator{
-		wildcard:     make(map[string]struct{}),
-		levelWild:    make(map[string]map[string]struct{}),
-		levelDone:    make(map[string]struct{}),
-		levelBusy:    make(map[string]chan struct{}),
-		seenBodies:   make(map[uint64]struct{}),
-		methodWild:   make(map[string]map[string]struct{}),
-		methodDone:   make(map[string]struct{}),
-		methodBusy:   make(map[string]chan struct{}),
-		structCounts: make(map[string]int),
+		wildcard:        make(map[string]struct{}),
+		levelWild:       make(map[string]map[string]struct{}),
+		levelDone:       make(map[string]struct{}),
+		levelBusy:       make(map[string]chan struct{}),
+		levelShapeWild:  make(map[string]map[string]struct{}),
+		levelShapeDone:  make(map[string]struct{}),
+		levelShapeBusy:  make(map[string]chan struct{}),
+		seenBodies:      make(map[uint64]struct{}),
+		methodWild:      make(map[string]map[string]struct{}),
+		methodDone:      make(map[string]struct{}),
+		methodBusy:      make(map[string]chan struct{}),
+		methodShapeWild: make(map[string]map[string]struct{}),
+		methodShapeDone: make(map[string]struct{}),
+		methodShapeBusy: make(map[string]chan struct{}),
+		structCounts:    make(map[string]int),
 	}
 }
 
@@ -178,12 +197,24 @@ func (c *autoCalibrator) skipPage(requestURL, pageURL string, status int, body [
 	c.ensureLevel(lvl)
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if sigs, ok := c.levelWild[lvl]; ok {
 		if _, hit := sigs[sig]; hit {
+			c.mu.Unlock()
 			return true
 		}
 	}
+	c.mu.Unlock()
+
+	// Mixed level probes deliberately require two agreeing controls and can miss
+	// a catch-all confined to one path shape (for example only *.js). Confirm the
+	// candidate against two random siblings with the same shape before accepting
+	// it as unique.
+	if c.levelShapeCatchAll(pageURL, status, body) {
+		return true
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	h := hashBody(body)
 	if _, ok := c.seenBodies[h]; ok {
 		return true
@@ -197,6 +228,38 @@ func (c *autoCalibrator) skipPage(requestURL, pageURL string, status int, body [
 	}
 	c.seenBodies[h] = struct{}{}
 	return false
+}
+
+// wildcardResponse reports whether a response matches the root or per-directory
+// catch-all fingerprint without enrolling its body in duplicate/template state.
+// Passive historical paths use this before scanning: a soft-200 response is not
+// proof that an archived path still exists, and must not be allowed to seed path
+// permutations. Keeping this check separate from skipPage also distinguishes an
+// invalid catch-all from a valid alias whose body merely duplicates another page.
+func (c *autoCalibrator) wildcardResponse(pageURL string, status int, body []byte) bool {
+	if c == nil {
+		return false
+	}
+	sig := pageSig(status, body)
+	c.mu.Lock()
+	if _, ok := c.wildcard[sig]; ok {
+		c.mu.Unlock()
+		return true
+	}
+	c.mu.Unlock()
+
+	lvl := levelOf(pageURL)
+	c.ensureLevel(lvl)
+
+	c.mu.Lock()
+	if sigs := c.levelWild[lvl]; sigs != nil {
+		if _, hit := sigs[sig]; hit {
+			c.mu.Unlock()
+			return true
+		}
+	}
+	c.mu.Unlock()
+	return c.levelShapeCatchAll(pageURL, status, body)
 }
 
 // skipContent reports whether a non-HTML resource body has already been scanned
@@ -315,6 +378,110 @@ func (c *autoCalibrator) ensureLevel(lvl string) {
 	c.mu.Unlock()
 }
 
+// calibrationPathSuffix identifies the routing-relevant path shape used by the
+// fallback probes. File extensions are kept because frameworks frequently route
+// extensionless slugs and static-looking paths through different not-found
+// handlers. A trailing slash is its own shape; unusual/long extensions fall back
+// to an extensionless sibling rather than copying untrusted path text.
+func calibrationPathSuffix(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	if strings.HasSuffix(u.Path, "/") {
+		return "/"
+	}
+	ext := strings.ToLower(path.Ext(u.Path))
+	if len(ext) < 2 || len(ext) > 17 { // dot plus at most 16 safe characters
+		return ""
+	}
+	for _, r := range ext[1:] {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' && r != '_' {
+			return ""
+		}
+	}
+	return ext
+}
+
+// levelShapeKey scopes a path-shape calibration to one directory. The NUL
+// separator cannot occur in a parsed HTTP URL and avoids ambiguous concatenation.
+func levelShapeKey(pageURL string) string {
+	return levelOf(pageURL) + "\x00" + calibrationPathSuffix(pageURL)
+}
+
+// levelShapeProbePaths returns two same-shape controls. Agreement between both
+// is required before their signature can suppress a candidate, retaining the
+// calibrator's protection against a single unusual control response.
+func levelShapeProbePaths(pageURL string) []string {
+	lvl := levelOf(pageURL)
+	suffix := calibrationPathSuffix(pageURL)
+	return []string{
+		lvl + randToken(16) + suffix,
+		lvl + randToken(16) + suffix,
+	}
+}
+
+// ensureLevelShape lazily learns GET catch-all signatures from controls shaped
+// like pageURL. It is only reached after the cheaper mixed-shape level fingerprint
+// failed to match, so ordinary stable catch-alls do not incur extra requests.
+func (c *autoCalibrator) ensureLevelShape(pageURL string) {
+	if c.base == "" {
+		return
+	}
+	key := levelShapeKey(pageURL)
+	c.mu.Lock()
+	if _, ok := c.levelShapeDone[key]; ok {
+		c.mu.Unlock()
+		return
+	}
+	if ready, ok := c.levelShapeBusy[key]; ok {
+		c.mu.Unlock()
+		<-ready
+		return
+	}
+	ready := make(chan struct{})
+	c.levelShapeBusy[key] = ready
+	c.mu.Unlock()
+
+	counts := make(map[string]int)
+	for _, p := range levelShapeProbePaths(pageURL) {
+		resp, err := fetchURLResponseMethodSameScope(c.base+p, http.MethodGet, "")
+		if err != nil {
+			continue
+		}
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		resp.Body.Close()
+		counts[pageSig(resp.StatusCode, data)]++
+	}
+	var sigs map[string]struct{}
+	for sig, n := range counts {
+		if n >= 2 {
+			if sigs == nil {
+				sigs = make(map[string]struct{})
+			}
+			sigs[sig] = struct{}{}
+		}
+	}
+	c.mu.Lock()
+	if sigs != nil {
+		c.levelShapeWild[key] = sigs
+	}
+	c.levelShapeDone[key] = struct{}{}
+	delete(c.levelShapeBusy, key)
+	close(ready)
+	c.mu.Unlock()
+}
+
+func (c *autoCalibrator) levelShapeCatchAll(pageURL string, status int, body []byte) bool {
+	c.ensureLevelShape(pageURL)
+	key := levelShapeKey(pageURL)
+	sig := pageSig(status, body)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, hit := c.levelShapeWild[key][sig]
+	return hit
+}
+
 // methodKey builds the map key for a (method, level) fingerprint.
 func methodKey(method, level string) string { return method + "\x00" + level }
 
@@ -379,6 +546,57 @@ func (c *autoCalibrator) ensureMethodLevel(method, lvl string) {
 	c.mu.Unlock()
 }
 
+// ensureMethodShape is the per-verb counterpart of ensureLevelShape. It prevents
+// gathered_url from accepting a soft-200 response merely because the level's
+// mixed calibration saw only one control with that candidate's extension.
+func (c *autoCalibrator) ensureMethodShape(method, pageURL string) {
+	if c.base == "" {
+		return
+	}
+	key := methodKey(method, levelShapeKey(pageURL))
+	c.mu.Lock()
+	if _, ok := c.methodShapeDone[key]; ok {
+		c.mu.Unlock()
+		return
+	}
+	if ready, ok := c.methodShapeBusy[key]; ok {
+		c.mu.Unlock()
+		<-ready
+		return
+	}
+	ready := make(chan struct{})
+	c.methodShapeBusy[key] = ready
+	c.mu.Unlock()
+
+	counts := make(map[string]int)
+	for _, p := range levelShapeProbePaths(pageURL) {
+		resp, err := fetchURLResponseMethodSameScope(c.base+p, method, "")
+		if err != nil {
+			continue
+		}
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		resp.Body.Close()
+		counts[pageSig(resp.StatusCode, data)]++
+	}
+	var sigs map[string]struct{}
+	for sig, n := range counts {
+		if n >= 2 {
+			if sigs == nil {
+				sigs = make(map[string]struct{})
+			}
+			sigs[sig] = struct{}{}
+		}
+	}
+	c.mu.Lock()
+	if sigs != nil {
+		c.methodShapeWild[key] = sigs
+	}
+	c.methodShapeDone[key] = struct{}{}
+	delete(c.methodShapeBusy, key)
+	close(ready)
+	c.mu.Unlock()
+}
+
 // methodCatchAll reports whether a response to method at pageURL's directory
 // level matches that level's learned catch-all/error fingerprint for that verb.
 // It lazily calibrates the (method, level) pair on first sight. A true result
@@ -388,14 +606,29 @@ func (c *autoCalibrator) ensureMethodLevel(method, lvl string) {
 func (c *autoCalibrator) methodCatchAll(method, pageURL string, status int, body []byte) bool {
 	lvl := levelOf(pageURL)
 	c.ensureMethodLevel(method, lvl)
+	sig := pageSig(status, body)
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if sigs, ok := c.methodWild[methodKey(method, lvl)]; ok {
-		if _, hit := sigs[pageSig(status, body)]; hit {
+		if _, hit := sigs[sig]; hit {
+			c.mu.Unlock()
 			return true
 		}
 	}
-	return false
+	c.mu.Unlock()
+
+	// GET shape controls are identical to the whole-page controls. Reuse their
+	// cache so normal auto-calibrated crawls do not send a duplicate pair merely
+	// to make the same decision for gathered-URL reporting.
+	if method == http.MethodGet {
+		return c.levelShapeCatchAll(pageURL, status, body)
+	}
+
+	c.ensureMethodShape(method, pageURL)
+	key := methodKey(method, levelShapeKey(pageURL))
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, hit := c.methodShapeWild[key][sig]
+	return hit
 }
 
 // levelProbePaths are the random path shapes used to fingerprint a directory

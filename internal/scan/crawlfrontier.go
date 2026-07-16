@@ -74,6 +74,13 @@ func (h *targetHeap) Less(i, j int) bool {
 	if a.target.depth != b.target.depth {
 		return a.target.depth < b.target.depth // breadth-first: shallower first
 	}
+	// Live discoveries and site-published declarations carry stronger evidence
+	// than third-party historical hints. Validate passive paths after ordinary
+	// targets at the same depth so a tight page budget cannot crowd out the seed
+	// or the current site's own link graph.
+	if (a.target.passiveSource == "") != (b.target.passiveSource == "") {
+		return a.target.passiveSource == ""
+	}
 	if a.score != b.score {
 		return a.score > b.score // higher yield first within a depth level
 	}

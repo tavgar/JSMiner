@@ -17,7 +17,7 @@ import (
 
 // crawlCheckpointVersion is bumped when the on-disk format changes; a checkpoint
 // written by a different version is ignored rather than misread.
-const crawlCheckpointVersion = 2
+const crawlCheckpointVersion = 3
 
 // crawlCheckpointInterval is how many completed pages pass between checkpoint
 // writes. Small enough that a kill loses little progress, large enough that the
@@ -26,22 +26,31 @@ const crawlCheckpointInterval = 20
 
 // checkpointTarget is a queued page persisted in a checkpoint.
 type checkpointTarget struct {
-	URL      string `json:"url"`
-	Depth    int    `json:"depth"`
-	Permuted bool   `json:"permuted,omitempty"`
+	URL           string `json:"url"`
+	Depth         int    `json:"depth"`
+	Permuted      bool   `json:"permuted,omitempty"`
+	PassiveSource string `json:"passive_source,omitempty"`
+}
+
+type passiveCheckpointStats struct {
+	Found     int `json:"found"`
+	Enqueued  int `json:"enqueued"`
+	Validated int `json:"validated"`
+	Rejected  int `json:"rejected"`
 }
 
 // crawlCheckpoint is the serialised, resumable state of a crawl.
 type crawlCheckpoint struct {
-	Version      int                `json:"version"`
-	Seed         string             `json:"seed"`
-	Pages        int                `json:"pages"`
-	CrawlDelayMS int64              `json:"crawl_delay_ms"`
-	Visited      []string           `json:"visited"`
-	Enqueued     []string           `json:"enqueued"`
-	Frontier     []checkpointTarget `json:"frontier"`
-	Matches      []Match            `json:"matches"`
-	Permuter     *permuterState     `json:"permuter,omitempty"`
+	Version      int                    `json:"version"`
+	Seed         string                 `json:"seed"`
+	Pages        int                    `json:"pages"`
+	CrawlDelayMS int64                  `json:"crawl_delay_ms"`
+	Visited      []string               `json:"visited"`
+	Enqueued     []string               `json:"enqueued"`
+	Frontier     []checkpointTarget     `json:"frontier"`
+	Matches      []Match                `json:"matches"`
+	Permuter     *permuterState         `json:"permuter,omitempty"`
+	Passive      passiveCheckpointStats `json:"passive"`
 }
 
 // checkpointCompletedPages converts the live coordinator's dispatch count into

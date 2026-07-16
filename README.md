@@ -75,6 +75,10 @@ Flags:
 - `-endpoints` return only HTTP endpoints (default includes all matches)
 - `-posts` return HTTP POST request endpoints with any parameters
 - `-external` follow external scripts and imports (default `true`)
+- `-full` enable full discovery mode. This is equivalent to combining
+  `-crawl -crawl-passive -crawl-permute`; the normal crawl depth, page, passive
+  and permutation limits still apply and can be adjusted with their individual
+  flags.
 - `-crawl` crawl the in-scope endpoints and paths discovered on each page to
   reach more JavaScript files and secrets. Discovered `endpoint_url`,
   `endpoint_path` (and, with `-posts`, `post_url`/`post_path`) values that match
@@ -147,6 +151,19 @@ Flags:
   honoured as a per-host pacing floor (clamped to 30s), combined with — never
   loosening — any `-rate-limit` you set. Disabling well-known discovery also
   stops the `Crawl-delay` from being read.
+- `-crawl-passive` gather paths previously observed on the exact seed hostname
+  from the Internet Archive Wayback CDX index and the latest Common Crawl index.
+  Historical URLs are treated as untrusted hints: archived query values and
+  fragments are discarded, paths are rebased onto the current seed origin, and
+  each candidate must pass a live status and soft-404/catch-all check before it
+  is scanned or allowed into the `-crawl-permute` path dictionary. Off by
+  default because validation sends requests to the target.
+- `-crawl-passive-sources` comma-separated passive indexes to query:
+  `wayback,commoncrawl` (default both).
+- `-crawl-passive-max` max sanitized historical path hints admitted for live
+  validation (default `100`; values `<= 0` also select `100`, so third-party
+  enumeration is never unbounded). The normal depth, page, template-dedup, scope
+  and rate limits still apply.
 - `-rate-limit` cap outbound HTTP at N requests per second across the whole scan
   (default `0`, no proactive limit). Independent of this, adaptive backoff is
   always on: a `429`/`503` response — seen on the Go request path or by the
@@ -154,10 +171,10 @@ Flags:
   `Retry-After` before continuing, easing back to full speed once the host stops
   rate-limiting.
 - `-http-timeout` per-request timeout in seconds for HTTP fetches — page and
-  script fetches, calibration and method probes, and sitemap downloads (default
-  `10`). Raise it for enterprise crawls of large bundles over slow links; lower
-  it so a single stalled request cannot hold up the crawl. Independent of the
-  render wait controlled by `-timeout`.
+  script fetches, calibration and method probes, sitemap downloads, and passive
+  index lookups (default `10`). Raise it for enterprise crawls of large bundles
+  over slow links; lower it so a single stalled request cannot hold up the
+  crawl. Independent of the render wait controlled by `-timeout`.
 - `-retries` extra attempts for a safe, bodyless HTTP read that fails with a transient
   transport error — a connection reset, DNS blip or timeout (default `2`, `0` to
   disable). Only GET/HEAD/OPTIONS reads are retried, so active
@@ -285,8 +302,26 @@ one form:
   deep-link manifests (`apple-app-site-association`, `assetlinks.json`), which map
   app-backing API routes; and `security.txt`, `nodeinfo` and `host-meta`. Probed on
   every crawl alongside the site declarations above; disable with `-no-well-known`.
+- **Passive web indexes (opt-in)** — `-crawl-passive` asks Wayback CDX and/or
+  Common Crawl for URLs historically seen on the exact seed hostname. Only the
+  path is retained and rebased onto the live origin; historical queries are not
+  replayed. Candidates are ranked toward scripts, configuration and API paths,
+  then validated on the live target before scanning. A 2xx/3xx response (or a
+  route-proving 401/403/405) must also differ from the directory's calibrated
+  catch-all response. Validated paths can enrich `-crawl-permute`; rejected and
+  soft-404 paths cannot.
 - **Source maps** — original, pre-bundled sources recovered from any source map a
   scanned bundle advertises (see [Source map recovery](#source-map-recovery)).
+
+Passive index lookups use a public-data request path that never forwards values
+from `-header`, so target cookies and authorization tokens are not disclosed to
+Wayback or Common Crawl. Gathering is passive with respect to the target, but
+the validation phase is active and consumes the normal crawl page/request budget:
+
+```
+jsminer -full -render=false https://example.com/
+jsminer -crawl -crawl-passive -crawl-passive-sources wayback -crawl-passive-max 50 https://example.com/
+```
 
 ### Rate limiting
 

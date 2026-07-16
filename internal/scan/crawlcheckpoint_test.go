@@ -23,9 +23,15 @@ func TestCrawlCheckpointRoundTrip(t *testing.T) {
 		CrawlDelayMS: 2500,
 		Visited:      []string{"https://x.com/a", "https://x.com/b"},
 		Enqueued:     []string{"https://x.com/c"},
-		Frontier:     []checkpointTarget{{URL: "https://x.com/c", Depth: 2, Permuted: true}},
-		Matches:      []Match{{Source: "https://x.com/a", Pattern: "jwt", Value: "tok", Severity: "high"}},
-		Permuter:     perm.snapshot(),
+		Frontier: []checkpointTarget{{
+			URL: "https://x.com/c", Depth: 2, Permuted: true,
+			PassiveSource: passiveSourceWayback,
+		}},
+		Matches:  []Match{{Source: "https://x.com/a", Pattern: "jwt", Value: "tok", Severity: "high"}},
+		Permuter: perm.snapshot(),
+		Passive: passiveCheckpointStats{
+			Found: 4, Enqueued: 3, Validated: 2, Rejected: 1,
+		},
 	}
 	if err := writeCheckpoint(path, cp); err != nil {
 		t.Fatal(err)
@@ -35,9 +41,12 @@ func TestCrawlCheckpointRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.Seed != cp.Seed || got.Pages != cp.Pages || got.CrawlDelayMS != cp.CrawlDelayMS ||
-		len(got.Visited) != 2 || len(got.Frontier) != 1 || got.Frontier[0].Depth != 2 || !got.Frontier[0].Permuted ||
+		len(got.Visited) != 2 || len(got.Frontier) != 1 || got.Frontier[0].Depth != 2 ||
+		!got.Frontier[0].Permuted || got.Frontier[0].PassiveSource != passiveSourceWayback ||
 		len(got.Matches) != 1 || got.Matches[0].Value != "tok" ||
-		got.Permuter == nil || got.Permuter.Stats.Admitted != 1 || len(got.Permuter.Pools) == 0 {
+		got.Permuter == nil || got.Permuter.Stats.Admitted != 1 || len(got.Permuter.Pools) == 0 ||
+		got.Passive.Found != 4 || got.Passive.Enqueued != 3 ||
+		got.Passive.Validated != 2 || got.Passive.Rejected != 1 {
 		t.Fatalf("round-trip mismatch: %+v", got)
 	}
 

@@ -109,6 +109,24 @@ type CrawlOptions struct {
 	// library callers and existing tests are unaffected.
 	DiscoverWellKnown bool
 
+	// DiscoverPassive asks public web indexes for URLs historically observed on
+	// the exact seed host. Historical URLs are path hints, not trusted targets:
+	// query values are discarded, paths are rebased onto the current seed origin,
+	// and each is accepted only when its live status and catch-all fingerprint
+	// prove it still exists. A validated path becomes an ordinary real source for
+	// Permute; rejected hints never enter its dictionary. It is opt-in because it
+	// contacts third-party archives and adds validation requests to the target.
+	DiscoverPassive bool
+
+	// PassiveSources selects public indexes used by DiscoverPassive. Supported
+	// values are "wayback" and "commoncrawl"; empty selects both.
+	PassiveSources []string
+
+	// PassiveMax caps the number of sanitized historical path hints admitted for
+	// live validation. Values <= 0 select defaultPassiveMax; passive discovery is
+	// never unbounded independently of the crawl's own page budget.
+	PassiveMax int
+
 	// ResumeFile, when non-empty, turns on crawl checkpointing: the crawl reloads
 	// its state from this file at start (when it holds a checkpoint for the same
 	// seed) and periodically writes its state back to it, so a run killed part way
@@ -153,13 +171,22 @@ type CrawlOptions struct {
 // enterprise crawl is expected to surface — throughput, reach and failures —
 // rather than only the per-page verbose narrative.
 type CrawlStats struct {
-	// PagesFetched is the number of pages dequeued and scanned without a
-	// fetch/scan error; PagesErrored is the number whose scan returned an error.
+	// PagesFetched is the number of pages whose fetch completed without a
+	// transport/read error, including passive hints subsequently rejected by live
+	// validation. PagesErrored is the number whose fetch or scan returned an error.
 	PagesFetched int
 	PagesErrored int
 
 	// WellKnownSeeds is how many URLs the crawl seeded from robots.txt/sitemaps.
 	WellKnownSeeds int
+
+	// PassiveFound is the bounded number of sanitized historical path hints,
+	// PassiveEnqueued is how many survived normal crawl dedup/template admission,
+	// and Validated/Rejected report the result of live status + catch-all checks.
+	PassiveFound     int
+	PassiveEnqueued  int
+	PassiveValidated int
+	PassiveRejected  int
 
 	// TargetsFound is the total in-scope crawl targets discovered across all
 	// pages (with repeats), and Enqueued is the number of distinct pages that
@@ -207,7 +234,8 @@ func DefaultCrawlOptions() CrawlOptions {
 		ProbeMethods: true, RequestMethods: defaultRequestMethods(),
 		ParamReplay: true, ParamReplayMax: 500,
 		TemplateDedup: true, TemplateSampleMax: defaultTemplateSampleMax,
-		DiscoverWellKnown: true, Concurrency: defaultCrawlConcurrency,
+		DiscoverWellKnown: true, PassiveMax: defaultPassiveMax,
+		Concurrency: defaultCrawlConcurrency,
 	}
 }
 
@@ -222,9 +250,10 @@ func templateSampleMax(opts CrawlOptions) int {
 
 // crawlTarget is a queued page together with its distance from the seed.
 type crawlTarget struct {
-	url      string
-	depth    int
-	permuted bool
+	url           string
+	depth         int
+	permuted      bool
+	passiveSource string
 }
 
 // ScanURLCrawl scans urlStr and then crawls the in-scope endpoints it
@@ -233,8 +262,12 @@ type crawlTarget struct {
 // whether off-scope script/import references are followed while scanning an
 // individual page; the page-to-page crawl itself is governed by opts.
 func (e *Extractor) ScanURLCrawl(urlStr string, endpoints, external, render bool, opts CrawlOptions) ([]Match, error) {
-	scanPage := func(u, baseHost string, visited *visitedSet) ([]Match, error) {
-		return e.scanURL(u, baseHost, endpoints, visited, external, render)
+	scanPage := func(u, baseHost string, visited *visitedSet, validator *autoCalibrator) ([]Match, bool, error) {
+		if validator != nil {
+			return e.scanURLValidated(u, baseHost, endpoints, visited, external, render, validator)
+		}
+		ms, err := e.scanURL(u, baseHost, endpoints, visited, external, render)
+		return ms, err == nil, err
 	}
 	return e.crawlBFS(urlStr, opts, scanPage)
 }
@@ -242,8 +275,12 @@ func (e *Extractor) ScanURLCrawl(urlStr string, endpoints, external, render bool
 // ScanURLPostsCrawl behaves like ScanURLCrawl but scans each page for HTTP POST
 // request endpoints, following the discovered endpoints to reach deeper pages.
 func (e *Extractor) ScanURLPostsCrawl(urlStr string, external, render bool, opts CrawlOptions) ([]Match, error) {
-	scanPage := func(u, baseHost string, visited *visitedSet) ([]Match, error) {
-		return e.scanURLPosts(u, baseHost, visited, external, render)
+	scanPage := func(u, baseHost string, visited *visitedSet, validator *autoCalibrator) ([]Match, bool, error) {
+		if validator != nil {
+			return e.scanURLPostsValidated(u, baseHost, visited, external, render, validator)
+		}
+		ms, err := e.scanURLPosts(u, baseHost, visited, external, render)
+		return ms, err == nil, err
 	}
 	return e.crawlBFS(urlStr, opts, scanPage)
 }
@@ -255,7 +292,7 @@ func (e *Extractor) ScanURLPostsCrawl(urlStr string, external, render bool, opts
 // The visited map is shared across every scanPage call so a JS bundle
 // referenced from many pages is fetched and scanned only once. The enqueued map
 // tracks page-level targets so each page is crawled at most once.
-func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u, baseHost string, visited *visitedSet) ([]Match, error)) ([]Match, error) {
+func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u, baseHost string, visited *visitedSet, validator *autoCalibrator) ([]Match, bool, error)) ([]Match, error) {
 	seed, err := url.Parse(seedURL)
 	if err != nil {
 		return nil, err
@@ -276,7 +313,7 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 	// per-method probing, so the two share the level fingerprints they learn. It
 	// is created whenever either feature is active.
 	var cal *autoCalibrator
-	if opts.AutoCalibrate || opts.ProbeMethods {
+	if opts.AutoCalibrate || opts.ProbeMethods || opts.DiscoverPassive {
 		cal = newAutoCalibrator()
 		cal.setBase(seed.String())
 	}
@@ -339,14 +376,31 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 			for _, e := range cp.Enqueued {
 				enqueued[e] = struct{}{}
 			}
+			hasPendingPassive := false
 			for _, ct := range cp.Frontier {
-				frontier.push(crawlTarget{url: ct.URL, depth: ct.Depth, permuted: ct.Permuted})
+				frontier.push(crawlTarget{
+					url: ct.URL, depth: ct.Depth, permuted: ct.Permuted,
+					passiveSource: ct.PassiveSource,
+				})
+				hasPendingPassive = hasPendingPassive || ct.PassiveSource != ""
+			}
+			// The checkpoint carries target provenance. Keep strict validation on
+			// even if a resumed library caller did not repeat DiscoverPassive in
+			// its options; otherwise a pending historical hint could silently turn
+			// into a trusted ordinary page after restart.
+			if hasPendingPassive && cal == nil {
+				cal = newAutoCalibrator()
+				cal.setBase(seed.String())
 			}
 			if perm != nil {
 				perm.restore(cp.Permuter)
 			}
 			all = cp.Matches
 			pages = cp.Pages
+			stats.PassiveFound = cp.Passive.Found
+			stats.PassiveEnqueued = cp.Passive.Enqueued
+			stats.PassiveValidated = cp.Passive.Validated
+			stats.PassiveRejected = cp.Passive.Rejected
 			crawlDelayForCheckpoint = time.Duration(cp.CrawlDelayMS) * time.Millisecond
 			if crawlDelayForCheckpoint > 0 {
 				SetHostRateFloor(baseHost, crawlDelayForCheckpoint)
@@ -402,6 +456,40 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 			}
 			stats.WellKnownSeeds = frontier.len() - 1
 			vlog(1, "[crawl] seeded %d URL(s) from robots.txt/sitemaps", stats.WellKnownSeeds)
+		}
+
+		// Public archive URLs are historical hints, so they are admitted as
+		// validation targets rather than trusted discoveries. Their archived query
+		// values have already been stripped and their paths rebased onto `origin`.
+		// The page scanner will reject stale/error/catch-all responses before they
+		// can produce findings, next hops, method probes or permutation input.
+		if opts.DiscoverPassive {
+			passive := discoverPassiveURLs(seed, opts.PassiveSources, opts.PassiveMax)
+			stats.PassiveFound = len(passive)
+			// Bound repeated historical templates without consuming the live
+			// classer's quota. Only a path that later validates is enrolled in the
+			// main classer, so stale /product/{id} hints cannot suppress current
+			// URLs discovered from the site's own content.
+			var passiveClasser *templateClasser
+			if opts.TemplateDedup {
+				passiveClasser = newTemplateClasser(templateSampleMax(opts))
+			}
+			for _, candidate := range passive {
+				if _, ok := enqueued[candidate.URL]; ok {
+					continue
+				}
+				if !passiveClasser.admit(candidate.URL) {
+					continue
+				}
+				enqueued[candidate.URL] = struct{}{}
+				frontier.push(crawlTarget{
+					url: candidate.URL, depth: 0, passiveSource: candidate.Source,
+				})
+				stats.PassiveEnqueued++
+				vlog(1, "[crawl] passive hint (%s) %s", candidate.Source, candidate.URL)
+			}
+			vlog(1, "[crawl] admitted %d/%d passive URL hint(s) for live validation",
+				stats.PassiveEnqueued, stats.PassiveFound)
 		}
 	}
 
@@ -489,12 +577,22 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 			Enqueued:     mapKeys(enqueued),
 			Matches:      all,
 			Permuter:     perm.snapshot(),
+			Passive: passiveCheckpointStats{
+				Found: stats.PassiveFound, Enqueued: stats.PassiveEnqueued,
+				Validated: stats.PassiveValidated, Rejected: stats.PassiveRejected,
+			},
 		}
 		for _, t := range frontier.snapshot() {
-			cp.Frontier = append(cp.Frontier, checkpointTarget{URL: t.url, Depth: t.depth, Permuted: t.permuted})
+			cp.Frontier = append(cp.Frontier, checkpointTarget{
+				URL: t.url, Depth: t.depth, Permuted: t.permuted,
+				PassiveSource: t.passiveSource,
+			})
 		}
 		for _, t := range inflight {
-			cp.Frontier = append(cp.Frontier, checkpointTarget{URL: t.url, Depth: t.depth, Permuted: t.permuted})
+			cp.Frontier = append(cp.Frontier, checkpointTarget{
+				URL: t.url, Depth: t.depth, Permuted: t.permuted,
+				PassiveSource: t.passiveSource,
+			})
 		}
 		if err := writeCheckpoint(opts.ResumeFile, cp); err != nil {
 			vlog(1, "[crawl] checkpoint write failed: %v", err)
@@ -531,11 +629,12 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 		// the crawl. targets/params are computed in the worker — they are pure
 		// functions of the page's matches — so the coordinator's turn stays short.
 		type crawlResult struct {
-			job     crawlJob
-			matches []Match
-			targets []string
-			params  []string
-			err     error
+			job      crawlJob
+			matches  []Match
+			targets  []string
+			params   []string
+			accepted bool
+			err      error
 		}
 
 		jobCh := make(chan crawlJob)
@@ -557,9 +656,17 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 						continue
 					}
 					t := job.page
-					ms, err := scanPage(t.url, baseHost, visited)
+					var validator *autoCalibrator
+					if t.passiveSource != "" {
+						validator = cal
+					}
+					ms, accepted, err := scanPage(t.url, baseHost, visited, validator)
 					if err != nil {
 						resultCh <- crawlResult{job: job, err: err}
+						continue
+					}
+					if !accepted {
+						resultCh <- crawlResult{job: job}
 						continue
 					}
 					out := ms
@@ -569,6 +676,9 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 						if worked := probeURLMethods(cal, t.url, methods, ""); worked != nil {
 							vlog(3, "[crawl] probe %s -> methods %s", t.url, strings.Join(worked, ","))
 							if gm, ok := gatheredMatch(t.url, worked, ""); ok {
+								if t.passiveSource != "" {
+									gm.Params += " passive_source=" + t.passiveSource
+								}
 								out = append(out, gm)
 							}
 						}
@@ -588,7 +698,10 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 						targets = crawlTargetsFromMatches(ms, t.url, baseHost, opts)
 						params = paramsFromMatches(ms)
 					}
-					resultCh <- crawlResult{job: job, matches: out, targets: targets, params: params}
+					resultCh <- crawlResult{
+						job: job, matches: out, targets: targets, params: params,
+						accepted: true,
+					}
 				}
 			}()
 		}
@@ -653,11 +766,25 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 				t := res.job.page
 				delete(inFlight, t.url)
 				if res.err != nil {
+					if t.passiveSource != "" {
+						stats.PassiveRejected++
+					}
 					stats.PagesErrored++
 					vlog(1, "[crawl] depth %d %s -> error: %v", t.depth, t.url, res.err)
 					continue
 				}
 				stats.PagesFetched++
+				if !res.accepted {
+					if t.passiveSource != "" {
+						stats.PassiveRejected++
+					}
+					continue
+				}
+				if t.passiveSource != "" {
+					stats.PassiveValidated++
+					classer.admit(t.url)
+					vlog(1, "[crawl] validated passive path (%s) %s", t.passiveSource, t.url)
+				}
 				all = append(all, res.matches...)
 				stats.TargetsFound += len(res.targets)
 				if perm != nil && t.permuted {
@@ -707,13 +834,31 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 			}
 			vlog(1, "[crawl] (%d) depth %d fetching %s", pages, t.depth, t.url)
 
-			ms, err := scanPage(t.url, baseHost, visited)
+			var validator *autoCalibrator
+			if t.passiveSource != "" {
+				validator = cal
+			}
+			ms, accepted, err := scanPage(t.url, baseHost, visited, validator)
 			if err != nil {
+				if t.passiveSource != "" {
+					stats.PassiveRejected++
+				}
 				stats.PagesErrored++
 				vlog(1, "[crawl] (%d) depth %d %s -> error: %v", pages, t.depth, t.url, err)
 				continue
 			}
 			stats.PagesFetched++
+			if !accepted {
+				if t.passiveSource != "" {
+					stats.PassiveRejected++
+				}
+				continue
+			}
+			if t.passiveSource != "" {
+				stats.PassiveValidated++
+				classer.admit(t.url)
+				vlog(1, "[crawl] validated passive path (%s) %s", t.passiveSource, t.url)
+			}
 			all = append(all, ms...)
 			if perm != nil && t.permuted {
 				perm.recordFetch(len(ms) > 0)
@@ -726,6 +871,9 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 				if worked := probeURLMethods(cal, t.url, methods, ""); worked != nil {
 					vlog(3, "[crawl] probe %s -> methods %s", t.url, strings.Join(worked, ","))
 					if gm, ok := gatheredMatch(t.url, worked, ""); ok {
+						if t.passiveSource != "" {
+							gm.Params += " passive_source=" + t.passiveSource
+						}
 						all = append(all, gm)
 					}
 				}
