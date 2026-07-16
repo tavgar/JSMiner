@@ -13,6 +13,18 @@ import (
 // is how these attributes appear in practice and keeps the pattern precise.
 var htmlURLAttrRe = regexp.MustCompile(`(?is)\b(?:href|src|action|formaction|data-url|data-href|data-src)\s*=\s*["']([^"'>\s]+)["']`)
 
+// srcsetAttrRe captures a srcset attribute value (on <img>/<source>), which the
+// plain src/href regex above does not: srcset holds a comma-separated list of
+// "url [descriptor]" candidates rather than a single URL, so it is parsed
+// separately (see parseSrcset).
+var srcsetAttrRe = regexp.MustCompile(`(?is)\bsrcset\s*=\s*["']([^"']+)["']`)
+
+// cssURLRe captures the target of a CSS url() reference, quoted or bare, as it
+// appears in <style> blocks and inline style= attributes. These occasionally point
+// at a config or data file rather than an image, which static markup scanning would
+// otherwise miss.
+var cssURLRe = regexp.MustCompile(`(?is)url\(\s*(?:"([^"]+)"|'([^']+)'|([^)'"\s]+))\s*\)`)
+
 // nonNavSchemes are URL schemes that carry no crawlable/scannable resource, so a
 // link using one is skipped rather than emitted as an endpoint.
 var nonNavSchemes = []string{"javascript:", "mailto:", "tel:", "data:", "blob:", "about:", "sms:", "callto:"}
@@ -108,6 +120,19 @@ func extractHTMLLinkMatches(data []byte, pageURL string) []Match {
 	for _, m := range htmlURLAttrRe.FindAllSubmatch(scan, -1) {
 		emit(string(m[1]))
 	}
+	// srcset (<img>/<source>) lists several candidate URLs, each optionally followed
+	// by a width/density descriptor; emit every URL in the list.
+	for _, m := range srcsetAttrRe.FindAllSubmatch(scan, -1) {
+		for _, u := range parseSrcset(string(m[1])) {
+			emit(u)
+		}
+	}
+	// CSS url() references in <style> blocks and inline style= attributes.
+	for _, m := range cssURLRe.FindAllSubmatch(scan, -1) {
+		// Exactly one of the three alternatives (double-quoted, single-quoted, bare)
+		// is populated per match.
+		emit(string(m[1]) + string(m[2]) + string(m[3]))
+	}
 	// A meta refresh (<meta http-equiv="refresh" content="0; url=...">) is a real
 	// navigation the crawl should follow, so pull its target out too.
 	for _, tag := range metaTagRe.FindAll(data, -1) {
@@ -117,6 +142,24 @@ func extractHTMLLinkMatches(data []byte, pageURL string) []Match {
 		if u := metaRefreshURLRe.FindSubmatch(tag); u != nil {
 			emit(string(u[1]))
 		}
+	}
+	return out
+}
+
+// parseSrcset pulls the URLs out of a srcset attribute value. srcset is a
+// comma-separated list of candidates, each a URL optionally followed by whitespace
+// and a width ("480w") or density ("2x") descriptor; the URL is the first
+// whitespace-delimited token of each candidate. Commas can also appear inside a
+// URL (rare, in query strings), but the common, well-formed shapes are handled by
+// splitting on comma and taking the leading token.
+func parseSrcset(val string) []string {
+	var out []string
+	for _, cand := range strings.Split(val, ",") {
+		fields := strings.Fields(cand)
+		if len(fields) == 0 {
+			continue
+		}
+		out = append(out, fields[0])
 	}
 	return out
 }
