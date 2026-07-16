@@ -398,7 +398,7 @@ func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited *vi
 	linkHdr := extractLinkHeaderMatches(resp.Header, finalURL)
 
 	if isHTMLContent(finalURL, resp.Header.Get("Content-Type")) {
-		if e.calibrator != nil && e.calibrator.skipPage(finalURL, resp.StatusCode, data) {
+		if e.calibrator != nil && e.calibrator.skipPage(urlStr, finalURL, resp.StatusCode, data) {
 			vlog(1, "[crawl] skip (soft-404/duplicate) %s", finalURL)
 			return matches, nil
 		}
@@ -543,7 +543,7 @@ func (e *Extractor) scanURLPosts(urlStr, baseHost string, visited *visitedSet, e
 	linkHdr := extractLinkHeaderMatches(resp.Header, finalURL)
 
 	if isHTMLContent(finalURL, resp.Header.Get("Content-Type")) {
-		if e.calibrator != nil && e.calibrator.skipPage(finalURL, resp.StatusCode, data) {
+		if e.calibrator != nil && e.calibrator.skipPage(urlStr, finalURL, resp.StatusCode, data) {
 			vlog(1, "[crawl] skip (soft-404/duplicate) %s", finalURL)
 			return matches, nil
 		}

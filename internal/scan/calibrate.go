@@ -47,7 +47,9 @@ type autoCalibrator struct {
 	levelDone  map[string]struct{}            // levels already probed (even if they learned nothing)
 	seenBodies map[uint64]struct{}            // hashes of bodies already accepted
 	base       string                         // scheme://host origin used to build level probes
-	primed     bool                           // the first page (the seed) is always accepted
+	seedURL    string                         // normalized requested seed URL
+	seedSeen   bool                           // whether the requested seed was accepted
+	primed     bool                           // fallback first-page exemption when no seed is configured
 
 	// methodWild holds the catch-all/error fingerprint learned per request method
 	// and directory level, so the crawler knows what a "this verb is not handled
@@ -93,6 +95,7 @@ func (c *autoCalibrator) setBase(seedURL string) {
 	if base, err := probeBase(seedURL); err == nil {
 		c.base = base
 	}
+	c.seedURL = normalizeCrawlURL(seedURL)
 }
 
 // calibrationProbePaths are the random path shapes used to fingerprint a
@@ -139,16 +142,19 @@ func (c *autoCalibrator) calibrate(seedURL string) int {
 }
 
 // skipPage reports whether a fetched page should be ignored by the crawl. The
-// first page it sees (the seed) is always accepted and recorded. Afterwards a
-// page is skipped when it matches the root catch-all signature, matches the
-// catch-all signature of its own directory level, or duplicates a body already
-// accepted. pageURL identifies the level to check (and to lazily calibrate on
-// first sight).
-func (c *autoCalibrator) skipPage(pageURL string, status int, body []byte) bool {
+// requested seed is always accepted and recorded, regardless of which queued page
+// completes first. Afterwards a page is skipped when it matches the root
+// catch-all signature, matches the catch-all signature of its own directory
+// level, or duplicates a body already accepted. requestURL identifies the queued
+// URL so redirects do not lose the seed exemption; pageURL identifies the final
+// response URL for per-level calibration.
+func (c *autoCalibrator) skipPage(requestURL, pageURL string, status int, body []byte) bool {
 	sig := pageSig(status, body)
 
 	c.mu.Lock()
-	if !c.primed {
+	isSeed := c.seedURL != "" && normalizeCrawlURL(requestURL) == c.seedURL
+	if (isSeed && !c.seedSeen) || (c.seedURL == "" && !c.primed) {
+		c.seedSeen = isSeed
 		c.primed = true
 		c.seenBodies[hashBody(body)] = struct{}{}
 		c.countStructuralLocked(pageURL, body)

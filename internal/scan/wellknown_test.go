@@ -315,6 +315,37 @@ func TestFetchWellKnownBodyBlocksOffScopeRedirect(t *testing.T) {
 	}
 }
 
+func TestCrawlWellKnownSeedsDoNotConsumeSeedExemption(t *testing.T) {
+	ResetThrottle()
+	const secret = "AIzaSyD1ad_UKyHFErfLeO_3aoBoNrX1W4bsmac"
+	seedBody := `<html><body>seller login shell</body><script>var key="` + secret + `";</script></html>`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		if strings.HasPrefix(r.URL.Path, "/account/") {
+			io.WriteString(w, seedBody)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	e := NewExtractor(false, false)
+	opts := DefaultCrawlOptions()
+	opts.Concurrency = 1
+	opts.ProbeMethods = false
+	ms, err := e.ScanURLCrawl(srv.URL+"/account/login?session=1", false, false, false, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range ms {
+		if m.Value == secret {
+			return
+		}
+	}
+	t.Fatalf("seed was skipped after higher-priority well-known pages; matches=%v", ms)
+}
+
 // TestCrawlFollowsOpenIDConfiguration verifies a crawl seeded from the standard
 // .well-known set fetches /.well-known/openid-configuration and follows the OAuth
 // endpoints it advertises to reach a token endpoint holding a secret — API surface

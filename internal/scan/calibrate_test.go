@@ -29,22 +29,36 @@ func TestAutoCalibratorSkipPage(t *testing.T) {
 	c.wildcard[pageSig(200, []byte("cannot find this page here now"))] = struct{}{}
 
 	// The first page (seed) is always accepted, even if it looks like anything.
-	if c.skipPage("http://x/", 200, []byte("<html>real homepage</html>")) {
+	if c.skipPage("http://x/", "http://x/", 200, []byte("<html>real homepage</html>")) {
 		t.Fatal("seed page must not be skipped")
 	}
 	// A page matching the learned wildcard (same status/words/lines) is skipped
 	// even though its bytes differ.
-	if !c.skipPage("http://x/a", 200, []byte("cannot find that page here now")) {
+	if !c.skipPage("http://x/a", "http://x/a", 200, []byte("cannot find that page here now")) {
 		t.Fatal("wildcard-matching page should be skipped")
 	}
 	// A genuinely unique page is accepted the first time...
 	uniq := []byte("a wholly distinct page body with several unique words present here today")
-	if c.skipPage("http://x/b", 200, uniq) {
+	if c.skipPage("http://x/b", "http://x/b", 200, uniq) {
 		t.Fatal("unique page should be accepted")
 	}
 	// ...and skipped as a duplicate the second time.
-	if !c.skipPage("http://x/c", 200, uniq) {
+	if !c.skipPage("http://x/c", "http://x/c", 200, uniq) {
 		t.Fatal("duplicate page should be skipped")
+	}
+}
+
+func TestAutoCalibratorExemptsConfiguredSeedAfterOtherPages(t *testing.T) {
+	c := newAutoCalibrator()
+	c.setBase("http://x/account/login?session=1")
+	catchAll := []byte("cannot find this page here now")
+	c.wildcard[pageSig(404, catchAll)] = struct{}{}
+
+	if !c.skipPage("http://x/.well-known/security.txt", "http://x/.well-known/security.txt", 404, catchAll) {
+		t.Fatal("non-seed wildcard page should be skipped even when processed first")
+	}
+	if c.skipPage("http://x/account/login?session=1", "http://x/account/login", 200, catchAll) {
+		t.Fatal("configured seed must be accepted after another page is processed")
 	}
 }
 
