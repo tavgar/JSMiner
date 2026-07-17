@@ -282,6 +282,47 @@ func extractJSExpression(data []byte, start int) string {
 func parseJSPostRequests(data []byte) []jsEndpoint {
 	uniq := make(map[string]jsEndpoint)
 
+	// Index object-literal assignments once. Fetch calls that pass an options
+	// variable previously compiled a name-specific regexp and rescanned the
+	// entire bundle for every call, making this path quadratic on generated
+	// clients with hundreds of request declarations.
+	type nodeOpts struct{ host, path, proto string }
+	fetchVarMatches := fetchVarRe.FindAllSubmatch(data, -1)
+	fetchOptionNames := make(map[string]struct{}, len(fetchVarMatches))
+	for _, match := range fetchVarMatches {
+		fetchOptionNames[string(match[2])] = struct{}{}
+	}
+	objectDefs := make(map[string][]byte)
+	opts := make(map[string]nodeOpts)
+	for _, match := range nodeOptsRe.FindAllSubmatch(data, -1) {
+		name := string(match[1])
+		obj := match[2]
+		if _, usedByFetch := fetchOptionNames[name]; usedByFetch {
+			if _, exists := objectDefs[name]; !exists {
+				// The old name-specific FindSubmatch selected the first definition.
+				objectDefs[name] = obj
+			}
+		}
+		if !nodeMethodRe.Match(obj) {
+			continue
+		}
+		host := ""
+		if hostMatch := nodeHostRe.FindSubmatch(obj); hostMatch != nil {
+			host = string(hostMatch[1])
+		}
+		path := ""
+		if pathMatch := nodePathRe.FindSubmatch(obj); pathMatch != nil {
+			path = string(pathMatch[1])
+		}
+		proto := ""
+		if protoMatch := nodeProtoRe.FindSubmatch(obj); protoMatch != nil {
+			proto = strings.TrimSuffix(string(protoMatch[1]), ":")
+		}
+		// Preserve the Node request path's previous last-POST-definition wins
+		// behavior when a variable name is reused.
+		opts[name] = nodeOpts{host: host, path: path, proto: proto}
+	}
+
 	for _, loc := range fetchPostRe.FindAllSubmatchIndex(data, -1) {
 		opts := data[loc[4]:loc[5]]
 		if !fetchMethodRe.Match(opts) {
@@ -314,16 +355,16 @@ func parseJSPostRequests(data []byte) []jsEndpoint {
 	}
 
 	// Handle fetch with config variable
-	for _, m := range fetchVarRe.FindAllSubmatch(data, -1) {
+	for _, m := range fetchVarMatches {
 		val := string(m[1])
 		varName := string(m[2])
 
-		// Look for the variable definition with POST method
-		varPattern := regexp.MustCompile(`(?is)(?:const|let|var)\s+` + regexp.QuoteMeta(varName) + `\s*=\s*\{([^}]*)\}`)
-		if varMatch := varPattern.FindSubmatch(data); varMatch != nil {
-			if fetchMethodRe.Match(varMatch[1]) {
+		// Look for the first variable definition, matching the earlier
+		// name-specific FindSubmatch behavior without a per-call full scan.
+		if obj := objectDefs[varName]; obj != nil {
+			if fetchMethodRe.Match(obj) {
 				params := ""
-				if b := fetchBodyRe.FindSubmatch(varMatch[1]); b != nil {
+				if b := fetchBodyRe.FindSubmatch(obj); b != nil {
 					params = strings.TrimSpace(string(b[1]))
 				}
 				isURL := strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") || strings.HasPrefix(val, "//")
@@ -425,30 +466,7 @@ func parseJSPostRequests(data []byte) []jsEndpoint {
 		uniq[val+"|"+params] = jsEndpoint{Value: val, IsURL: isURL, Params: params}
 	}
 
-	// parse Node.js http/https.request patterns
-	type nodeOpts struct{ host, path, proto string }
-	opts := make(map[string]nodeOpts)
-	for _, m := range nodeOptsRe.FindAllSubmatch(data, -1) {
-		name := string(m[1])
-		obj := m[2]
-		if !nodeMethodRe.Match(obj) {
-			continue
-		}
-		host := ""
-		if hm := nodeHostRe.FindSubmatch(obj); hm != nil {
-			host = string(hm[1])
-		}
-		path := ""
-		if pm := nodePathRe.FindSubmatch(obj); pm != nil {
-			path = string(pm[1])
-		}
-		proto := ""
-		if pr := nodeProtoRe.FindSubmatch(obj); pr != nil {
-			proto = strings.TrimSuffix(string(pr[1]), ":")
-		}
-		opts[name] = nodeOpts{host: host, path: path, proto: proto}
-	}
-
+	// Parse Node.js http/https.request calls using the options indexed above.
 	addNodeMatch := func(proto, host, path, params string) {
 		val := path
 		isURL := false
@@ -545,11 +563,12 @@ func parseJSPostRequests(data []byte) []jsEndpoint {
 		// Look for API routes that might be used for authentication
 		for _, m := range apiRouteRe.FindAllSubmatch(data, -1) {
 			val := string(m[1])
+			lowerVal := strings.ToLower(val)
 			// Filter for likely auth-related endpoints
-			if strings.Contains(strings.ToLower(val), "auth") ||
-				strings.Contains(strings.ToLower(val), "login") ||
-				strings.Contains(strings.ToLower(val), "signin") ||
-				strings.Contains(strings.ToLower(val), "sign-in") {
+			if strings.Contains(lowerVal, "auth") ||
+				strings.Contains(lowerVal, "login") ||
+				strings.Contains(lowerVal, "signin") ||
+				strings.Contains(lowerVal, "sign-in") {
 				isURL := strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") || strings.HasPrefix(val, "//")
 				// Infer parameters based on endpoint type
 				params := inferAuthParams(val)
@@ -584,10 +603,11 @@ func parseJSPostRequests(data []byte) []jsEndpoint {
 			contextEnd = len(data)
 		}
 		context := data[contextStart:contextEnd]
+		lowerContext := bytes.ToLower(context)
 
 		// If POST is mentioned in nearby context, include this endpoint
-		if bytes.Contains(bytes.ToLower(context), []byte("post")) ||
-			bytes.Contains(bytes.ToLower(context), []byte("method")) ||
+		if bytes.Contains(lowerContext, []byte("post")) ||
+			bytes.Contains(lowerContext, []byte("method")) ||
 			bytes.Contains(context, []byte("body:")) ||
 			bytes.Contains(context, []byte("data:")) {
 			isURL := strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") || strings.HasPrefix(val, "//")
@@ -616,7 +636,7 @@ func parseJSPostRequests(data []byte) []jsEndpoint {
 		graphqlEndpoints := []string{"/graphql", "/api/graphql", "/gql"}
 		for _, endpoint := range graphqlEndpoints {
 			// Check if this endpoint appears in the file
-			if strings.Contains(string(data), endpoint) {
+			if bytes.Contains(data, []byte(endpoint)) {
 				params := "query, variables, operationName"
 				uniq[endpoint+"|"+params] = jsEndpoint{Value: endpoint, IsURL: false, Params: params}
 			}

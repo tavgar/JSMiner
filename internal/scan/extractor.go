@@ -362,7 +362,66 @@ func (e *Extractor) scanReader(source string, r io.Reader, isJS bool) ([]Match, 
 	buf.Buffer(make([]byte, 0, InitialBufferSize), MaxBufferSize)
 	for buf.Scan() {
 		line := []byte(buf.Text())
-		matches = append(matches, e.scanRules(source, line)...)
+		matches = append(matches, e.scanRulesSelected(source, line, e.rules, true)...)
+	}
+	return matches, buf.Err()
+}
+
+// rulesForData removes rules that provably cannot match data because one of
+// their required literal prefilters is absent. The check is performed once for
+// an already-buffered response instead of once per rule per line. Rules without
+// a provable literal requirement, including arbitrary plugin rules, always stay
+// eligible.
+func (e *Extractor) rulesForData(data []byte) []Rule {
+	rules := make([]Rule, 0, len(e.rules))
+	for _, rule := range e.rules {
+		if e.safeMode && !e.isJSRule(rule.MatchName()) {
+			continue
+		}
+
+		var prefilters [][]byte
+		switch typed := rule.(type) {
+		case RegexRule:
+			prefilters = typed.prefilters
+		case *RegexRule:
+			prefilters = typed.prefilters
+		}
+		eligible := true
+		for _, prefilter := range prefilters {
+			if !bytes.Contains(data, prefilter) {
+				eligible = false
+				break
+			}
+		}
+		if eligible {
+			rules = append(rules, rule)
+		}
+	}
+	return rules
+}
+
+// scanBuffered applies the same line-oriented raw rule scan as scanReader, but
+// uses the complete response to discard impossible rules once up front. Keeping
+// bufio.ScanLines preserves existing ^ handling, CRLF trimming and match order.
+func (e *Extractor) scanBuffered(source string, data []byte, isJS bool) ([]Match, error) {
+	if e.isAllowed(source) || (e.safeMode && !isJS) {
+		return nil, nil
+	}
+	rules := e.rules
+	filterSafe := true
+	// A one-line minified bundle already checks each rule's prefilters once in
+	// Rule.Find; a file-level pass would duplicate that work. Eligibility pays
+	// off for multiline source, where it prevents the same impossible rules from
+	// being reconsidered on thousands of separate lines.
+	if bytes.Count(data, []byte{'\n'}) >= 32 {
+		rules = e.rulesForData(data)
+		filterSafe = false
+	}
+	var matches []Match
+	buf := bufio.NewScanner(bytes.NewReader(data))
+	buf.Buffer(make([]byte, 0, InitialBufferSize), MaxBufferSize)
+	for buf.Scan() {
+		matches = append(matches, e.scanRulesSelected(source, buf.Bytes(), rules, filterSafe)...)
 	}
 	return matches, buf.Err()
 }
@@ -373,18 +432,18 @@ func (e *Extractor) scanReader(source string, r io.Reader, isJS bool) ([]Match, 
 // a near-linear speedup. Small lines run sequentially to avoid goroutine churn.
 const parallelScanThreshold = 128 * 1024
 
-// scanRules applies every applicable rule to line and returns the matches in
-// deterministic rule order. For large lines the rules run concurrently; results
-// are written into per-rule slots so the merged output is identical to a
-// sequential scan.
-func (e *Extractor) scanRules(source string, line []byte) []Match {
+// scanRulesSelected applies the selected rules to line in deterministic order.
+// For large lines the rules run concurrently and write into per-rule slots, so
+// the merged output is identical to a sequential scan. When filterSafe is false,
+// callers have already removed non-JavaScript-safe rules.
+func (e *Extractor) scanRulesSelected(source string, line []byte, rules []Rule, filterSafe bool) []Match {
 	applicable := func(rule Rule) bool {
-		return !e.safeMode || e.isJSRule(rule.MatchName())
+		return !filterSafe || !e.safeMode || e.isJSRule(rule.MatchName())
 	}
 
 	if len(line) < parallelScanThreshold {
 		var out []Match
-		for _, rule := range e.rules {
+		for _, rule := range rules {
 			if !applicable(rule) {
 				continue
 			}
@@ -397,21 +456,21 @@ func (e *Extractor) scanRules(source string, line []byte) []Match {
 	}
 
 	workers := runtime.GOMAXPROCS(0)
-	if workers > len(e.rules) {
-		workers = len(e.rules)
+	if workers > len(rules) {
+		workers = len(rules)
 	}
 	if workers < 1 {
 		workers = 1
 	}
 
-	results := make([][]Match, len(e.rules))
+	results := make([][]Match, len(rules))
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
 		go func(start int) {
 			defer wg.Done()
-			for i := start; i < len(e.rules); i += workers {
-				rule := e.rules[i]
+			for i := start; i < len(rules); i += workers {
+				rule := rules[i]
 				if !applicable(rule) {
 					continue
 				}
@@ -453,7 +512,7 @@ func (e *Extractor) scanDataWithEndpoints(source string, data []byte, isJS bool)
 	if e.isAllowed(source) {
 		return nil, nil
 	}
-	matches, err := e.scanReader(source, bytes.NewReader(data), isJS)
+	matches, err := e.scanBuffered(source, data, isJS)
 	if err != nil {
 		return nil, err
 	}
@@ -735,11 +794,14 @@ func (e *Extractor) ScanReaderAST(source string, r io.Reader) ([]Match, error) {
 // literal-concatenation assignments recovered from JavaScript source.
 func (e *Extractor) scanASTData(source string, data []byte, reconstructedOnly bool) []Match {
 	var matches []Match
-	for _, val := range jsast.ExtractValues(data) {
+	var values []string
+	if reconstructedOnly {
+		values = jsast.ExtractReconstructedValues(data)
+	} else {
+		values = jsast.ExtractValues(data)
+	}
+	for _, val := range values {
 		b := []byte(val)
-		if reconstructedOnly && bytes.Contains(data, b) {
-			continue
-		}
 		for _, rule := range e.rules {
 			if e.safeMode && !e.isJSRule(rule.MatchName()) {
 				continue

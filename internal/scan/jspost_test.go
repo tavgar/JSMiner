@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -315,5 +316,40 @@ func TestParseJSPostRequestsAPIRouteNearestContext(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected /api/widget to be detected from its POST-adjacent occurrence, got %+v", eps)
+	}
+}
+
+func TestParseJSPostRequestsFetchVariableUsesFirstDefinition(t *testing.T) {
+	js := `
+		const options = {method: "POST", body: first, cache: true};
+		fetch("/first", options);
+		const options = {method: "POST", body: second, cache: true};
+		fetch("/second", options);
+	`
+	eps := parseJSPostRequests([]byte(js))
+	got := make(map[string]string)
+	for _, ep := range eps {
+		got[ep.Value] = ep.Params
+	}
+	for _, endpoint := range []string{"/first", "/second"} {
+		if got[endpoint] != "first" {
+			t.Fatalf("%s params = %q, want first-definition params %q", endpoint, got[endpoint], "first")
+		}
+	}
+}
+
+func BenchmarkParseJSPostRequestsFetchVariables(b *testing.B) {
+	var src strings.Builder
+	for i := 0; i < 1_000; i++ {
+		fmt.Fprintf(&src, `const options%d = {method:"POST",body:payload%d};`, i, i)
+		fmt.Fprintf(&src, `fetch("/api/item/%d", options%d);`, i, i)
+	}
+	data := []byte(src.String())
+
+	b.ReportAllocs()
+	b.SetBytes(int64(len(data)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		parseJSPostRequests(data)
 	}
 }

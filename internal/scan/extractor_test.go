@@ -1,7 +1,10 @@
 package scan
 
 import (
+	"bytes"
+	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -334,5 +337,44 @@ func TestLongSecretConcat(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected long_secret match, got %+v", matches)
+	}
+}
+
+func BenchmarkScanReaderWithEndpointsMultiline(b *testing.B) {
+	var src strings.Builder
+	for i := 0; i < 10_000; i++ {
+		fmt.Fprintf(&src, "const ordinary%d = \"ordinary-value-%d\";\n", i, i)
+	}
+	src.WriteString(`const token = "ghp_" + "abcdefghijklmnopqrstuvwxyz0123456789";`)
+	data := src.String()
+	e := NewExtractor(false, false)
+
+	b.ReportAllocs()
+	b.SetBytes(int64(len(data)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := e.ScanReaderWithEndpoints("bundle.js", strings.NewReader(data)); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func TestScanBufferedMatchesStreamingScan(t *testing.T) {
+	data := []byte(strings.Repeat("ordinary line\r\n", 40) +
+		`const token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";` + "\n" +
+		`password = "correct-horse-battery-staple"` + "\n" +
+		`/var/lib/example`)
+	e := NewExtractor(false, false)
+
+	streamed, err := e.scanReader("bundle.js", bytes.NewReader(data), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buffered, err := e.scanBuffered("bundle.js", data, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(buffered, streamed) {
+		t.Fatalf("buffered matches differ from streaming scan:\nbuffered: %+v\nstreamed: %+v", buffered, streamed)
 	}
 }
