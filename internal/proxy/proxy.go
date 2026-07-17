@@ -58,18 +58,17 @@ func Run(ctx context.Context, addr string, ext *scan.Extractor, printer *output.
 			return resp
 		}
 
+		scanStartedAt := time.Now().UTC()
 		ms, err := ext.ScanReaderWithEndpoints(resp.Request.URL.String(), bytes.NewReader(scanData))
 		if err == nil {
 			if endpoints {
 				ms = scan.FilterEndpointMatches(ms)
 			}
-			if len(ms) > 0 {
-				printMu.Lock()
-				err := printer.Print(out, ms)
-				printMu.Unlock()
-				if err != nil {
-					log.Printf("printer error: %v", err)
-				}
+			printMu.Lock()
+			err := printer.PrintScan(out, ms, scanStartedAt)
+			printMu.Unlock()
+			if err != nil {
+				log.Printf("printer error: %v", err)
 			}
 		}
 		return resp

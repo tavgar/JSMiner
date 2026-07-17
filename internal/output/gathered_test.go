@@ -33,8 +33,8 @@ func TestPrintGatheredSegmentPretty(t *testing.T) {
 	}
 }
 
-// TestPrintGatheredSegmentJSON verifies the JSON array orders gathered URLs after
-// the normal findings.
+// TestPrintGatheredSegmentJSON verifies the JSON results array orders gathered
+// URLs after the normal findings.
 func TestPrintGatheredSegmentJSON(t *testing.T) {
 	matches := []scan.Match{
 		{Pattern: "gathered_url", Value: "http://x/api", Params: "methods=GET", Severity: "info"},
@@ -45,16 +45,18 @@ func TestPrintGatheredSegmentJSON(t *testing.T) {
 	if err := p.Print(&buf, matches); err != nil {
 		t.Fatal(err)
 	}
-	var out []struct {
-		Pattern string `json:"pattern"`
+	var out struct {
+		Results []struct {
+			Pattern string `json:"pattern"`
+		} `json:"results"`
 	}
 	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
 		t.Fatalf("invalid JSON %q: %v", buf.String(), err)
 	}
-	if len(out) != 2 {
-		t.Fatalf("expected 2 entries, got %d", len(out))
+	if len(out.Results) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(out.Results))
 	}
-	if out[0].Pattern != "jwt" || out[1].Pattern != "gathered_url" {
-		t.Fatalf("gathered_url should be ordered last, got %+v", out)
+	if out.Results[0].Pattern != "jwt" || out.Results[1].Pattern != "gathered_url" {
+		t.Fatalf("gathered_url should be ordered last, got %+v", out.Results)
 	}
 }

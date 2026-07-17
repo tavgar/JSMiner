@@ -92,6 +92,8 @@ var jsExts = []string{".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".wasm"}
 var baseJSRules = map[string]bool{
 	"jwt":        true,
 	"google_api": true,
+	// Headers are set from JS (fetch/axios/XHR), so the rule is JS-relevant.
+	"http_header": true,
 	// Provider token formats are JS-relevant secrets and run in safe mode too.
 	"github_token": true,
 	"github_pat":   true,
@@ -239,6 +241,9 @@ func NewExtractor(safe bool, longSecret bool) *Extractor {
 	}
 	// ipv4 uses a dedicated context-aware rule to reject SVG/coordinate streams.
 	e.rules = append(e.rules, newIPv4Rule())
+	// http_header likewise needs context to tell a header map from the object
+	// literals and CSS declarations that share the `name: value` shape.
+	e.rules = append(e.rules, newHTTPHeaderRule())
 	e.rules = append(e.rules, getRegisteredRules()...)
 	return e
 }

@@ -500,6 +500,15 @@ built-in rules are validated before being reported:
   keyword (`function`), kebab-case config name (`css-var-root`) or built-in
   (`Object`). Strict, self-describing formats (AWS keys, GitHub PATs, JWTs,
   bearer tokens, …) are matched unchanged.
+- **HTTP headers** are separated from the object literals, CSS declarations and
+  framework directives that share the `name: value` shape. A name that
+  identifies itself — `Authorization`, `Content-Type`, `Referer`, or anything
+  `X-`-prefixed — is reported wherever it appears. A name that does not is
+  reported only inside a header map: `age`, `date`, `host`, `origin` and
+  `accept` are registered headers *and* everyday object keys, so `{name:"Ada",
+  age:30}` is not a header while `fetch(u,{headers:{age:"30"}})` is. Enclosure
+  is established structurally rather than by proximity, so the `body:{age:30}`
+  after a `headers:{…}` map does not inherit its context.
 - **IPv4** uses a strict dotted-quad (octets 0–255, no leading zeros) and is
   rejected when it sits inside a longer decimal stream, which is how SVG
   coordinates and version arrays appear (`38.13.44.25.57…`, `1.11.16.2 57.17…`).
@@ -534,13 +543,34 @@ highest to lowest severity:
 - `high` — distinctive credential formats (provider tokens, cloud keys, JWTs)
   whose signature alone makes a match almost certainly a live secret.
 - `medium` — keyword-anchored credentials (`api_key = ...`, `password: ...`)
-  that are probable secrets but carry more false positives and warrant review.
+  that are probable secrets but carry more false positives and warrant review,
+  and HTTP headers (`http_header`), which reveal the API's authentication scheme
+  and internal routing conventions.
 - `info` — non-secret intelligence such as endpoints, URLs, emails, paths and
   IPs.
 
 Within a severity band, discovery order is preserved. Gathered URLs are shown as
 their own segment beneath the ranked findings.
 When scanning a single input, the JSON output omits the `source` field.
+
+Every completed scan also returns a SHA-256 checksum of its full logical result
+set and the UTC time at which the scan began. The checksum is based on each
+result's pattern, value, parameters and severity; it is independent of discovery
+order, source display and optional snippets, so equivalent result sets have the
+same checksum. Pretty output ends with both values on one `[scan]` summary line.
+JSON output returns an envelope:
+
+```json
+{
+  "checksum": "3a8f…",
+  "scan_time": "2026-07-17T07:08:09Z",
+  "results": []
+}
+```
+
+The metadata and `results` array are returned even when a scan finds nothing.
+JSON mode suppresses the decorative banner automatically so the envelope remains
+a valid JSON document; `-quiet` is not required for structured output.
 
 ### Endpoint scanning
 

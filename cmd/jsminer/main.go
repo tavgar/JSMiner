@@ -312,6 +312,7 @@ func main() {
 		return
 	}
 
+	scanStartedAt := time.Now().UTC()
 	var allMatches []scan.Match
 	for _, target := range targets {
 		var ms []scan.Match
@@ -481,7 +482,7 @@ func main() {
 
 	showSource := *showSourceFlag || len(targets) > 1
 	printer := output.NewPrinter(*format, !*quiet, showSource, *snippet, version)
-	if err := printer.Print(out, allMatches); err != nil {
+	if err := printer.PrintScan(out, allMatches, scanStartedAt); err != nil {
 		log.Fatal(err)
 	}
 

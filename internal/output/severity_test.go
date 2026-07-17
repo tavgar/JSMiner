@@ -24,9 +24,11 @@ func TestPrintRanksBySeverityJSON(t *testing.T) {
 	if err := p.Print(&buf, matches); err != nil {
 		t.Fatal(err)
 	}
-	var out []struct {
-		Pattern  string `json:"pattern"`
-		Severity string `json:"severity"`
+	var out struct {
+		Results []struct {
+			Pattern  string `json:"pattern"`
+			Severity string `json:"severity"`
+		} `json:"results"`
 	}
 	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
 		t.Fatalf("invalid JSON %q: %v", buf.String(), err)
@@ -37,21 +39,21 @@ func TestPrintRanksBySeverityJSON(t *testing.T) {
 		scan.SeverityMedium, scan.SeverityMedium,
 		scan.SeverityInfo, scan.SeverityInfo,
 	}
-	if len(out) != len(wantSeverity) {
-		t.Fatalf("expected %d entries, got %d: %+v", len(wantSeverity), len(out), out)
+	if len(out.Results) != len(wantSeverity) {
+		t.Fatalf("expected %d entries, got %d: %+v", len(wantSeverity), len(out.Results), out.Results)
 	}
 	for i, sev := range wantSeverity {
-		if out[i].Severity != sev {
-			t.Fatalf("entry %d: want severity %q, got %q (%+v)", i, sev, out[i].Severity, out)
+		if out.Results[i].Severity != sev {
+			t.Fatalf("entry %d: want severity %q, got %q (%+v)", i, sev, out.Results[i].Severity, out.Results)
 		}
 	}
 	// Stable order within the Medium band: api_key was discovered before password.
-	if out[1].Pattern != "api_key" || out[2].Pattern != "password" {
-		t.Fatalf("medium band lost discovery order: %+v", out)
+	if out.Results[1].Pattern != "api_key" || out.Results[2].Pattern != "password" {
+		t.Fatalf("medium band lost discovery order: %+v", out.Results)
 	}
 	// Stable order within the Info band: email before endpoint_path.
-	if out[3].Pattern != "email" || out[4].Pattern != "endpoint_path" {
-		t.Fatalf("info band lost discovery order: %+v", out)
+	if out.Results[3].Pattern != "email" || out.Results[4].Pattern != "endpoint_path" {
+		t.Fatalf("info band lost discovery order: %+v", out.Results)
 	}
 }
 
