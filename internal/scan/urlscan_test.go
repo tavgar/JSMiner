@@ -60,26 +60,45 @@ func TestScanURL(t *testing.T) {
 
 // Test that ScanURL follows scripts from other hosts when external scanning is enabled.
 func TestScanURLExternal(t *testing.T) {
+	var externalHits int64
 	muxJS := http.NewServeMux()
 	muxJS.HandleFunc("/ext.js", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&externalHits, 1)
 		w.Header().Set("Content-Type", "application/javascript")
 		io.WriteString(w, "fetch('https://api.example.com/v2');")
 	})
 	tsJS := httptest.NewServer(muxJS)
 	defer tsJS.Close()
+	externalJSURL := strings.Replace(tsJS.URL, "127.0.0.1", "localhost", 1)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
-		io.WriteString(w, `<html><script src="`+tsJS.URL+`/ext.js"></script></html>`)
+		io.WriteString(w, `<html><script src="`+externalJSURL+`/ext.js"></script></html>`)
 	})
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
 	e := NewExtractor(true, false)
+	restricted, err := e.ScanURL(ts.URL, false, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt64(&externalHits); got != 0 {
+		t.Fatalf("external=false requested the external script %d time(s)", got)
+	}
+	for _, m := range restricted {
+		if m.Pattern == "endpoint_url" && strings.Contains(m.Value, "api.example.com") {
+			t.Fatal("external=false scanned the external script body")
+		}
+	}
+
 	matches, err := e.ScanURL(ts.URL, false, true, false)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got := atomic.LoadInt64(&externalHits); got != 1 {
+		t.Fatalf("external=true requested the external script %d time(s), want 1", got)
 	}
 	if len(matches) == 0 {
 		t.Fatal("expected matches, got none")
@@ -96,48 +115,99 @@ func TestScanURLExternal(t *testing.T) {
 	}
 }
 
-// TestScanURLRedirectHonorsExternal verifies scope is enforced before a redirect
-// request is sent. A post-response final-URL check is too late: the external body
-// would already have been fetched and scanned.
-func TestScanURLRedirectHonorsExternal(t *testing.T) {
-	const key = "AIzaSyD1ad_UKyHFErfLeO_3aoBoNrX1W4bsmac"
+// TestScanURLRedirectIndependentFromExternal verifies redirect following has its
+// own switch. -external selects page-referenced sources and must neither enable
+// nor disable redirects. A blocked redirect's response body is still scanned,
+// but its destination is never requested.
+func TestScanURLRedirectIndependentFromExternal(t *testing.T) {
+	const externalKey = "AIzaSyD1ad_UKyHFErfLeO_3aoBoNrX1W4bsmac"
+	const redirectBodyJWT = "eyJredirect.body.token"
 	var externalHits int64
 	externalServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&externalHits, 1)
 		w.Header().Set("Content-Type", "application/javascript")
-		io.WriteString(w, `const key="`+key+`";`)
+		io.WriteString(w, `const key="`+externalKey+`";`)
 	}))
 	defer externalServer.Close()
-	// The servers share an IP in tests; use a different hostname so sameScope
-	// treats the redirect as external while it still resolves locally.
+	// Use a different hostname to make the redirect visibly cross-domain while
+	// still resolving to the local test server.
 	externalURL := strings.Replace(externalServer.URL, "127.0.0.1", "localhost", 1)
 
 	seed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, externalURL+"/outside.js", http.StatusFound)
+		w.Header().Set("Content-Type", "text/html")
+		w.Header().Set("Location", externalURL+"/outside.js")
+		w.WriteHeader(http.StatusFound)
+		io.WriteString(w, `<html><script>const token="`+redirectBodyJWT+`";</script></html>`)
 	}))
 	defer seed.Close()
 
+	SetFollowRedirects(false)
+	t.Cleanup(func() { SetFollowRedirects(false) })
+
 	e := NewExtractor(false, false)
-	restricted, err := e.ScanURL(seed.URL+"/inside.js", false, false, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := atomic.LoadInt64(&externalHits); got != 0 {
-		t.Fatalf("external=false sent %d request(s) to an off-scope redirect", got)
-	}
-	if hasPattern(restricted, "google_api") {
-		t.Fatal("external=false scanned the off-scope redirect body")
+	for _, external := range []bool{false, true} {
+		// Keep rendering enabled to prove the renderer does not navigate back to
+		// the original URL and follow the redirect behind the HTTP policy.
+		blocked, err := e.ScanURL(seed.URL+"/inside.js", false, external, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := atomic.LoadInt64(&externalHits); got != 0 {
+			t.Fatalf("redirect=false, external=%t sent %d request(s) to redirect destination", external, got)
+		}
+		if !hasPattern(blocked, "jwt") {
+			t.Fatalf("redirect=false, external=%t did not scan the redirect response body", external)
+		}
+		if hasPattern(blocked, "google_api") {
+			t.Fatalf("redirect=false, external=%t scanned the redirect destination body", external)
+		}
 	}
 
-	allowed, err := e.ScanURL(seed.URL+"/inside.js", false, true, false)
+	SetFollowRedirects(true)
+	allowed, err := e.ScanURL(seed.URL+"/inside.js", false, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := atomic.LoadInt64(&externalHits); got != 1 {
-		t.Fatalf("external=true sent %d request(s) to the redirect target, want 1", got)
+		t.Fatalf("redirect=true sent %d request(s) to the redirect destination, want 1", got)
 	}
 	if !hasPattern(allowed, "google_api") {
-		t.Fatal("external=true did not scan the external redirect target")
+		t.Fatal("redirect=true did not scan the redirect destination with external=false")
+	}
+}
+
+// TestScanURLRedirectDisabledBlocksSameHost verifies the redirect switch blocks
+// every hop, not just cross-domain hops.
+func TestScanURLRedirectDisabledBlocksSameHost(t *testing.T) {
+	var destinationHits int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/start", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/destination", http.StatusFound)
+	})
+	mux.HandleFunc("/destination", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&destinationHits, 1)
+		io.WriteString(w, "destination")
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	SetFollowRedirects(false)
+	t.Cleanup(func() { SetFollowRedirects(false) })
+
+	e := NewExtractor(false, false)
+	if _, err := e.ScanURL(srv.URL+"/start", false, true, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt64(&destinationHits); got != 0 {
+		t.Fatalf("redirect=false sent %d request(s) to a same-host destination", got)
+	}
+
+	SetFollowRedirects(true)
+	if _, err := e.ScanURL(srv.URL+"/start", false, true, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt64(&destinationHits); got != 1 {
+		t.Fatalf("redirect=true sent %d request(s) to a same-host destination, want 1", got)
 	}
 }
 

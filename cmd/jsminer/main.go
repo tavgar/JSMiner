@@ -97,6 +97,7 @@ func main() {
 	endpoints := flag.Bool("endpoints", false, "only return HTTP endpoints")
 	posts := flag.Bool("posts", false, "only return HTTP POST request endpoints")
 	external := flag.Bool("external", true, "follow external scripts and imports")
+	redirect := flag.Bool("redirect", false, "follow HTTP redirects")
 	render := flag.Bool("render", true, "render pages in headless Chrome")
 	insecure := flag.Bool("insecure", true, "skip TLS certificate verification")
 	longSecret := flag.Bool("longsecret", false, "detect generic long secrets")
@@ -251,6 +252,7 @@ func main() {
 	}
 	scan.SetMaxExploreStates(*exploreStates)
 	scan.SetSkipTLSVerification(*insecure)
+	scan.SetFollowRedirects(*redirect)
 	scan.SetHTTPTimeout(*httpTimeout)
 	scan.SetFetchRetries(*retries)
 	scan.SetRateLimit(*rateLimit)

@@ -204,7 +204,7 @@ func (e *Extractor) fetchInScope(abs, baseHost string, external bool, visited *v
 	if !visited.visit(abs) {
 		return nil, false
 	}
-	resp, err := fetchURLResponseScoped(abs, baseHost, external)
+	resp, err := fetchURLResponse(abs)
 	if err != nil {
 		return nil, false
 	}

@@ -314,7 +314,7 @@ func fetchWellKnownBody(u string) (string, bool) {
 	// Sitemap and robots URLs are target-controlled. Keep their redirect chain in
 	// the original URL's scope so an apparently safe sitemap cannot redirect the
 	// scanner to a loopback, cloud-metadata or unrelated host.
-	resp, err := fetchURLResponseScoped(u, parsed.Hostname(), false)
+	resp, err := fetchURLResponseScoped(u, parsed.Hostname())
 	if err != nil {
 		return "", false
 	}

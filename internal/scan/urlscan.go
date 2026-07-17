@@ -75,22 +75,23 @@ func sharedHTTPClient() *http.Client {
 	return sharedClient
 }
 
-// fetchURLResponse retrieves a URL with GET and returns the http.Response
-// with limited redirects and a default User-Agent.
+// fetchURLResponse retrieves a URL with GET and returns the http.Response.
+// Redirects are followed only when FollowRedirects is enabled.
 func fetchURLResponse(u string) (*http.Response, error) {
-	return fetchURLResponseMethodPolicy(u, "GET", "", nil)
+	return fetchURLResponseMethodPolicy(u, "GET", "", func(*url.URL) bool {
+		return FollowRedirects
+	})
 }
 
 // fetchURLResponseScoped retrieves u while preventing redirects from escaping
-// baseHost when external is false. Redirect scope has to be enforced by the HTTP
-// client, before the redirected request is sent; checking resp.Request.URL after
-// the fact would already have fetched the off-scope resource.
-func fetchURLResponseScoped(u, baseHost string, external bool) (*http.Response, error) {
-	if external {
-		return fetchURLResponse(u)
-	}
+// baseHost. Redirect scope has to be enforced by the HTTP client, before the
+// redirected request is sent; checking resp.Request.URL after the fact would
+// already have fetched the off-scope resource. FollowRedirects still acts as the
+// global on/off switch.
+func fetchURLResponseScoped(u, baseHost string) (*http.Response, error) {
 	return fetchURLResponseMethodPolicy(u, "GET", "", func(next *url.URL) bool {
-		return (next.Scheme == "http" || next.Scheme == "https") &&
+		return FollowRedirects &&
+			(next.Scheme == "http" || next.Scheme == "https") &&
 			sameScope(baseHost, next.Hostname())
 	})
 }
@@ -102,7 +103,9 @@ func fetchURLResponseScoped(u, baseHost string, external bool) (*http.Response, 
 // parameters against a target. The default User-Agent and any extra headers still
 // apply.
 func fetchURLResponseMethod(u, method, body string) (*http.Response, error) {
-	return fetchURLResponseMethodPolicy(u, method, body, nil)
+	return fetchURLResponseMethodPolicy(u, method, body, func(*url.URL) bool {
+		return FollowRedirects
+	})
 }
 
 // fetchURLResponseMethodSameScope runs an active method request while keeping
@@ -116,7 +119,8 @@ func fetchURLResponseMethodSameScope(u, method, body string) (*http.Response, er
 	}
 	baseHost := parsed.Hostname()
 	return fetchURLResponseMethodPolicy(u, method, body, func(next *url.URL) bool {
-		return (next.Scheme == "http" || next.Scheme == "https") &&
+		return FollowRedirects &&
+			(next.Scheme == "http" || next.Scheme == "https") &&
 			sameScope(baseHost, next.Hostname())
 	})
 }
@@ -332,6 +336,16 @@ func isBinaryContentType(ct string) bool {
 	return ok
 }
 
+// isRedirectResponse reports whether resp is an unfollowed HTTP redirect. Such
+// a response body is still scanned, but it must not be handed to the browser
+// renderer: navigating Chrome back to the original URL would make a second
+// request and let the browser follow the redirect behind -redirect=false.
+func isRedirectResponse(resp *http.Response) bool {
+	return resp.StatusCode >= http.StatusMultipleChoices &&
+		resp.StatusCode < http.StatusBadRequest &&
+		resp.Header.Get("Location") != ""
+}
+
 // ScanURL scans urlStr and any discovered script or import references.
 // Cross-domain resources are followed by default. Set external to false to restrict scanning to the same domain. JavaScript files are scanned using the configured rules.
 // ScanURL scans urlStr and any discovered script or import references. When
@@ -392,14 +406,15 @@ func (e *Extractor) scanURLWithValidationDetailed(urlStr, baseHost string, endpo
 		return scanURLResult{}, nil
 	}
 
-	fetchExternal := external
+	var resp *http.Response
+	var err error
 	if validator != nil {
 		// A historical hint is target-controlled only after it is rebased. Keep
-		// its validation redirect chain in scope even when ordinary script/import
-		// scanning is allowed to follow external resources.
-		fetchExternal = false
+		// its validation redirect chain in scope when redirect following is enabled.
+		resp, err = fetchURLResponseScoped(urlStr, baseHost)
+	} else {
+		resp, err = fetchURLResponse(urlStr)
 	}
-	resp, err := fetchURLResponseScoped(urlStr, baseHost, fetchExternal)
 	if err != nil {
 		return scanURLResult{}, err
 	}
@@ -449,7 +464,7 @@ func (e *Extractor) scanURLWithValidationDetailed(urlStr, baseHost string, endpo
 			}, nil
 		}
 		matches = append(matches, linkHdr...)
-		if render {
+		if render && !isRedirectResponse(resp) {
 			// Explore application state, not just the initial DOM: scan the seed
 			// render and every state exploration reaches through interaction, so a
 			// single-page app's event-handler-gated surface is covered too.
@@ -571,11 +586,13 @@ func (e *Extractor) scanURLPostsWithValidationDetailed(urlStr, baseHost string, 
 		return scanURLResult{}, nil
 	}
 
-	fetchExternal := external
+	var resp *http.Response
+	var err error
 	if validator != nil {
-		fetchExternal = false
+		resp, err = fetchURLResponseScoped(urlStr, baseHost)
+	} else {
+		resp, err = fetchURLResponse(urlStr)
 	}
-	resp, err := fetchURLResponseScoped(urlStr, baseHost, fetchExternal)
 	if err != nil {
 		return scanURLResult{}, err
 	}
@@ -623,7 +640,7 @@ func (e *Extractor) scanURLPostsWithValidationDetailed(urlStr, baseHost string, 
 			}, nil
 		}
 		matches = append(matches, linkHdr...)
-		if render {
+		if render && !isRedirectResponse(resp) {
 			// Explore application state so POST endpoints fired only after a
 			// client-side navigation or form submission are captured too. The
 			// XHR/fetch GET URLs are not emitted here: this path is -posts mode,

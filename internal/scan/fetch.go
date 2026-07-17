@@ -41,7 +41,8 @@ func applyHeaders(req *http.Request) {
 	}
 }
 
-// FetchURL retrieves the content at url with timeouts and limited redirects
+// FetchURL retrieves the content at url with timeouts. Redirects are followed
+// only when FollowRedirects is enabled.
 func FetchURL(url string) (io.ReadCloser, error) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	if SkipTLSVerification {
@@ -55,7 +56,7 @@ func FetchURL(url string) (io.ReadCloser, error) {
 		Transport: transport,
 		Timeout:   HTTPClientTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= MaxRedirects {
+			if !FollowRedirects || len(via) >= MaxRedirects {
 				return http.ErrUseLastResponse
 			}
 			return nil

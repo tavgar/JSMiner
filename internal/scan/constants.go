@@ -57,6 +57,13 @@ var (
 	// SkipTLSVerification controls whether HTTPS certificate verification is skipped
 	// Defaults to true so invalid certificates are accepted unless explicitly disabled
 	SkipTLSVerification = true
+
+	// FollowRedirects controls whether HTTP clients follow 3xx responses. It is
+	// deliberately independent from external-resource discovery: -external
+	// decides which page-referenced scripts/imports are selected, while this
+	// setting decides whether any selected URL may follow a redirect. Redirects
+	// are disabled by default so scanning a target never silently moves elsewhere.
+	FollowRedirects = false
 )
 
 // SetRenderSleepDuration allows customizing the sleep duration for page rendering
@@ -77,6 +84,14 @@ func SetMaxExploreStates(n int) {
 // SetSkipTLSVerification configures whether HTTPS certificate verification should be skipped
 func SetSkipTLSVerification(skip bool) {
 	SkipTLSVerification = skip
+}
+
+// SetFollowRedirects configures whether HTTP 3xx responses are followed. When
+// disabled, the redirect response itself is returned without sending the next
+// request, regardless of whether its Location is on the same host, a subdomain,
+// or an unrelated domain.
+func SetFollowRedirects(follow bool) {
+	FollowRedirects = follow
 }
 
 // FetchRetries is how many extra attempts the shared HTTP fetch path makes when a

@@ -75,6 +75,11 @@ Flags:
 - `-endpoints` return only HTTP endpoints (default includes all matches)
 - `-posts` return HTTP POST request endpoints with any parameters
 - `-external` follow external scripts and imports (default `true`)
+- `-redirect` follow HTTP redirects (default `false`). This is independent of
+  `-external`: when disabled, a redirect is stopped before its destination is
+  requested even when it points to the same host or a subdomain; when enabled,
+  redirects may cross domains. The received page/response body and its inline
+  findings are still scanned.
 - `-full` enable full discovery mode. This is equivalent to combining
   `-crawl -crawl-passive -crawl-permute`; the normal crawl depth, page, passive
   and permutation limits still apply and can be adjusted with their individual
@@ -580,7 +585,9 @@ the pattern name `endpoint_url` for absolute URLs and `endpoint_path` for
 relative paths. Endpoint extraction is enabled by default. Pass the
 `-endpoints` flag to filter output to endpoints only. The extractor recognizes
 protocol-relative references and relative paths beginning with `./` or `../`.
-Cross-domain scripts and imports are followed by default. Pass `-external=false` to restrict scanning to the same domain.
+Cross-domain scripts and imports are followed by default. Pass `-external=false`
+to restrict those page-referenced sources to the same domain. This setting does
+not control redirects; use `-redirect=true` to follow HTTP redirects.
 Package `scan` also provides `Extractor.ScanReaderPostRequests` to capture
 endpoints used in HTTP POST requests. The function returns any associated
 parameters when available. Use the `-posts` flag to output only POST request
