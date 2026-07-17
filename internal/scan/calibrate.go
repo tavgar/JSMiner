@@ -615,14 +615,43 @@ func (c *autoCalibrator) ensureMethodShape(method, pageURL string) {
 
 // methodCatchAll reports whether a response to method at pageURL's directory
 // level matches that level's learned catch-all/error fingerprint for that verb.
-// It lazily calibrates the (method, level) pair on first sight. A true result
-// means "this verb is not really handled here" — the response is the level's
-// standard rejection shell — so the caller should not treat the method as
-// working.
+// It lazily calibrates the (method, level) pair on first sight. GET is special:
+// whole-page validation already learns GET fingerprints with the same controls,
+// so it reuses levelWild instead of issuing an identical second set of probes.
+// A true result means "this verb is not really handled here" — the response is
+// the level's standard rejection shell — so the caller should not treat the
+// method as working.
 func (c *autoCalibrator) methodCatchAll(method, pageURL string, status int, body []byte) bool {
 	lvl := levelOf(pageURL)
-	c.ensureMethodLevel(method, lvl)
 	sig := pageSig(status, body)
+
+	// Page calibration and GET method calibration both send bodyless GETs to
+	// levelProbePaths(lvl) and derive the same pageSig set. Reuse that cache.
+	// Besides removing three requests per HTML directory level, this also lets
+	// simultaneous page and method checks share ensureLevel's in-flight wait.
+	if method == http.MethodGet {
+		c.mu.Lock()
+		_, levelReady := c.levelDone[lvl]
+		_, levelPending := c.levelBusy[lvl]
+		c.mu.Unlock()
+		if levelReady || levelPending {
+			// Wait for an already-running page calibration, but do not start one
+			// here: non-HTML resources have no prior page-level result to reuse and
+			// retain the method-specific path below.
+			c.ensureLevel(lvl)
+			c.mu.Lock()
+			_, hit := c.levelWild[lvl][sig]
+			c.mu.Unlock()
+			if hit {
+				return true
+			}
+			// Candidate-shaped GET controls are likewise shared with whole-page
+			// validation, so no second request cache is needed for this level.
+			return c.levelShapeCatchAll(pageURL, status, body)
+		}
+	}
+
+	c.ensureMethodLevel(method, lvl)
 	c.mu.Lock()
 	if sigs, ok := c.methodWild[methodKey(method, lvl)]; ok {
 		if _, hit := sigs[sig]; hit {
@@ -633,8 +662,8 @@ func (c *autoCalibrator) methodCatchAll(method, pageURL string, status int, body
 	c.mu.Unlock()
 
 	// GET shape controls are identical to the whole-page controls. Reuse their
-	// cache so normal auto-calibrated crawls do not send a duplicate pair merely
-	// to make the same decision for gathered-URL reporting.
+	// cache even when the mixed calibration above was method-specific (for
+	// example, an extensionless JSON response that had no page validation).
 	if method == http.MethodGet {
 		return c.levelShapeCatchAll(pageURL, status, body)
 	}

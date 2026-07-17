@@ -179,6 +179,36 @@ func TestAutoCalibratorWaitsForConcurrentMethodCalibration(t *testing.T) {
 	}
 }
 
+// TestGETMethodCalibrationReusesPageCalibration guards the crawler's request
+// budget: page validation and GET method probing use the same bodyless controls
+// and signatures, so probing methods must not send a duplicate set of requests
+// after a directory level has already been calibrated.
+func TestGETMethodCalibrationReusesPageCalibration(t *testing.T) {
+	const catchAll = `<html><body>the requested page does not exist in this section</body></html>`
+
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "text/html")
+		io.WriteString(w, catchAll)
+	}))
+	defer srv.Close()
+
+	c := newAutoCalibrator()
+	c.setBase(srv.URL + "/")
+	c.ensureLevel("/section/")
+	if got := hits.Load(); got != 3 {
+		t.Fatalf("page level calibration sent %d probes, want 3", got)
+	}
+
+	if !c.methodCatchAll(http.MethodGet, srv.URL+"/section/missing", http.StatusOK, []byte(catchAll)) {
+		t.Fatal("GET method check did not reuse the page catch-all signature")
+	}
+	if got := hits.Load(); got != 3 {
+		t.Fatalf("GET method check sent %d additional probes, want 0", got-3)
+	}
+}
+
 // TestScanURLCrawlAutoCalibrate checks the end-to-end effect: a site whose
 // unknown paths all return the same catch-all page (carrying a secret) yields
 // that secret on a normal crawl but not when -ac suppresses the catch-all.

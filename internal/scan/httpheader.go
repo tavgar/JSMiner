@@ -272,6 +272,17 @@ func newHTTPHeaderRule() httpHeaderRule { return httpHeaderRule{} }
 func (httpHeaderRule) MatchName() string { return httpHeaderPattern }
 
 func (httpHeaderRule) Find(data []byte) []Match {
+	// Every supported header spelling necessarily contains one of these syntax
+	// bytes: ':' for pair/raw forms, '(' for setter calls, or '[' for indexed
+	// assignment. Most lines of pretty-printed source contain none of them. Reject
+	// those lines before running five regex engines over the same bytes; this is
+	// an exact syntactic prerequisite, so it cannot suppress a possible match.
+	if bytes.IndexByte(data, ':') < 0 &&
+		bytes.IndexByte(data, '(') < 0 &&
+		bytes.IndexByte(data, '[') < 0 {
+		return nil
+	}
+
 	var out []Match
 	// The forms overlap — `headers.set("X","Y")` satisfies both call forms — so
 	// identical pairs are reported once.
