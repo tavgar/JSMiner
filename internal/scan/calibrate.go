@@ -87,6 +87,14 @@ type autoCalibrator struct {
 	structCounts map[string]int
 }
 
+type pageSkipReason uint8
+
+const (
+	pageSkipNone pageSkipReason = iota
+	pageSkipWildcard
+	pageSkipDuplicate
+)
+
 func newAutoCalibrator() *autoCalibrator {
 	return &autoCalibrator{
 		wildcard:        make(map[string]struct{}),
@@ -173,6 +181,14 @@ func (c *autoCalibrator) calibrate(seedURL string) int {
 // URL so redirects do not lose the seed exemption; pageURL identifies the final
 // response URL for per-level calibration.
 func (c *autoCalibrator) skipPage(requestURL, pageURL string, status int, body []byte) bool {
+	return c.classifyPage(requestURL, pageURL, status, body) != pageSkipNone
+}
+
+// classifyPage distinguishes a calibrated wildcard/soft-404 from duplicate
+// content. Both avoid redundant scanning and method probes, but only a wildcard
+// must be barred from teaching the path permuter: duplicate aliases can be real
+// routes, whereas a catch-all path is proven not to exist.
+func (c *autoCalibrator) classifyPage(requestURL, pageURL string, status int, body []byte) pageSkipReason {
 	sig := pageSig(status, body)
 
 	c.mu.Lock()
@@ -183,11 +199,11 @@ func (c *autoCalibrator) skipPage(requestURL, pageURL string, status int, body [
 		c.seenBodies[hashBody(body)] = struct{}{}
 		c.countStructuralLocked(pageURL, body)
 		c.mu.Unlock()
-		return false
+		return pageSkipNone
 	}
 	if _, ok := c.wildcard[sig]; ok {
 		c.mu.Unlock()
-		return true
+		return pageSkipWildcard
 	}
 	c.mu.Unlock()
 
@@ -200,7 +216,7 @@ func (c *autoCalibrator) skipPage(requestURL, pageURL string, status int, body [
 	if sigs, ok := c.levelWild[lvl]; ok {
 		if _, hit := sigs[sig]; hit {
 			c.mu.Unlock()
-			return true
+			return pageSkipWildcard
 		}
 	}
 	c.mu.Unlock()
@@ -210,24 +226,24 @@ func (c *autoCalibrator) skipPage(requestURL, pageURL string, status int, body [
 	// candidate against two random siblings with the same shape before accepting
 	// it as unique.
 	if c.levelShapeCatchAll(pageURL, status, body) {
-		return true
+		return pageSkipWildcard
 	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	h := hashBody(body)
 	if _, ok := c.seenBodies[h]; ok {
-		return true
+		return pageSkipDuplicate
 	}
 	// Templated-duplicate suppression: a page that is structurally identical to
 	// enough already-scanned pages — same layout, different data — is dropped even
 	// though its bytes are new. This is the check that exact-body and coarse
 	// signatures miss.
 	if c.structMax > 0 && c.structuralClassFullLocked(pageURL, body) {
-		return true
+		return pageSkipDuplicate
 	}
 	c.seenBodies[h] = struct{}{}
-	return false
+	return pageSkipNone
 }
 
 // wildcardResponse reports whether a response matches the root or per-directory

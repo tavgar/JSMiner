@@ -86,6 +86,25 @@ func TestThrottleBacksOffOn429(t *testing.T) {
 	}
 }
 
+func TestThrottleCoalescesConcurrentBurstFailures(t *testing.T) {
+	th, _, advance := newTestThrottle()
+	th.observe(resp(503, ""), nil)
+	for i := 0; i < 6; i++ {
+		th.observe(resp(503, ""), nil)
+	}
+	if got := th.host("").curGap; got != throttleMinBackoff {
+		t.Fatalf("one concurrent failure burst raised gap to %s, want %s", got, throttleMinBackoff)
+	}
+
+	// A failure after the crawler has spent a full window at the new rate is new
+	// evidence that 500ms is still too aggressive, so it must escalate.
+	advance(throttleMinBackoff)
+	th.observe(resp(503, ""), nil)
+	if got := th.host("").curGap; got != 2*throttleMinBackoff {
+		t.Fatalf("later failure raised gap to %s, want %s", got, 2*throttleMinBackoff)
+	}
+}
+
 func TestThrottleHonoursRetryAfterSeconds(t *testing.T) {
 	th, slept, _ := newTestThrottle()
 	th.wait()

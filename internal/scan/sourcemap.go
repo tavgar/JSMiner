@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 // Source-map recovery lets the crawler scan the original, pre-bundled source
@@ -29,6 +30,14 @@ const maxSourceMapBytes = MaxBufferSize
 // maxRecoveredSources bounds how many original sources a single map may expand
 // to, protecting against pathological maps with tens of thousands of entries.
 const maxRecoveredSources = 5000
+
+// Source maps frequently omit sourcesContent while listing hundreds of original
+// files. Fetch those independent files concurrently, but cap the process-wide
+// fan-out so several crawl workers recovering maps at once cannot create an
+// unbounded request burst.
+const maxSourceMapWorkers = 8
+
+var sourceMapFetchSlots = make(chan struct{}, maxSourceMapWorkers)
 
 // sourceMapRefRe captures the reference that follows a sourceMappingURL
 // annotation, in either the `//#`/`//@` line-comment or `/*# ... */` block form.
@@ -95,30 +104,60 @@ func (e *Extractor) recoverSourceMap(bundleURL string, data []byte, header http.
 		return nil
 	}
 
-	var matches []Match
-	scanned := 0
-	for i, src := range sm.Sources {
-		if scanned >= maxRecoveredSources {
-			break
-		}
-		var body []byte
-		if i < len(sm.SourcesContent) && sm.SourcesContent[i] != "" {
-			body = []byte(sm.SourcesContent[i])
-		} else {
-			// No embedded content: fetch the original only when it resolves to an
-			// in-scope http(s) URL. Virtual paths (webpack://, ng://, …) are not
-			// fetchable and fall out at the scheme check.
-			body = e.fetchOriginalSource(mapURL, sm.SourceRoot, src, baseHost, external, visited)
-			if body == nil {
-				continue
+	limit := len(sm.Sources)
+	if limit > maxRecoveredSources {
+		limit = maxRecoveredSources
+	}
+	if limit == 0 {
+		return nil
+	}
+
+	bySource := make([][]Match, limit)
+	jobs := make(chan int)
+	workers := maxSourceMapWorkers
+	if workers > limit {
+		workers = limit
+	}
+	var wg sync.WaitGroup
+	for worker := 0; worker < workers; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				src := sm.Sources[i]
+				var body []byte
+				if i < len(sm.SourcesContent) && sm.SourcesContent[i] != "" {
+					body = []byte(sm.SourcesContent[i])
+				} else {
+					// No embedded content: fetch the original only when it resolves to an
+					// in-scope http(s) URL. Virtual paths (webpack://, ng://, …) are not
+					// fetchable and fall out at the scheme check.
+					body = func() []byte {
+						sourceMapFetchSlots <- struct{}{}
+						defer func() { <-sourceMapFetchSlots }()
+						return e.fetchOriginalSource(mapURL, sm.SourceRoot, src, baseHost, external, visited)
+					}()
+					if body == nil {
+						continue
+					}
+				}
+				ms, err := e.scanRecoveredSource(sourceLabel(src), body, posts)
+				if err != nil {
+					continue
+				}
+				bySource[i] = ms
 			}
-		}
-		ms, err := e.scanRecoveredSource(sourceLabel(src), body, posts)
-		if err != nil {
-			continue
-		}
+		}()
+	}
+	for i := 0; i < limit; i++ {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+
+	var matches []Match
+	for _, ms := range bySource {
 		matches = append(matches, ms...)
-		scanned++
 	}
 	return matches
 }
@@ -170,6 +209,9 @@ func (e *Extractor) fetchInScope(abs, baseHost string, external bool, visited *v
 		return nil, false
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, false
+	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxSourceMapBytes))
 	if err != nil {
 		return nil, false

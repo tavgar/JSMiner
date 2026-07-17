@@ -71,6 +71,12 @@ func (h *targetHeap) Len() int { return len(h.items) }
 
 func (h *targetHeap) Less(i, j int) bool {
 	a, b := h.items[i], h.items[j]
+	// The requested seed is the crawl's only mandatory page. Site-declaration
+	// guesses may have higher URL yield scores, but they must never run first or
+	// consume a tiny MaxPages budget before the target the user actually supplied.
+	if a.target.seed != b.target.seed {
+		return a.target.seed
+	}
 	if a.target.depth != b.target.depth {
 		return a.target.depth < b.target.depth // breadth-first: shallower first
 	}
@@ -80,6 +86,13 @@ func (h *targetHeap) Less(i, j int) bool {
 	// or the current site's own link graph.
 	if (a.target.passiveSource == "") != (b.target.passiveSource == "") {
 		return a.target.passiveSource == ""
+	}
+	// A direct page/script/API reference is stronger evidence than a synthetic
+	// cross-level permutation. Spend a capped crawl on every real discovery at
+	// this depth before speculative candidates, even when a guessed URL happens
+	// to have a higher-scoring file extension.
+	if a.target.permuted != b.target.permuted {
+		return !a.target.permuted
 	}
 	if a.score != b.score {
 		return a.score > b.score // higher yield first within a depth level

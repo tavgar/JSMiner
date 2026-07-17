@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"unicode"
 )
 
@@ -56,26 +57,39 @@ func discoverPassiveURLs(seed *url.URL, sourceNames []string, max int) []passive
 	}
 	sourceNames = normalizePassiveSources(sourceNames)
 
+	// Providers are independent and often have multi-second tail latency. Query
+	// them in parallel, then fold their responses in the requested source order
+	// so ranking, de-duplication and provenance remain deterministic.
+	type providerResult struct {
+		rawURLs []string
+		err     error
+	}
+	results := make([]providerResult, len(sourceNames))
+	var wg sync.WaitGroup
+	for i, source := range sourceNames {
+		i, source := i, source
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			switch source {
+			case passiveSourceWayback:
+				results[i].rawURLs, results[i].err = gatherWaybackURLs(seed.Hostname(), max)
+			case passiveSourceCommonCrawl:
+				results[i].rawURLs, results[i].err = gatherCommonCrawlURLs(seed.Hostname(), max)
+			}
+		}()
+	}
+	wg.Wait()
+
 	seen := make(map[string]struct{})
 	var candidates []passiveCandidate
-	for _, source := range sourceNames {
-		var (
-			rawURLs []string
-			err     error
-		)
-		switch source {
-		case passiveSourceWayback:
-			rawURLs, err = gatherWaybackURLs(seed.Hostname(), max)
-		case passiveSourceCommonCrawl:
-			rawURLs, err = gatherCommonCrawlURLs(seed.Hostname(), max)
-		default:
+	for i, source := range sourceNames {
+		result := results[i]
+		if result.err != nil {
+			vlog(1, "[crawl] passive source %s unavailable: %v", source, result.err)
 			continue
 		}
-		if err != nil {
-			vlog(1, "[crawl] passive source %s unavailable: %v", source, err)
-			continue
-		}
-		for _, raw := range rawURLs {
+		for _, raw := range result.rawURLs {
 			live, ok := passivePathCandidate(seed, raw)
 			if !ok {
 				continue

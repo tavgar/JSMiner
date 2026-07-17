@@ -94,17 +94,34 @@ func methodWorks(cal *autoCalibrator, method, pageURL string, status int, body [
 // preflight artifact. When GET does not work (a real POST-only API rejects GET
 // with 404/405), there is no baseline to collapse against, so every working verb
 // is reported as before — keeping genuine per-route method constraints intact.
-func probeURLMethods(cal *autoCalibrator, pageURL string, methods []string, body string) []string {
-	type probeResult struct {
-		method string
-		works  bool
-		sig    string
-	}
+type probeResult struct {
+	method string
+	works  bool
+	sig    string
+}
+
+// methodProbeBaseline is the GET response the page scanner already fetched.
+// Reusing it during method probing avoids downloading every crawled URL twice
+// while preserving the exact status/body checks probeURLMethods applies.
+type methodProbeBaseline struct {
+	status int
+	body   []byte
+}
+
+func probeURLMethodsWithBaseline(cal *autoCalibrator, pageURL string, methods []string, body string, baseline *methodProbeBaseline) []string {
 	probes := make([]probeResult, 0, len(methods))
 	for _, m := range methods {
 		reqBody := ""
 		if body != "" && bodyMethods[m] {
 			reqBody = body
+		}
+		if m == "GET" && reqBody == "" && baseline != nil {
+			probes = append(probes, probeResult{
+				method: m,
+				works:  methodWorks(cal, m, pageURL, baseline.status, baseline.body),
+				sig:    pageSig(baseline.status, baseline.body),
+			})
+			continue
 		}
 		resp, err := fetchURLResponseMethodSameScope(pageURL, m, reqBody)
 		if err != nil {
@@ -148,6 +165,10 @@ func probeURLMethods(cal *autoCalibrator, pageURL string, methods []string, body
 		worked = append(worked, pr.method)
 	}
 	return worked
+}
+
+func probeURLMethods(cal *autoCalibrator, pageURL string, methods []string, body string) []string {
+	return probeURLMethodsWithBaseline(cal, pageURL, methods, body, nil)
 }
 
 // paramReplayChanged reports whether sending the parameter body produced a

@@ -30,6 +30,7 @@ type checkpointTarget struct {
 	Depth         int    `json:"depth"`
 	Permuted      bool   `json:"permuted,omitempty"`
 	PassiveSource string `json:"passive_source,omitempty"`
+	Seed          bool   `json:"seed,omitempty"`
 }
 
 type passiveCheckpointStats struct {

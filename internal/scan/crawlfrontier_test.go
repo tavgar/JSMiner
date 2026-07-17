@@ -16,7 +16,7 @@ func TestTargetScoreOrdering(t *testing.T) {
 		{"https://x.com/api/users", scoreAPI},
 		{"https://x.com/graphql", scoreAPI},
 		{"https://x.com/v2/orders", scoreAPI},
-		{"https://x.com/dashboard", scoreRoute},   // extensionless page/route
+		{"https://x.com/dashboard", scoreRoute}, // extensionless page/route
 		{"https://x.com/blog/2020/01/post.html", scorePage},
 		{"https://x.com/index.php", scorePage},
 		{"https://x.com/report.csv", scoreDefault}, // unknown text extension
@@ -71,5 +71,26 @@ func TestCrawlFrontierStableTie(t *testing.T) {
 	want := []string{"https://x.com/a.js", "https://x.com/b.js", "https://x.com/c.js"}
 	if !equalStrings(got, want) {
 		t.Fatalf("stable tie order = %v, want %v", got, want)
+	}
+}
+
+func TestCrawlFrontierAlwaysStartsWithRequestedSeed(t *testing.T) {
+	f := newCrawlFrontier()
+	f.push(crawlTarget{url: "https://x.com/", depth: 0, seed: true})
+	f.push(crawlTarget{url: "https://x.com/.well-known/openid-configuration", depth: 0})
+	f.push(crawlTarget{url: "https://x.com/sitemap.json", depth: 0})
+
+	if got := f.pop().url; got != "https://x.com/" {
+		t.Fatalf("frontier started with %s, want requested seed", got)
+	}
+}
+
+func TestCrawlFrontierPrefersRealDiscoveryOverPermutation(t *testing.T) {
+	f := newCrawlFrontier()
+	f.push(crawlTarget{url: "https://x.com/guessed/config.js", depth: 1, permuted: true})
+	f.push(crawlTarget{url: "https://x.com/dashboard", depth: 1})
+
+	if got := f.pop().url; got != "https://x.com/dashboard" {
+		t.Fatalf("frontier chose synthetic %s before direct discovery", got)
 	}
 }

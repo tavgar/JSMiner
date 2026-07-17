@@ -254,6 +254,7 @@ type crawlTarget struct {
 	depth         int
 	permuted      bool
 	passiveSource string
+	seed          bool
 }
 
 // ScanURLCrawl scans urlStr and then crawls the in-scope endpoints it
@@ -262,12 +263,8 @@ type crawlTarget struct {
 // whether off-scope script/import references are followed while scanning an
 // individual page; the page-to-page crawl itself is governed by opts.
 func (e *Extractor) ScanURLCrawl(urlStr string, endpoints, external, render bool, opts CrawlOptions) ([]Match, error) {
-	scanPage := func(u, baseHost string, visited *visitedSet, validator *autoCalibrator) ([]Match, bool, error) {
-		if validator != nil {
-			return e.scanURLValidated(u, baseHost, endpoints, visited, external, render, validator)
-		}
-		ms, err := e.scanURL(u, baseHost, endpoints, visited, external, render)
-		return ms, err == nil, err
+	scanPage := func(u, baseHost string, visited *visitedSet, validator *autoCalibrator) (scanURLResult, error) {
+		return e.scanURLWithValidationDetailed(u, baseHost, endpoints, visited, external, render, validator)
 	}
 	return e.crawlBFS(urlStr, opts, scanPage)
 }
@@ -275,12 +272,8 @@ func (e *Extractor) ScanURLCrawl(urlStr string, endpoints, external, render bool
 // ScanURLPostsCrawl behaves like ScanURLCrawl but scans each page for HTTP POST
 // request endpoints, following the discovered endpoints to reach deeper pages.
 func (e *Extractor) ScanURLPostsCrawl(urlStr string, external, render bool, opts CrawlOptions) ([]Match, error) {
-	scanPage := func(u, baseHost string, visited *visitedSet, validator *autoCalibrator) ([]Match, bool, error) {
-		if validator != nil {
-			return e.scanURLPostsValidated(u, baseHost, visited, external, render, validator)
-		}
-		ms, err := e.scanURLPosts(u, baseHost, visited, external, render)
-		return ms, err == nil, err
+	scanPage := func(u, baseHost string, visited *visitedSet, validator *autoCalibrator) (scanURLResult, error) {
+		return e.scanURLPostsWithValidationDetailed(u, baseHost, visited, external, render, validator)
 	}
 	return e.crawlBFS(urlStr, opts, scanPage)
 }
@@ -292,7 +285,7 @@ func (e *Extractor) ScanURLPostsCrawl(urlStr string, external, render bool, opts
 // The visited map is shared across every scanPage call so a JS bundle
 // referenced from many pages is fetched and scanned only once. The enqueued map
 // tracks page-level targets so each page is crawled at most once.
-func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u, baseHost string, visited *visitedSet, validator *autoCalibrator) ([]Match, bool, error)) ([]Match, error) {
+func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u, baseHost string, visited *visitedSet, validator *autoCalibrator) (scanURLResult, error)) ([]Match, error) {
 	seed, err := url.Parse(seedURL)
 	if err != nil {
 		return nil, err
@@ -380,7 +373,7 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 			for _, ct := range cp.Frontier {
 				frontier.push(crawlTarget{
 					url: ct.URL, depth: ct.Depth, permuted: ct.Permuted,
-					passiveSource: ct.PassiveSource,
+					passiveSource: ct.PassiveSource, seed: ct.Seed,
 				})
 				hasPendingPassive = hasPendingPassive || ct.PassiveSource != ""
 			}
@@ -412,7 +405,7 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 	}
 
 	if !resumed {
-		frontier.push(crawlTarget{url: start, depth: 0})
+		frontier.push(crawlTarget{url: start, depth: 0, seed: true})
 		enqueued[start] = struct{}{}
 		// The seed is always crawled; register it so it counts toward its own class.
 		classer.admit(start)
@@ -510,20 +503,22 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 		return true
 	}
 
-	// enqueuePermutations teaches the permuter only real URLs: direct targets
-	// found in page content and the current page when it was not itself synthetic.
-	// Candidates pass through the same global dedup/template admission as ordinary
-	// targets, and only successful admission consumes PermuteMax.
-	enqueuePermutations := func(t crawlTarget, targets []string) {
+	// enqueuePermutations teaches the permuter only URLs that survived a live
+	// fetch and page validation. A broad JavaScript match is still queued and
+	// checked normally, but it cannot multiply into hundreds of cross-level guesses
+	// before proving it exists. This is important for bundled module tables and
+	// schema keywords that look path-like: validation preserves every direct
+	// discovery while preventing false positives from amplifying the request load.
+	// A synthetic page never teaches its own URL; any direct target it reveals is
+	// validated later as an ordinary crawl target before it enters the dictionary.
+	enqueuePermutations := func(t crawlTarget) {
 		if perm == nil || (opts.MaxDepth >= 0 && t.depth >= opts.MaxDepth) {
 			return
 		}
-		learned := make([]string, 0, len(targets)+1)
-		learned = append(learned, targets...)
-		if !t.permuted {
-			learned = append(learned, t.url)
+		if t.permuted {
+			return
 		}
-		for _, candidate := range perm.observe(learned) {
+		for _, candidate := range perm.observe([]string{t.url}) {
 			if !perm.hasBudget() {
 				break
 			}
@@ -585,13 +580,13 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 		for _, t := range frontier.snapshot() {
 			cp.Frontier = append(cp.Frontier, checkpointTarget{
 				URL: t.url, Depth: t.depth, Permuted: t.permuted,
-				PassiveSource: t.passiveSource,
+				PassiveSource: t.passiveSource, Seed: t.seed,
 			})
 		}
 		for _, t := range inflight {
 			cp.Frontier = append(cp.Frontier, checkpointTarget{
 				URL: t.url, Depth: t.depth, Permuted: t.permuted,
-				PassiveSource: t.passiveSource,
+				PassiveSource: t.passiveSource, Seed: t.seed,
 			})
 		}
 		if err := writeCheckpoint(opts.ResumeFile, cp); err != nil {
@@ -629,12 +624,13 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 		// the crawl. targets/params are computed in the worker — they are pure
 		// functions of the page's matches — so the coordinator's turn stays short.
 		type crawlResult struct {
-			job      crawlJob
-			matches  []Match
-			targets  []string
-			params   []string
-			accepted bool
-			err      error
+			job        crawlJob
+			matches    []Match
+			targets    []string
+			params     []string
+			accepted   bool
+			skipReason pageSkipReason
+			err        error
 		}
 
 		jobCh := make(chan crawlJob)
@@ -660,20 +656,21 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 					if t.passiveSource != "" {
 						validator = cal
 					}
-					ms, accepted, err := scanPage(t.url, baseHost, visited, validator)
+					pageResult, err := scanPage(t.url, baseHost, visited, validator)
 					if err != nil {
 						resultCh <- crawlResult{job: job, err: err}
 						continue
 					}
-					if !accepted {
+					if !pageResult.accepted {
 						resultCh <- crawlResult{job: job}
 						continue
 					}
+					ms := pageResult.matches
 					out := ms
 					// Report which request methods this page accepts, judged against
 					// the per-method error logic learned for its level.
-					if opts.ProbeMethods {
-						if worked := probeURLMethods(cal, t.url, methods, ""); worked != nil {
+					if opts.ProbeMethods && !pageResult.skipped {
+						if worked := probeURLMethodsWithBaseline(cal, t.url, methods, "", pageResult.baseline); worked != nil {
 							vlog(3, "[crawl] probe %s -> methods %s", t.url, strings.Join(worked, ","))
 							if gm, ok := gatheredMatch(t.url, worked, ""); ok {
 								if t.passiveSource != "" {
@@ -700,7 +697,7 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 					}
 					resultCh <- crawlResult{
 						job: job, matches: out, targets: targets, params: params,
-						accepted: true,
+						accepted: true, skipReason: pageResult.skipReason,
 					}
 				}
 			}()
@@ -807,7 +804,9 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 						vlog(3, "[crawl] enqueue depth %d %s", t.depth+1, next)
 					}
 				}
-				enqueuePermutations(t, res.targets)
+				if res.skipReason != pageSkipWildcard {
+					enqueuePermutations(t)
+				}
 				// Checkpoint periodically, re-queuing the still-in-flight pages so the
 				// snapshot is self-consistent.
 				if sinceCheckpoint++; opts.ResumeFile != "" && sinceCheckpoint >= crawlCheckpointInterval {
@@ -838,7 +837,7 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 			if t.passiveSource != "" {
 				validator = cal
 			}
-			ms, accepted, err := scanPage(t.url, baseHost, visited, validator)
+			pageResult, err := scanPage(t.url, baseHost, visited, validator)
 			if err != nil {
 				if t.passiveSource != "" {
 					stats.PassiveRejected++
@@ -847,6 +846,8 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 				vlog(1, "[crawl] (%d) depth %d %s -> error: %v", pages, t.depth, t.url, err)
 				continue
 			}
+			ms := pageResult.matches
+			accepted := pageResult.accepted
 			stats.PagesFetched++
 			if !accepted {
 				if t.passiveSource != "" {
@@ -867,8 +868,8 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 
 			// Report which request methods this page accepts, judged against the
 			// per-method error logic learned for its level.
-			if opts.ProbeMethods {
-				if worked := probeURLMethods(cal, t.url, methods, ""); worked != nil {
+			if opts.ProbeMethods && !pageResult.skipped {
+				if worked := probeURLMethodsWithBaseline(cal, t.url, methods, "", pageResult.baseline); worked != nil {
 					vlog(3, "[crawl] probe %s -> methods %s", t.url, strings.Join(worked, ","))
 					if gm, ok := gatheredMatch(t.url, worked, ""); ok {
 						if t.passiveSource != "" {
@@ -919,7 +920,9 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 					vlog(3, "[crawl] enqueue depth %d %s", t.depth+1, next)
 				}
 			}
-			enqueuePermutations(t, targets)
+			if pageResult.skipReason != pageSkipWildcard {
+				enqueuePermutations(t)
+			}
 			// Checkpoint periodically. The serial loop fully processes each page
 			// before the next, so there are no in-flight pages to re-queue.
 			if opts.ResumeFile != "" && pages%crawlCheckpointInterval == 0 {
@@ -968,6 +971,7 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 // already passed validPathMatch, and non-web values such as Windows paths fall
 // out at the scheme check below.
 func crawlTargetsFromMatches(ms []Match, pageURL, baseHost string, opts CrawlOptions) []string {
+	suppressedContextPaths := bundledContextPaths(ms)
 	seen := make(map[string]struct{})
 	var out []string
 	for _, m := range ms {
@@ -980,6 +984,10 @@ func crawlTargetsFromMatches(ms []Match, pageURL, baseHost string, opts CrawlOpt
 		// trim before resolving so the reference parses correctly.
 		raw := strings.TrimSpace(m.Value)
 		if raw == "" {
+			continue
+		}
+		if _, skip := suppressedContextPaths[m.Source+"\x00"+raw]; skip {
+			vlog(3, "[crawl] skip bundled module-context path %s from %s", raw, m.Source)
 			continue
 		}
 		abs := resolveURL(resolveBase(m.Source, pageURL), raw)
@@ -1004,6 +1012,60 @@ func crawlTargetsFromMatches(ms []Match, pageURL, baseHost string, opts CrawlOpt
 		out = append(out, n)
 	}
 	return out
+}
+
+// bundledContextPaths recognises the dense extensionless/.js key pairs emitted
+// into webpack-style module context tables. A bundle containing "./af" +
+// "./af.js", "./ar" + "./ar.js", and hundreds more is enumerating modules that
+// are already inside the bundle; those strings are not server endpoints. Mining
+// them as findings remains useful, but crawling every key against the website
+// creates hundreds of guaranteed soft-404s and can crowd real URLs out of the
+// page budget. Requiring at least eight pairs from one source keeps ordinary
+// relative paths (including a lone dynamic import) fully crawlable.
+func bundledContextPaths(ms []Match) map[string]struct{} {
+	const minContextPairs = 8
+
+	bySource := make(map[string]map[string]struct{})
+	for _, m := range ms {
+		switch m.Pattern {
+		case "endpoint_path", "post_path", "path":
+		default:
+			continue
+		}
+		raw := strings.TrimSpace(m.Value)
+		if m.Source == "" || !strings.HasPrefix(raw, "./") || strings.ContainsAny(raw, "?#") {
+			continue
+		}
+		if bySource[m.Source] == nil {
+			bySource[m.Source] = make(map[string]struct{})
+		}
+		bySource[m.Source][raw] = struct{}{}
+	}
+
+	suppressed := make(map[string]struct{})
+	for source, paths := range bySource {
+		var pairs [][2]string
+		for raw := range paths {
+			ext := strings.ToLower(path.Ext(raw))
+			switch ext {
+			case ".js", ".mjs", ".cjs":
+			default:
+				continue
+			}
+			stem := strings.TrimSuffix(raw, path.Ext(raw))
+			if _, ok := paths[stem]; ok {
+				pairs = append(pairs, [2]string{stem, raw})
+			}
+		}
+		if len(pairs) < minContextPairs {
+			continue
+		}
+		for _, pair := range pairs {
+			suppressed[source+"\x00"+pair[0]] = struct{}{}
+			suppressed[source+"\x00"+pair[1]] = struct{}{}
+		}
+	}
+	return suppressed
 }
 
 // resolveBase picks the URL that a match's relative value should be resolved

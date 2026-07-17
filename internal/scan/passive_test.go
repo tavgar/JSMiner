@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestPassivePathCandidateRebasesPathAndDropsHistoricalQuery(t *testing.T) {
@@ -100,6 +101,52 @@ func TestDiscoverPassiveURLsUsesProvidersWithoutLeakingTargetHeaders(t *testing.
 	if got[1].URL != "https://target.example/admin" ||
 		got[1].Source != passiveSourceWayback {
 		t.Fatalf("second candidate = %+v, want de-duplicated Wayback path", got[1])
+	}
+}
+
+func TestPassiveProvidersAreQueriedConcurrently(t *testing.T) {
+	oldWayback := waybackCDXEndpoint
+	oldCollections := commonCrawlCollectionsURL
+	defer func() {
+		waybackCDXEndpoint = oldWayback
+		commonCrawlCollectionsURL = oldCollections
+	}()
+
+	var active, maxActive atomic.Int32
+	var provider *httptest.Server
+	provider = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := active.Add(1)
+		for {
+			old := maxActive.Load()
+			if n <= old || maxActive.CompareAndSwap(old, n) {
+				break
+			}
+		}
+		time.Sleep(40 * time.Millisecond)
+		active.Add(-1)
+
+		switch r.URL.Path {
+		case "/wayback":
+			io.WriteString(w, `[["original"],["https://target.example/from-wayback.js"]]`)
+		case "/collinfo.json":
+			fmt.Fprintf(w, `[{"cdx-api":%q}]`, provider.URL+"/cc-index")
+		case "/cc-index":
+			io.WriteString(w, `{"url":"https://target.example/from-commoncrawl.js"}`+"\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer provider.Close()
+	waybackCDXEndpoint = provider.URL + "/wayback"
+	commonCrawlCollectionsURL = provider.URL + "/collinfo.json"
+
+	seed, _ := url.Parse("https://target.example/")
+	got := discoverPassiveURLs(seed, nil, 10)
+	if len(got) != 2 {
+		t.Fatalf("passive candidates = %+v, want two", got)
+	}
+	if maxActive.Load() < 2 {
+		t.Fatalf("passive provider requests did not overlap; max concurrency=%d", maxActive.Load())
 	}
 }
 

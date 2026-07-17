@@ -76,9 +76,10 @@ type requestThrottle struct {
 // hostThrottle is the per-host pacing state: its current gap, the earliest instant
 // its next request may start, and its recent clean-response streak for gap decay.
 type hostThrottle struct {
-	curGap time.Duration
-	next   time.Time
-	ok     int
+	curGap      time.Duration
+	next        time.Time
+	lastBackoff time.Time
+	ok          int
 }
 
 // Adaptive-backoff tuning. These govern how aggressively the throttle reacts to
@@ -395,28 +396,45 @@ func (t *requestThrottle) noteThrottledHost(h string, status int, retryAfter str
 
 	hs := t.host(h)
 	hs.ok = 0
-	next := hs.curGap * 2
-	if next < throttleMinBackoff {
-		next = throttleMinBackoff
+	now := t.now()
+	// Several requests may already be in flight when the first 429/503 arrives.
+	// Their responses describe one burst, not independent failures at progressively
+	// slower rates; multiplying the gap for every member of that burst can jump
+	// straight from 500ms to the 30s ceiling. Coalesce signals that arrive within
+	// the current backoff window. A later response, after the crawler actually
+	// waited at that rate, is new evidence and escalates normally.
+	coalesced := !hs.lastBackoff.IsZero() &&
+		!now.Before(hs.lastBackoff) &&
+		now.Sub(hs.lastBackoff) < hs.curGap
+	if !coalesced {
+		next := hs.curGap * 2
+		if next < throttleMinBackoff {
+			next = throttleMinBackoff
+		}
+		if next > t.maxGap {
+			next = t.maxGap
+		}
+		hs.curGap = next
+		hs.lastBackoff = now
 	}
-	if next > t.maxGap {
-		next = t.maxGap
-	}
-	hs.curGap = next
 
-	resumeAt := t.now().Add(hs.curGap)
+	resumeAt := now.Add(hs.curGap)
 	if ra := parseRetryAfter(retryAfter, t.now); ra > 0 {
 		if ra > t.maxGap {
 			ra = t.maxGap
 		}
-		if until := t.now().Add(ra); until.After(resumeAt) {
+		if until := now.Add(ra); until.After(resumeAt) {
 			resumeAt = until
 		}
 	}
 	if resumeAt.After(hs.next) {
 		hs.next = resumeAt
 	}
-	vlog(2, "[throttle] %d from %q -> backing off, gap now %s", status, h, hs.curGap.Round(time.Millisecond))
+	if coalesced {
+		vlog(2, "[throttle] %d from %q -> coalesced with current burst, gap remains %s", status, h, hs.curGap.Round(time.Millisecond))
+	} else {
+		vlog(2, "[throttle] %d from %q -> backing off, gap now %s", status, h, hs.curGap.Round(time.Millisecond))
+	}
 }
 
 // decay eases host h's adaptive gap back toward the base after a run of clean

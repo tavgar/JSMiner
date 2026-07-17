@@ -128,3 +128,44 @@ func TestCrawlProbeBudget(t *testing.T) {
 		t.Errorf("probe budget regression: %d requests for 5 endpoints exceeds ceiling %d (breakdown %v)", total, ceiling, tally)
 	}
 }
+
+func TestCrawlDoesNotProbeSkippedDuplicatePage(t *testing.T) {
+	var mu sync.Mutex
+	postHits := map[string]int{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			mu.Lock()
+			postHits[r.URL.Path]++
+			mu.Unlock()
+		}
+		w.Header().Set("Content-Type", "text/html")
+		switch r.URL.Path {
+		case "/":
+			fmt.Fprint(w, `<html><body><a href="/a">a</a><a href="/b">b</a></body></html>`)
+		case "/a", "/b":
+			fmt.Fprint(w, `<html><body>identical duplicate page body with a deliberately distinct and much longer response shape for calibration accuracy</body></html>`)
+		default:
+			fmt.Fprint(w, `<html><body>calibration catch all page</body></html>`)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	e := NewExtractor(false, false)
+	opts := CrawlOptions{
+		MaxDepth: 1, MaxPages: 3, SameScopeOnly: true,
+		AutoCalibrate: true, ProbeMethods: true,
+		RequestMethods: []string{"GET", "POST"}, Concurrency: 1,
+	}
+	if _, err := e.ScanURLCrawl(srv.URL, false, false, false, opts); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	got := postHits["/a"] + postHits["/b"]
+	mu.Unlock()
+	if got != 1 {
+		t.Fatalf("duplicate pages received %d POST probes, want 1 (the accepted representative only)", got)
+	}
+}

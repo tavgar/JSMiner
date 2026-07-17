@@ -43,6 +43,35 @@ func TestMethodWorks(t *testing.T) {
 	}
 }
 
+func TestProbeURLMethodsReusesFetchedGETBaseline(t *testing.T) {
+	var getHits, postHits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			getHits++
+		case http.MethodPost:
+			postHits++
+		}
+		io.WriteString(w, "the same stable response body for every request method")
+	}))
+	defer srv.Close()
+
+	baseline := &methodProbeBaseline{
+		status: http.StatusOK,
+		body:   []byte("the same stable response body for every request method"),
+	}
+	got := probeURLMethodsWithBaseline(nil, srv.URL, []string{"GET", "POST"}, "", baseline)
+	if strings.Join(got, ",") != "GET" {
+		t.Fatalf("worked methods = %v, want GET", got)
+	}
+	if getHits != 0 {
+		t.Fatalf("GET was fetched %d time(s), want 0 because the page response is the baseline", getHits)
+	}
+	if postHits != 1 {
+		t.Fatalf("POST was fetched %d time(s), want 1", postHits)
+	}
+}
+
 // TestScanURLCrawlGathersMethods verifies the end-to-end feature: a crawl reports,
 // per URL, which request verbs worked — GET on a read-only page, and both GET and
 // POST on an endpoint that accepts POST.

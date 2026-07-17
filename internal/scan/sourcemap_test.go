@@ -5,7 +5,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // findByPattern returns the first match with the given pattern, or a zero Match
@@ -202,6 +205,74 @@ func TestSourceMapFetchesNonEmbedded(t *testing.T) {
 	}
 	if !hasPattern(matches, "google_api") {
 		t.Fatalf("expected google_api recovered from fetched original, got %+v", matches)
+	}
+}
+
+func TestSourceMapFetchesOriginalsConcurrently(t *testing.T) {
+	var active, maxActive atomic.Int32
+	sourceMapJSON := `{"version":3,"sourceRoot":"/src/","sources":["a.js","b.js","c.js","d.js"]}`
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript")
+		io.WriteString(w, "var x=1;\n//# sourceMappingURL=/app.js.map")
+	})
+	mux.HandleFunc("/app.js.map", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, sourceMapJSON)
+	})
+	mux.HandleFunc("/src/", func(w http.ResponseWriter, r *http.Request) {
+		n := active.Add(1)
+		for {
+			old := maxActive.Load()
+			if n <= old || maxActive.CompareAndSwap(old, n) {
+				break
+			}
+		}
+		time.Sleep(40 * time.Millisecond)
+		active.Add(-1)
+		w.Header().Set("Content-Type", "application/javascript")
+		io.WriteString(w, "const sourceNumber="+strconv.Itoa(len(r.URL.Path))+";")
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	e := NewExtractor(false, false)
+	if _, err := e.ScanURL(srv.URL+"/app.js", false, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := maxActive.Load(); got < 2 {
+		t.Fatalf("max concurrent original-source fetches = %d, want at least 2", got)
+	}
+}
+
+func TestSourceMapDoesNotScanErrorBodiesAsOriginalSource(t *testing.T) {
+	const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJlcnJvciI6dHJ1ZX0.errorBodySignature"
+	sourceMapJSON := `{"version":3,"sourceRoot":"/src/","sources":["missing.js"]}`
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript")
+		io.WriteString(w, "var x=1;\n//# sourceMappingURL=/app.js.map")
+	})
+	mux.HandleFunc("/app.js.map", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, sourceMapJSON)
+	})
+	mux.HandleFunc("/src/missing.js", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		io.WriteString(w, "debug error page leaked-looking token "+jwt)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	e := NewExtractor(false, false)
+	matches, err := e.ScanURL(srv.URL+"/app.js", false, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range matches {
+		if m.Value == jwt {
+			t.Fatal("404 response body was scanned as original source")
+		}
 	}
 }
 

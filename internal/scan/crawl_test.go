@@ -227,6 +227,37 @@ func TestCrawlTargetsResolveAgainstSource(t *testing.T) {
 	}
 }
 
+func TestCrawlTargetsSuppressBundledModuleContextEnumeration(t *testing.T) {
+	const source = "https://example.com/static/app.js"
+	var ms []Match
+	for _, name := range []string{"af", "ar", "de", "en", "es", "fr", "nl", "pt"} {
+		ms = append(ms,
+			Match{Source: source, Pattern: "endpoint_path", Value: "./" + name},
+			Match{Source: source, Pattern: "endpoint_path", Value: "./" + name + ".js"},
+		)
+	}
+	// A normal relative endpoint from the same bundle must remain crawlable.
+	ms = append(ms, Match{Source: source, Pattern: "endpoint_path", Value: "./real-api.js"})
+
+	got := crawlTargetsFromMatches(ms, "https://example.com/", "example.com", CrawlOptions{SameScopeOnly: true})
+	if len(got) != 1 || got[0] != "https://example.com/static/real-api.js" {
+		t.Fatalf("bundled context targets = %v, want only the real relative endpoint", got)
+	}
+}
+
+func TestCrawlTargetsKeepSmallRelativePathSet(t *testing.T) {
+	const source = "https://example.com/static/app.js"
+	ms := []Match{
+		{Source: source, Pattern: "endpoint_path", Value: "./feature"},
+		{Source: source, Pattern: "endpoint_path", Value: "./feature.js"},
+	}
+	got := crawlTargetsFromMatches(ms, "https://example.com/", "example.com", CrawlOptions{SameScopeOnly: true})
+	if !contains(got, "https://example.com/static/feature") ||
+		!contains(got, "https://example.com/static/feature.js") {
+		t.Fatalf("ordinary relative paths were over-filtered: %v", got)
+	}
+}
+
 // TestScanURLCrawlCrossOriginRelativePath verifies the crawl does not misresolve
 // a relative path found inside a cross-origin script against the seed host. The
 // seed (127.0.0.1) loads a third-party script served under a different host

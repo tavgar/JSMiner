@@ -362,8 +362,8 @@ func (e *Extractor) ScanURLPosts(urlStr string, external bool, render bool) ([]M
 // a concurrent crawl's workers. When external is false, only resources from the
 // same domain are processed.
 func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited *visitedSet, external bool, render bool) ([]Match, error) {
-	matches, _, err := e.scanURLWithValidation(urlStr, baseHost, endpoints, visited, external, render, nil)
-	return matches, err
+	result, err := e.scanURLWithValidationDetailed(urlStr, baseHost, endpoints, visited, external, render, nil)
+	return result.matches, err
 }
 
 // scanURLValidated scans a passive URL hint only when its live response proves
@@ -371,12 +371,25 @@ func (e *Extractor) scanURL(urlStr, baseHost string, endpoints bool, visited *vi
 // error statuses and calibrated catch-all/soft-404 responses, before any rules,
 // imports or rendering are run against that response.
 func (e *Extractor) scanURLValidated(urlStr, baseHost string, endpoints bool, visited *visitedSet, external bool, render bool, validator *autoCalibrator) ([]Match, bool, error) {
-	return e.scanURLWithValidation(urlStr, baseHost, endpoints, visited, external, render, validator)
+	result, err := e.scanURLWithValidationDetailed(urlStr, baseHost, endpoints, visited, external, render, validator)
+	return result.matches, result.accepted, err
 }
 
-func (e *Extractor) scanURLWithValidation(urlStr, baseHost string, endpoints bool, visited *visitedSet, external bool, render bool, validator *autoCalibrator) ([]Match, bool, error) {
+// scanURLResult keeps the already-fetched GET response available to the crawl
+// worker for method probing. skipped means auto-calibration proved the page was
+// a soft-404 or duplicate: the URL may still be a valid passive/permutation
+// source, but probing every mutation method would add no findings.
+type scanURLResult struct {
+	matches    []Match
+	accepted   bool
+	skipped    bool
+	skipReason pageSkipReason
+	baseline   *methodProbeBaseline
+}
+
+func (e *Extractor) scanURLWithValidationDetailed(urlStr, baseHost string, endpoints bool, visited *visitedSet, external bool, render bool, validator *autoCalibrator) (scanURLResult, error) {
 	if !visited.visit(urlStr) {
-		return nil, false, nil
+		return scanURLResult{}, nil
 	}
 
 	fetchExternal := external
@@ -388,7 +401,7 @@ func (e *Extractor) scanURLWithValidation(urlStr, baseHost string, endpoints boo
 	}
 	resp, err := fetchURLResponseScoped(urlStr, baseHost, fetchExternal)
 	if err != nil {
-		return nil, false, err
+		return scanURLResult{}, err
 	}
 	defer resp.Body.Close()
 
@@ -401,17 +414,18 @@ func (e *Extractor) scanURLWithValidation(urlStr, baseHost string, endpoints boo
 	// ones only their Content-Type reveals.
 	if isBinaryContentType(resp.Header.Get("Content-Type")) {
 		vlog(2, "[scan] skip binary %q at %s", resp.Header.Get("Content-Type"), finalURL)
-		return nil, false, nil
+		return scanURLResult{}, nil
 	}
 
 	data, err := readCappedBody(resp.Body)
 	if err != nil {
-		return nil, false, err
+		return scanURLResult{}, err
 	}
+	baseline := &methodProbeBaseline{status: resp.StatusCode, body: data}
 	if validator != nil &&
 		(!passiveResponseStatusValid(resp.StatusCode) || validator.wildcardResponse(urlStr, resp.StatusCode, data)) {
 		vlog(1, "[crawl] reject passive path %s (status/catch-all validation)", finalURL)
-		return nil, false, nil
+		return scanURLResult{}, nil
 	}
 
 	var matches []Match
@@ -423,9 +437,16 @@ func (e *Extractor) scanURLWithValidation(urlStr, baseHost string, endpoints boo
 	linkHdr := extractLinkHeaderMatches(resp.Header, finalURL)
 
 	if isHTMLContent(finalURL, resp.Header.Get("Content-Type")) {
-		if e.calibrator != nil && e.calibrator.skipPage(urlStr, finalURL, resp.StatusCode, data) {
+		reason := pageSkipNone
+		if e.calibrator != nil {
+			reason = e.calibrator.classifyPage(urlStr, finalURL, resp.StatusCode, data)
+		}
+		if reason != pageSkipNone {
 			vlog(1, "[crawl] skip (soft-404/duplicate) %s", finalURL)
-			return matches, true, nil
+			return scanURLResult{
+				matches: matches, accepted: true, skipped: true,
+				skipReason: reason, baseline: baseline,
+			}, nil
 		}
 		matches = append(matches, linkHdr...)
 		if render {
@@ -452,16 +473,16 @@ func (e *Extractor) scanURLWithValidation(urlStr, baseHost string, endpoints boo
 					}
 					matches = append(matches, e.scanHTMLState(finalURL, baseHost, st, dyn, endpoints, visited, external, render)...)
 				}
-				return matches, true, nil
+				return scanURLResult{matches: matches, accepted: true, baseline: baseline}, nil
 			}
 			// Fall back to a plain render if state exploration failed entirely.
 			if rhtml, scripts, err := RenderURL(finalURL); err == nil {
 				matches = append(matches, e.scanHTMLState(finalURL, baseHost, rhtml, scripts, endpoints, visited, external, render)...)
-				return matches, true, nil
+				return scanURLResult{matches: matches, accepted: true, baseline: baseline}, nil
 			}
 		}
 		matches = append(matches, e.scanHTMLState(finalURL, baseHost, data, nil, endpoints, visited, external, render)...)
-		return matches, true, nil
+		return scanURLResult{matches: matches, accepted: true, baseline: baseline}, nil
 	}
 
 	// Treat as JavaScript or other. Its `Link:` header references (e.g. a JSON API's
@@ -481,7 +502,7 @@ func (e *Extractor) scanURLWithValidation(urlStr, baseHost string, endpoints boo
 		ms, err := e.scanDataWithEndpoints(finalURL, data,
 			isJSFile(finalURL) || isJavaScriptContentType(resp.Header.Get("Content-Type")))
 		if err != nil {
-			return nil, false, err
+			return scanURLResult{}, err
 		}
 		if endpoints {
 			ms = FilterEndpointMatches(ms)
@@ -507,7 +528,7 @@ func (e *Extractor) scanURLWithValidation(urlStr, baseHost string, endpoints boo
 		}
 		matches = append(matches, ms...)
 	}
-	return matches, true, nil
+	return scanURLResult{matches: matches, accepted: true, baseline: baseline}, nil
 }
 
 // inScopeJSImports resolves the ES-module imports found in a JS body to the
@@ -536,17 +557,18 @@ func inScopeJSImports(data []byte, finalURL, baseHost string, external bool) []s
 // scanURLPosts performs recursive scanning like scanURL but returns only POST
 // request endpoints.
 func (e *Extractor) scanURLPosts(urlStr, baseHost string, visited *visitedSet, external bool, render bool) ([]Match, error) {
-	matches, _, err := e.scanURLPostsWithValidation(urlStr, baseHost, visited, external, render, nil)
-	return matches, err
+	result, err := e.scanURLPostsWithValidationDetailed(urlStr, baseHost, visited, external, render, nil)
+	return result.matches, err
 }
 
 func (e *Extractor) scanURLPostsValidated(urlStr, baseHost string, visited *visitedSet, external bool, render bool, validator *autoCalibrator) ([]Match, bool, error) {
-	return e.scanURLPostsWithValidation(urlStr, baseHost, visited, external, render, validator)
+	result, err := e.scanURLPostsWithValidationDetailed(urlStr, baseHost, visited, external, render, validator)
+	return result.matches, result.accepted, err
 }
 
-func (e *Extractor) scanURLPostsWithValidation(urlStr, baseHost string, visited *visitedSet, external bool, render bool, validator *autoCalibrator) ([]Match, bool, error) {
+func (e *Extractor) scanURLPostsWithValidationDetailed(urlStr, baseHost string, visited *visitedSet, external bool, render bool, validator *autoCalibrator) (scanURLResult, error) {
 	if !visited.visit(urlStr) {
-		return nil, false, nil
+		return scanURLResult{}, nil
 	}
 
 	fetchExternal := external
@@ -555,7 +577,7 @@ func (e *Extractor) scanURLPostsWithValidation(urlStr, baseHost string, visited 
 	}
 	resp, err := fetchURLResponseScoped(urlStr, baseHost, fetchExternal)
 	if err != nil {
-		return nil, false, err
+		return scanURLResult{}, err
 	}
 	defer resp.Body.Close()
 
@@ -568,17 +590,18 @@ func (e *Extractor) scanURLPostsWithValidation(urlStr, baseHost string, visited 
 	// ones only their Content-Type reveals.
 	if isBinaryContentType(resp.Header.Get("Content-Type")) {
 		vlog(2, "[scan] skip binary %q at %s", resp.Header.Get("Content-Type"), finalURL)
-		return nil, false, nil
+		return scanURLResult{}, nil
 	}
 
 	data, err := readCappedBody(resp.Body)
 	if err != nil {
-		return nil, false, err
+		return scanURLResult{}, err
 	}
+	baseline := &methodProbeBaseline{status: resp.StatusCode, body: data}
 	if validator != nil &&
 		(!passiveResponseStatusValid(resp.StatusCode) || validator.wildcardResponse(finalURL, resp.StatusCode, data)) {
 		vlog(1, "[crawl] reject passive path %s (status/catch-all validation)", finalURL)
-		return nil, false, nil
+		return scanURLResult{}, nil
 	}
 
 	var matches []Match
@@ -588,9 +611,16 @@ func (e *Extractor) scanURLPostsWithValidation(urlStr, baseHost string, visited 
 	linkHdr := extractLinkHeaderMatches(resp.Header, finalURL)
 
 	if isHTMLContent(finalURL, resp.Header.Get("Content-Type")) {
-		if e.calibrator != nil && e.calibrator.skipPage(urlStr, finalURL, resp.StatusCode, data) {
+		reason := pageSkipNone
+		if e.calibrator != nil {
+			reason = e.calibrator.classifyPage(urlStr, finalURL, resp.StatusCode, data)
+		}
+		if reason != pageSkipNone {
 			vlog(1, "[crawl] skip (soft-404/duplicate) %s", finalURL)
-			return matches, true, nil
+			return scanURLResult{
+				matches: matches, accepted: true, skipped: true,
+				skipReason: reason, baseline: baseline,
+			}, nil
 		}
 		matches = append(matches, linkHdr...)
 		if render {
@@ -609,15 +639,15 @@ func (e *Extractor) scanURLPostsWithValidation(urlStr, baseHost string, visited 
 					}
 					matches = append(matches, e.scanHTMLStatePosts(finalURL, baseHost, st, dyn, visited, external, render)...)
 				}
-				return matches, true, nil
+				return scanURLResult{matches: matches, accepted: true, baseline: baseline}, nil
 			}
 			if rhtml, scripts, err := RenderURL(finalURL); err == nil {
 				matches = append(matches, e.scanHTMLStatePosts(finalURL, baseHost, rhtml, scripts, visited, external, render)...)
-				return matches, true, nil
+				return scanURLResult{matches: matches, accepted: true, baseline: baseline}, nil
 			}
 		}
 		matches = append(matches, e.scanHTMLStatePosts(finalURL, baseHost, data, nil, visited, external, render)...)
-		return matches, true, nil
+		return scanURLResult{matches: matches, accepted: true, baseline: baseline}, nil
 	}
 
 	// A `Link:` header (e.g. a JSON API's rel="next") applies even when the body is
@@ -633,7 +663,7 @@ func (e *Extractor) scanURLPostsWithValidation(urlStr, baseHost string, visited 
 		ms, err := e.scanDataPostRequests(finalURL, data,
 			isJSFile(finalURL) || isJavaScriptContentType(resp.Header.Get("Content-Type")))
 		if err != nil {
-			return nil, false, err
+			return scanURLResult{}, err
 		}
 		matches = append(matches, ms...)
 
@@ -651,7 +681,7 @@ func (e *Extractor) scanURLPostsWithValidation(urlStr, baseHost string, visited 
 		}
 		matches = append(matches, ms...)
 	}
-	return matches, true, nil
+	return scanURLResult{matches: matches, accepted: true, baseline: baseline}, nil
 }
 
 // passiveResponseStatusValid recognises strong evidence that a historical path

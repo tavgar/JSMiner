@@ -411,7 +411,7 @@ func exploreStates(ctx context.Context, states [][]byte, seen map[string]struct{
 			var html string
 			if err := chromedp.Run(ctx,
 				chromedp.Evaluate(fmt.Sprintf("window.__jsm.fillAndSubmit(%d, %s)", idx, string(valsJSON)), &submitted),
-				chromedp.Sleep(ExploreSettleDuration),
+				chromedp.ActionFunc(waitForInteractionSettle),
 				chromedp.OuterHTML("html", &html, chromedp.ByQuery),
 			); err != nil {
 				continue
@@ -443,7 +443,7 @@ func exploreStates(ctx context.Context, states [][]byte, seen map[string]struct{
 		var html string
 		if err := chromedp.Run(ctx,
 			chromedp.Evaluate(fmt.Sprintf("window.__jsm.click(%d)", idx), &clicked),
-			chromedp.Sleep(ExploreSettleDuration),
+			chromedp.ActionFunc(waitForInteractionSettle),
 			chromedp.OuterHTML("html", &html, chromedp.ByQuery),
 		); err != nil {
 			continue
@@ -491,7 +491,7 @@ func exploreStates(ctx context.Context, states [][]byte, seen map[string]struct{
 			var html string
 			if err := chromedp.Run(ctx,
 				chromedp.Evaluate(fmt.Sprintf("(window.__jsm&&window.__jsm.clickRoute)?window.__jsm.clickRoute(%d):false", idx), &clicked),
-				chromedp.Sleep(ExploreSettleDuration),
+				chromedp.ActionFunc(waitForInteractionSettle),
 				chromedp.OuterHTML("html", &html, chromedp.ByQuery),
 			); err != nil {
 				continue
@@ -516,6 +516,52 @@ func exploreStates(ctx context.Context, states [][]byte, seen map[string]struct{
 	}
 
 	return states, winPosts
+}
+
+const interactionQuietPeriod = 300 * time.Millisecond
+
+// waitForInteractionSettle waits until an interaction has produced no observed
+// DOM, network or short-timer activity for a small quiet period. The previous
+// implementation always slept ExploreSettleDuration after every click and form
+// submit, which made inert controls cost 1.5 seconds apiece. This retains that
+// duration as a hard upper bound for genuinely busy or uninstrumented pages, but
+// lets the common no-op interaction finish as soon as the page is demonstrably
+// idle.
+//
+// Evaluation failures are retried until the cap because a real navigation can
+// briefly destroy the JavaScript execution context. A new document has no
+// __jsmActivity marker, so it receives the full legacy settle delay before its
+// HTML is snapshotted.
+func waitForInteractionSettle(ctx context.Context) error {
+	deadline := time.Now().Add(ExploreSettleDuration)
+	quietMS := interactionQuietPeriod.Milliseconds()
+	expr := fmt.Sprintf(`(function() {
+		var a = window.__jsmActivity;
+		return !!a && a.pending === 0 && (performance.now() - a.last) >= %d;
+	})()`, quietMS)
+
+	const pollInterval = 100 * time.Millisecond
+	for {
+		var settled bool
+		if err := chromedp.Evaluate(expr, &settled).Do(ctx); err == nil && settled {
+			return nil
+		}
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil
+		}
+		delay := min(remaining, pollInterval)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 // currentRoutePath returns the browser's current path+query, used to avoid
@@ -747,6 +793,21 @@ const interactionScript = `
 (function() {
 	window.__interceptedPOSTs = window.__interceptedPOSTs || [];
 	window.__formFields = window.__formFields || {};
+	window.__jsmActivity = window.__jsmActivity || { pending: 0, last: performance.now() };
+
+	function markActivity() {
+		window.__jsmActivity.last = performance.now();
+	}
+
+	function beginActivity() {
+		markActivity();
+		window.__jsmActivity.pending++;
+	}
+
+	function endActivity() {
+		if (window.__jsmActivity.pending > 0) window.__jsmActivity.pending--;
+		markActivity();
+	}
 
 	function stringifyBody(body) {
 		if (!body) return '';
@@ -777,7 +838,21 @@ const interactionScript = `
 			if (options.method && ['POST','PUT','PATCH'].indexOf(options.method.toUpperCase()) !== -1) {
 				recordPost(url, stringifyBody(options.body));
 			}
-			return originalFetch.apply(this, args);
+			beginActivity();
+			var request;
+			try {
+				request = originalFetch.apply(this, args);
+			} catch (e) {
+				endActivity();
+				throw e;
+			}
+			return Promise.resolve(request).then(function(response) {
+				endActivity();
+				return response;
+			}, function(error) {
+				endActivity();
+				throw error;
+			});
 		};
 
 		var XHR = XMLHttpRequest.prototype;
@@ -792,7 +867,51 @@ const interactionScript = `
 			if (this._method && ['POST','PUT','PATCH'].indexOf(this._method.toUpperCase()) !== -1) {
 				recordPost(this._url, stringifyBody(data));
 			}
-			return originalSend.apply(this, arguments);
+			var xhr = this;
+			var ended = false;
+			var finish = function() {
+				if (ended) return;
+				ended = true;
+				endActivity();
+			};
+			beginActivity();
+			xhr.addEventListener('loadend', finish, { once: true });
+			try {
+				return originalSend.apply(xhr, arguments);
+			} catch (e) {
+				finish();
+				throw e;
+			}
+		};
+
+		// Track timers that can fire within the settle window. Without this, an
+		// interaction that deliberately defers its fetch or DOM update (for
+		// debouncing, animation or framework scheduling) could look idle too soon.
+		// Cleared timers are retired as well so they cannot hold the page busy.
+		var originalSetTimeout = window.setTimeout;
+		var originalClearTimeout = window.clearTimeout;
+		var trackedTimers = new Map();
+		window.setTimeout = function(callback, delay) {
+			var ms = Number(delay) || 0;
+			if (typeof callback !== 'function' || ms > 1500) {
+				return originalSetTimeout.apply(this, arguments);
+			}
+			var args = Array.prototype.slice.call(arguments, 2);
+			beginActivity();
+			var id = originalSetTimeout(function() {
+				trackedTimers.delete(id);
+				try {
+					return callback.apply(this, args);
+				} finally {
+					endActivity();
+				}
+			}, ms);
+			trackedTimers.set(id, true);
+			return id;
+		};
+		window.clearTimeout = function(id) {
+			if (trackedTimers.delete(id)) endActivity();
+			return originalClearTimeout.call(this, id);
 		};
 
 		document.addEventListener('submit', function(e) {
@@ -823,8 +942,15 @@ const interactionScript = `
 		}
 		analyzeForms();
 		try {
-			var observer = new MutationObserver(analyzeForms);
-			if (document.body) { observer.observe(document.body, { childList: true, subtree: true }); }
+			var observer = new MutationObserver(function() {
+				markActivity();
+				analyzeForms();
+			});
+			if (document.body) {
+				observer.observe(document.body, {
+					childList: true, subtree: true, attributes: true, characterData: true
+				});
+			}
 		} catch (e) {}
 	}
 
@@ -873,7 +999,7 @@ const interactionScript = `
 		click: function(i) {
 			var el = document.querySelector('[data-jsm-click="' + i + '"]');
 			if (!el) return false;
-			try { el.click(); return true; } catch (e) { return false; }
+			try { markActivity(); el.click(); return true; } catch (e) { return false; }
 		},
 		// tagRouteLinks tags same-origin <a href> route links — the client-side
 		// routes an SPA renders in place. tagClickables deliberately skips these
@@ -912,7 +1038,7 @@ const interactionScript = `
 		clickRoute: function(i) {
 			var el = document.querySelector('[data-jsm-route="' + i + '"]');
 			if (!el) return false;
-			try { el.click(); return true; } catch (e) { return false; }
+			try { markActivity(); el.click(); return true; } catch (e) { return false; }
 		},
 		// fillAndSubmit populates form i from values (keyed by control name/id),
 		// checks checkable inputs, selects the first real option of any <select>,
@@ -920,6 +1046,7 @@ const interactionScript = `
 		fillAndSubmit: function(i, values) {
 			var f = document.querySelector('[data-jsm-form="' + i + '"]');
 			if (!f) return false;
+			markActivity();
 			values = values || {};
 			f.querySelectorAll('input, select, textarea').forEach(function(inp) {
 				var type = (inp.type || 'text').toLowerCase();
