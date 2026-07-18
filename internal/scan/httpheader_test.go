@@ -335,8 +335,8 @@ func TestHTTPHeaderSeverity(t *testing.T) {
 		t.Fatal("no match")
 	}
 	for _, m := range ms {
-		if m.Severity != SeverityMedium {
-			t.Errorf("severity = %q, want %q", m.Severity, SeverityMedium)
+		if m.Severity != SeverityLow {
+			t.Errorf("severity = %q, want %q", m.Severity, SeverityLow)
 		}
 		if m.Pattern != httpHeaderPattern {
 			t.Errorf("pattern = %q, want %q", m.Pattern, httpHeaderPattern)

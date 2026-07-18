@@ -126,7 +126,7 @@ func (p *Printer) PrintScan(w io.Writer, matches []scan.Match, scanTime time.Tim
 	// JavaScript findings, so split them out while preserving relative order.
 	findings, gathered := splitGathered(matches)
 
-	// Rank the findings so High severity leads, then Medium, then Info. The sort
+	// Rank the findings so High severity leads, then Medium, Low, then Info. The sort
 	// is stable, so discovery order is preserved within each severity band. The
 	// gathered-URL segment is left in place beneath the findings.
 	scan.SortBySeverity(findings)

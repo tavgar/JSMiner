@@ -12,11 +12,14 @@ import (
 //     whose signature alone makes a match almost certainly a live secret.
 //   - Medium: keyword-anchored credentials (`api_key=...`, `password: ...`) that
 //     are probably secrets but carry more false positives and warrant review.
+//   - Low: findings that only occasionally reveal something sensitive — HTTP
+//     headers, for instance, are usually mundane and worth a look, not an alarm.
 //   - Info: non-secret intelligence — endpoints, URLs, emails, paths, IPs and
 //     generic high-entropy strings — that is useful context, not a leak.
 const (
 	SeverityHigh   = "high"
 	SeverityMedium = "medium"
+	SeverityLow    = "low"
 	SeverityInfo   = "info"
 )
 
@@ -26,8 +29,10 @@ const (
 func severityRank(sev string) int {
 	switch strings.ToLower(strings.TrimSpace(sev)) {
 	case SeverityHigh:
-		return 3
+		return 4
 	case SeverityMedium:
+		return 3
+	case SeverityLow:
 		return 2
 	case SeverityInfo:
 		return 1

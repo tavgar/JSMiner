@@ -324,7 +324,7 @@ func (httpHeaderRule) Find(data []byte) []Match {
 			out = append(out, Match{
 				Pattern:  httpHeaderPattern,
 				Value:    pair,
-				Severity: SeverityMedium,
+				Severity: SeverityLow,
 			})
 		}
 	}
