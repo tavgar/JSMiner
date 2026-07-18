@@ -24,25 +24,93 @@ func hasHeader(src, want string) bool {
 	return false
 }
 
-// TestHTTPHeaderDistinctiveNames covers names that carry their own proof and are
-// reported wherever they appear, with no header map around them.
-func TestHTTPHeaderDistinctiveNames(t *testing.T) {
+// TestHTTPHeaderExplicitMaps covers standard and custom names in structurally
+// identified header maps. A name alone is intentionally not treated as proof.
+func TestHTTPHeaderExplicitMaps(t *testing.T) {
 	cases := []struct{ src, want string }{
-		{`{Authorization:"Bearer eyJhbGciOiJIUzI1NiJ9"}`, `Authorization: Bearer eyJhbGciOiJIUzI1NiJ9`},
-		{`{"Content-Type":"application/json"}`, `Content-Type: application/json`},
-		{`{'user-agent': 'JSMiner/1.0'}`, `user-agent: JSMiner/1.0`},
-		{"{Authorization:`Bearer ${token}`}", "Authorization: Bearer ${token}"},
-		{`{"X-Api-Key":"9f8b7c6d5e4f3a2b1c0d"}`, `X-Api-Key: 9f8b7c6d5e4f3a2b1c0d`},
-		{`{"x-csrf-token":"abc123"}`, `x-csrf-token: abc123`},
-		{`{"X-Tenant-Id":"acme-prod"}`, `X-Tenant-Id: acme-prod`},
+		{`const headers={Authorization:"Bearer eyJhbGciOiJIUzI1NiJ9"}`, `Authorization: Bearer eyJhbGciOiJIUzI1NiJ9`},
+		{`const requestHeaders={"Content-Type":"application/json"}`, `Content-Type: application/json`},
+		{`const defaultHeaders={'user-agent': 'JSMiner/1.0'}`, `user-agent: JSMiner/1.0`},
+		{"fetch(u,{headers:{Authorization:`Bearer ${token}`}})", "Authorization: Bearer ${token}"},
+		{`const extraHeaders={"X-Api-Key":"9f8b7c6d5e4f3a2b1c0d"}`, `X-Api-Key: 9f8b7c6d5e4f3a2b1c0d`},
+		{`new Headers({"x-csrf-token":"abc123"})`, `x-csrf-token: abc123`},
+		{`fetch(u,{headers:{"X-Tenant-Id":"acme-prod"}})`, `X-Tenant-Id: acme-prod`},
 		// The misspelling makes `referer` unmistakable.
-		{`{Referer:"https://internal.example.com/"}`, `Referer: https://internal.example.com/`},
+		{`const httpHeaders={Referer:"https://internal.example.com/"}`, `Referer: https://internal.example.com/`},
 		// A raw header line inside a string literal, CRLF escape trimmed.
 		{`var req="Authorization: Bearer sk_live_abc123\r\n";`, `Authorization: Bearer sk_live_abc123`},
 	}
 	for _, c := range cases {
 		if !hasHeader(c.src, c.want) {
 			t.Errorf("src %q: want %q, got %v", c.src, c.want, findHeaders(c.src))
+		}
+	}
+}
+
+// TestHTTPHeaderNamesDoNotProveObjectIntent covers false positives observed in
+// production bundles. Standard names occur in lookup/config objects, while x-*
+// is also a convention for component attributes and CSS selectors.
+func TestHTTPHeaderNamesDoNotProveObjectIntent(t *testing.T) {
+	drop := []string{
+		`const attrs={"x-semi-prop":"children","x-placement":placement}`,
+		`createElement("div",{className:c,"x-field-id":id})`,
+		`const css=".x-spreadsheet-button:hover{color:red}"`,
+		`const metadata={"Content-Type":"panel",Authorization:true}`,
+		`const options={sendLDHeaders:{default:true},requestHeaderTransform:{type:"function"}}`,
+	}
+	for _, src := range drop {
+		if got := findHeaders(src); len(got) != 0 {
+			t.Errorf("src %q: want no headers, got %v", src, got)
+		}
+	}
+}
+
+func TestHTTPHeaderAnonymousMapNeedsACluster(t *testing.T) {
+	src := `merge(target,{"X-LaunchDarkly-Event-Schema":"4","X-LaunchDarkly-Payload-ID":payloadID})`
+	for _, want := range []string{
+		"X-LaunchDarkly-Event-Schema: 4",
+		"X-LaunchDarkly-Payload-ID: payloadID",
+	} {
+		if !hasHeader(src, want) {
+			t.Errorf("want clustered header %q, got %v", want, findHeaders(src))
+		}
+	}
+
+	// Strong names in separate nested UI objects must not combine into a map.
+	nested := `{component:{attrs:{"x-semi-prop":"children"}},popover:{attrs:{"x-placement":"top"}}}`
+	if got := findHeaders(nested); len(got) != 0 {
+		t.Fatalf("nested attributes formed a false header cluster: %v", got)
+	}
+
+	// A security-bearing custom name is independently high-signal and does not
+	// need a second, unrelated header to protect its value.
+	if !hasHeader(`const h={"X-Api-Key":"9f8b7c6d5e4f"}`, "X-Api-Key: 9f8b7c6d5e4f") {
+		t.Fatalf("security-bearing anonymous header was lost: %v", findHeaders(`const h={"X-Api-Key":"9f8b7c6d5e4f"}`))
+	}
+}
+
+func TestHTTPHeaderRejectsMissingAndControlFlowValues(t *testing.T) {
+	src := `{headers:{"Content-Type":void 0,"X-Optional":undefined,"X-Null":null,"X-Literal":"null","X-Enabled":true}}`
+	got := findHeaders(src)
+	for _, bad := range []string{"Content-Type:", "X-Optional:", "X-Null:"} {
+		for _, value := range got {
+			if strings.HasPrefix(value, bad) {
+				t.Errorf("non-value %q was reported: %v", bad, got)
+			}
+		}
+	}
+	for _, want := range []string{"X-Literal: null", "X-Enabled: true"} {
+		if !hasHeader(src, want) {
+			t.Errorf("want %q, got %v", want, got)
+		}
+	}
+
+	for _, src := range []string{
+		`switch(name){case "content-type":return value}`,
+		`const parsers={"Content-Type":function(){}}`,
+	} {
+		if got := findHeaders(src); len(got) != 0 {
+			t.Errorf("control-flow source %q: want no headers, got %v", src, got)
 		}
 	}
 }
@@ -189,7 +257,7 @@ func TestHTTPHeaderEncodingLabels(t *testing.T) {
 		t.Errorf("encoding labels reported as headers: %v", got)
 	}
 	// A real custom header of the same shape is unaffected.
-	if !hasHeader(`{"x-cp-token":"abc123"}`, `x-cp-token: abc123`) {
+	if !hasHeader(`{headers:{"x-cp-token":"abc123"}}`, `x-cp-token: abc123`) {
 		t.Error("the label exclusions swallowed a real X- header")
 	}
 }
@@ -224,6 +292,7 @@ func TestHTTPHeaderCallForms(t *testing.T) {
 		{`xhr.setRequestHeader("Accept","application/json")`, `Accept: application/json`},
 		{`h.set("X-Api-Key",k)`, `X-Api-Key: k`},
 		{`headers.append("X-Request-Id","req-42")`, `X-Request-Id: req-42`},
+		{`myHeaders.append("Age","30")`, `Age: 30`},
 		{`new Headers({"X-Internal-Auth":"s3cr3t-value"})`, `X-Internal-Auth: s3cr3t-value`},
 		// Node/ethers style.
 		{`request.setHeader("content-type","application/json")`, `content-type: application/json`},
@@ -246,6 +315,8 @@ func TestHTTPHeaderCallForms(t *testing.T) {
 		`<div x-data="{open:false}">`,
 		`opts["age"]=30`,
 		`?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=abc123`,
+		`sendLDHeaders["default"]=true`,
+		`sendLDHeaders.set("default",true)`,
 		// A comparison reads a header rather than setting one, and the `=`
 		// separator must not land on the first half of `==`.
 		`if(headers["content-type"]==null&&this.bodyType){}`,
@@ -259,7 +330,7 @@ func TestHTTPHeaderCallForms(t *testing.T) {
 
 // TestHTTPHeaderSeverity pins the rule's severity to medium.
 func TestHTTPHeaderSeverity(t *testing.T) {
-	ms := newHTTPHeaderRule().Find([]byte(`{"X-Api-Key":"9f8b7c6d5e4f"}`))
+	ms := newHTTPHeaderRule().Find([]byte(`{headers:{"X-Api-Key":"9f8b7c6d5e4f"}}`))
 	if len(ms) == 0 {
 		t.Fatal("no match")
 	}

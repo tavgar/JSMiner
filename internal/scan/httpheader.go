@@ -17,30 +17,28 @@ import (
 // object literal, CSS declaration and HTML attribute in the bundle. Two
 // observations drive the design:
 //
-//   - Some header names are self-evident. `Authorization`, `Referer` (the
-//     misspelling is a giveaway) and anything `X-`-prefixed are not plausible as
-//     ordinary object keys, so their name alone settles it.
-//   - The rest are not. `age`, `date`, `host`, `origin`, `accept` and `location`
-//     are registered HTTP headers *and* everyday JS keys; `{age: 30}` on a user
-//     record is not a header. Nothing about the pair itself distinguishes them —
-//     only whether it sits inside a header map does.
+//   - A `name: value` object entry is not evidence on its own. Even distinctive
+//     standard names occur in lookup tables, and modern component libraries use
+//     arbitrary `x-*` DOM attributes (`x-semi-prop`, `x-placement`, ...).
+//   - Header-setting syntax is evidence. Entries in `headers:{...}` and
+//     `new Headers({...})`, indexed assignments, setter calls, and raw header
+//     lines all establish HTTP intent without guessing from the name alone.
 //
-// So an ambiguous name is admitted only when it is enclosed by a header-map
+// So a bare object entry is admitted only when it is enclosed by a header-map
 // construct, which is established structurally (see inHeaderBlock) rather than
-// by proximity: a `headers:{…}` earlier in the same minified line is not
-// evidence for a pair that sits in the `body:{…}` after it.
+// by proximity: a `headers:{…}` earlier in the same minified line is not evidence
+// for a pair that sits in the `body:{…}` after it.
 
 // httpHeaderPattern names the rule in output.
 const httpHeaderPattern = "http_header"
 
-// distinctiveHeaderNames are header names that carry their own proof: no CSS
-// property, HTML attribute or common object key collides with them, so a pair
-// using one is reported wherever it appears. Registered names that double as
-// everyday JS keys (age, date, from, host, link, range, location, origin,
-// server, allow, expires, connection, vary, via, accept, expect, upgrade,
-// pragma, trailer, warning) are deliberately absent — they are admitted only
-// inside a header map. `X-`-prefixed headers are covered by shape in
-// isCustomHeaderName and are likewise not listed here.
+// distinctiveHeaderNames identifies names that are strong enough to admit in a
+// raw header line or a generic minified `.set(...)` call. It is deliberately not
+// used to classify bare object entries: production bundles contain header-name
+// lookup tables and `x-*` component attributes with exactly that shape.
+// Registered names that double as everyday JS keys (age, date, from, host, link,
+// range, location, origin, server, allow, expires, connection, vary, via,
+// accept, expect, upgrade, pragma, trailer, warning) are deliberately absent.
 var distinctiveHeaderNames = map[string]bool{
 	// Authentication and authorization.
 	"authorization": true, "proxy-authorization": true,
@@ -83,8 +81,9 @@ var distinctiveHeaderNames = map[string]bool{
 }
 
 // customHeaderShapeRE matches the `X-` convention for non-standard headers
-// (`X-Api-Key`, `X-Tenant-Id`, `X-Amz-Security-Token`). No CSS property and no
-// standard HTML attribute uses this shape, so it needs no surrounding context.
+// (`X-Api-Key`, `X-Tenant-Id`, `X-Amz-Security-Token`). The shape is useful
+// supporting evidence for raw lines and generic setter calls, but not for object
+// entries: custom DOM attributes and CSS selectors use the same convention.
 var customHeaderShapeRE = regexp.MustCompile(`^x-[a-z0-9]+(?:-[a-z0-9]+)*$`)
 
 // nonHeaderXNames are `x-`-shaped tokens that are not HTTP headers. The `X-`
@@ -163,9 +162,11 @@ var headerRawRE = regexp.MustCompile(`(?i)["'` + "`" + `]` + headerName + `:[ \t
 
 // headerSetCallRE matches a call that exists to set a header: XHR's
 // `setRequestHeader("X","Y")`, Node/ethers' `setHeader("X","Y")`, and `.set`/
-// `.append`/`.add` on a receiver literally named `headers`. The callee names the
+// `.append`/`.add` on an explicitly header-named receiver. The callee names the
 // intent, so the first argument is a header name whatever it is.
-var headerSetCallRE = regexp.MustCompile(`(?i)(?:set(?:Request)?Header|headers\s*\.\s*(?:set|append|add))\s*\(\s*["'` + "`" + `]` + headerName + `["'` + "`" + `]\s*,\s*` + headerValue)
+const headerReceiver = `(?:headers|(?:my|request|response|default|extra|custom|common|http|auth|api|raw)[_-]?headers)`
+
+var headerSetCallRE = regexp.MustCompile(`(?i)(?:set(?:Request)?Header|\b` + headerReceiver + `\b\s*\.\s*(?:set|append|add))\s*\(\s*["'` + "`" + `]` + headerName + `["'` + "`" + `]\s*,\s*` + headerValue)
 
 // headerMemberCallRE matches `.set(…)`/`.append(…)` on any receiver, which is
 // how a minified bundle emits a Headers/axios call once the variable is mangled
@@ -177,14 +178,15 @@ var headerMemberCallRE = regexp.MustCompile(`(?i)\.\s*(?:set|append)\s*\(\s*["'`
 // headerIndexRE matches assignment into a header map by key —
 // `headers["content-type"]="application/json"`, `req.headers['authorization']=t`,
 // axios' `headers.common['X-Api-Key']=k` — which neither the object-literal nor
-// the call form reaches. A literal `headers` receiver is required: `=` is far too
-// common a separator to admit on the name's shape alone (`x-data="…"` in markup,
-// `X-Amz-Signature=…` in a presigned query string), and the receiver is what
-// makes it unambiguous.
-var headerIndexRE = regexp.MustCompile(`(?i)headers\s*(?:\.\s*[a-z]+\s*)?\[\s*["'` + "`" + `]` + headerName + `["'` + "`" + `]\s*\]\s*=\s*` + headerValue)
+// the call form reaches. An explicitly header-named receiver is required: `=`
+// is far too common a separator to admit on the name's shape alone
+// (`x-data="…"` in markup, `X-Amz-Signature=…` in a presigned query string), and
+// the receiver is what makes it unambiguous.
+var headerIndexRE = regexp.MustCompile(`(?i)\b` + headerReceiver + `\b\s*(?:\.\s*[a-z]+\s*)?\[\s*["'` + "`" + `]` + headerName + `["'` + "`" + `]\s*\]\s*=\s*` + headerValue)
 
 // headerBlockAnchorRE matches the constructs that open an object literal whose
-// entries are HTTP headers: `headers:{…}`, `headers = {…}`, `new Headers({…})`.
+// entries are HTTP headers: `headers:{…}`, `requestHeaders = {…}`,
+// `new Headers({…})`.
 //
 // Three properties of this pattern are load-bearing, each earned from a real
 // bundle:
@@ -201,11 +203,12 @@ var headerIndexRE = regexp.MustCompile(`(?i)headers\s*(?:\.\s*[a-z]+\s*)?\[\s*["
 //     "javascript"))` the ternary's `"json" : "javascript"` sits inside the
 //     parens but is an expression. Header-setting calls are matched directly by
 //     headerSetCallRE instead, which takes the name from the first argument.
-//   - The stem carries no leading word boundary, so the usual wrappers
-//     (`requestHeaders`, `defaultHeaders`, `extraHeaders`) anchor too. The
-//     singular `header` is excluded on purpose: `header:{title:"…"}` is a common
-//     UI config.
-var headerBlockAnchorRE = regexp.MustCompile(`(?i)headers\s*[:=]\s*\{|headers\s*\(\s*\{`)
+//   - Common compound identifiers (`requestHeaders`, `defaultHeaders`,
+//     `extraHeaders`) are explicit. An arbitrary suffix ending in `Headers` is
+//     not accepted: `sendLDHeaders:{default:true}` is a real feature-config
+//     shape from production bundles, not a header map. The singular `header` is
+//     also excluded because `header:{title:"…"}` is a common UI config.
+var headerBlockAnchorRE = regexp.MustCompile(`(?i)\b` + headerReceiver + `\b\s*[:=]\s*\{|\bnew\s+headers\s*\(\s*\{`)
 
 // nonHeaderNames never name an HTTP header, yet appear as keys of a block that a
 // header map is otherwise indistinguishable from. The JS property descriptor is
@@ -216,6 +219,10 @@ var nonHeaderNames = map[string]bool{
 	"enumerable": true, "configurable": true, "writable": true, "value": true,
 	"get": true, "set": true, "prototype": true, "constructor": true,
 	"__proto__": true,
+	// Methods exposed by Headers-compatible response facades are object
+	// properties, not wire header names.
+	"append": true, "delete": true, "entries": true, "foreach": true,
+	"has": true, "keys": true, "values": true,
 }
 
 // headerForm pairs a syntactic form with what that syntax proves about the name
@@ -229,8 +236,8 @@ type headerForm struct {
 	selfAnchored bool
 
 	// blockScoped marks the bare `name: value` pair, which in isolation is
-	// indistinguishable from any object entry. A name that does not identify
-	// itself is admitted only when a header map literal encloses it.
+	// indistinguishable from any object entry. It is admitted only when a header
+	// map literal encloses it, regardless of how header-like the name appears.
 	blockScoped bool
 
 	// A form that is neither admits only self-identifying names — a distinctive
@@ -240,7 +247,7 @@ type headerForm struct {
 var headerForms = []headerForm{
 	// Raw first: a header line inside a string satisfies headerPairRE too, but
 	// truncates there, and the dedup in Find keeps whichever pair is seen first.
-	{re: headerRawRE, blockScoped: true},
+	{re: headerRawRE},
 	{re: headerPairRE, blockScoped: true},
 	{re: headerSetCallRE, selfAnchored: true},
 	{re: headerIndexRE, selfAnchored: true},
@@ -260,6 +267,13 @@ var headerForms = []headerForm{
 // names (`Authorization`, `Content-Type`, `X-…`) need no context at any
 // formatting; and header-setting calls carry their anchor on the same line.
 const headerContextWindow = 256
+
+// headerClusterWindow bounds the optional recovery of anonymous header maps.
+// Some SDKs pass a literal through a helper rather than naming it `headers`
+// (`merge(target, {"X-Trace-Id": id, "X-Span-Id": span})`). Multiple pieces of
+// header-specific evidence in the same small object are enough to recover that
+// map without restoring generic `x-*` attribute false positives.
+const headerClusterWindow = 2048
 
 // httpHeaderRule detects HTTP headers in source while rejecting the object
 // literals, CSS declarations and framework directives that share the
@@ -297,8 +311,9 @@ func (httpHeaderRule) Find(data []byte) []Match {
 			if !acceptHeaderName(name, data, nameStart, f) {
 				continue
 			}
-			val := cleanHeaderValue(string(data[m[4]:m[5]]))
-			if val == "" {
+			rawValue := string(data[m[4]:m[5]])
+			val := cleanHeaderValue(rawValue)
+			if val == "" || !usefulHeaderValue(rawValue, val) {
 				continue
 			}
 			pair := name + ": " + val
@@ -318,11 +333,11 @@ func (httpHeaderRule) Find(data []byte) []Match {
 
 // acceptHeaderName decides whether the pair captured by form, whose name starts
 // at nameStart, is an HTTP header. The form's syntax is consulted first: when it
-// already proves a header is being set, the name needs no further evidence.
-// Otherwise a distinctive name or the `X-` shape settles it alone, and every
-// other name — a registered-but-ambiguous one like `age`, or a custom one like
-// `apikey` — is a header only inside a header map, where by construction every
-// entry is one.
+// already proves a header is being set, the name needs no further evidence. A
+// bare object entry always needs a structurally enclosing header map. Raw header
+// lines and generic minified `.set(...)` calls have some syntactic evidence but
+// not a named receiver, so they additionally require a distinctive standard or
+// custom header name.
 func acceptHeaderName(name string, data []byte, nameStart int, form headerForm) bool {
 	lower := strings.ToLower(name)
 	if nonHeaderNames[lower] {
@@ -331,10 +346,235 @@ func acceptHeaderName(name string, data []byte, nameStart int, form headerForm) 
 	if form.selfAnchored {
 		return true
 	}
+	if form.blockScoped {
+		return inHeaderBlock(data, nameStart) || inAnonymousHeaderMap(data, nameStart)
+	}
 	if distinctiveHeaderNames[lower] || isCustomHeaderName(lower) {
 		return true
 	}
-	return form.blockScoped && inHeaderBlock(data, nameStart)
+	return false
+}
+
+// inAnonymousHeaderMap recovers a small object literal that is not assigned to a
+// header-named variable but contains enough header-specific evidence. This
+// covers telemetry/client SDK helpers while requiring more evidence than a lone
+// generic x-* DOM attribute. Only direct properties count; nested UI/config
+// objects cannot lend confidence to one another.
+func inAnonymousHeaderMap(data []byte, nameStart int) bool {
+	objectStart, objectEnd, ok := enclosingObject(data, nameStart)
+	if !ok {
+		return false
+	}
+
+	scoredNames := make(map[string]bool)
+	score := 0
+	object := data[objectStart : objectEnd+1]
+	for _, m := range headerPairRE.FindAllSubmatchIndex(object, -1) {
+		candidateStart := objectStart + m[2]
+		directStart, _, direct := enclosingObject(data, candidateStart)
+		if !direct || directStart != objectStart {
+			continue
+		}
+
+		lower := strings.ToLower(string(object[m[2]:m[3]]))
+		if nonHeaderNames[lower] || scoredNames[lower] {
+			continue
+		}
+		rawValue := string(object[m[4]:m[5]])
+		cleaned := cleanHeaderValue(rawValue)
+		if !usefulHeaderValue(rawValue, cleaned) {
+			continue
+		}
+		evidence := anonymousHeaderEvidence(lower, rawValue, cleaned)
+		if evidence == 0 {
+			continue
+		}
+		scoredNames[lower] = true
+		score += evidence
+		if score >= 2 {
+			return true
+		}
+	}
+	return false
+}
+
+// anonymousHeaderEvidence scores names conservatively when an object has no
+// explicit header anchor. Security-bearing names are sufficient alone. Provider
+// and protocol families contribute one point each, as do standard names with a
+// plausible value, so an anonymous map needs corroboration. Generic x-* names
+// contribute nothing.
+func anonymousHeaderEvidence(lower, rawValue, cleaned string) int {
+	if isCustomHeaderName(lower) {
+		for _, marker := range []string{
+			"api-key", "apikey", "auth", "credential", "csrf", "secret",
+			"signature", "token", "xsrf",
+		} {
+			if strings.Contains(lower, marker) {
+				return 2
+			}
+		}
+		for _, prefix := range []string{
+			"x-amz-", "x-b3-", "x-client-", "x-contentful-", "x-correlation-",
+			"x-datadog-", "x-firebase-", "x-forwarded-", "x-goog-",
+			"x-launchdarkly-", "x-newrelic-", "x-nextjs-", "x-remix-",
+			"x-request-", "x-sentry-", "x-service-", "x-tenant-", "x-trace-",
+			"x-tt-", "x-user-", "x-wix-",
+		} {
+			if strings.HasPrefix(lower, prefix) {
+				return 1
+			}
+		}
+		return 0
+	}
+	if !distinctiveHeaderNames[lower] {
+		return 0
+	}
+
+	rawValue = strings.TrimSpace(rawValue)
+	quoted := rawValue != "" && isHeaderQuote(rawValue[0])
+	valueLower := strings.ToLower(strings.TrimSpace(cleaned))
+	if !quoted {
+		switch valueLower {
+		case "!0", "!1", "false", "true":
+			return 0
+		}
+	}
+
+	switch lower {
+	case "authorization", "proxy-authorization":
+		if strings.HasPrefix(valueLower, "basic ") ||
+			strings.HasPrefix(valueLower, "bearer ") ||
+			strings.HasPrefix(valueLower, "digest ") ||
+			strings.HasPrefix(valueLower, "token ") ||
+			strings.Contains(valueLower, "token") ||
+			strings.Contains(valueLower, "credential") {
+			return 2
+		}
+		return 0
+	case "content-type":
+		if strings.Contains(valueLower, "/") ||
+			strings.Contains(valueLower, "contenttype") ||
+			strings.Contains(valueLower, "mime") {
+			return 1
+		}
+		return 0
+	default:
+		if quoted || len(valueLower) > 1 {
+			return 1
+		}
+		return 0
+	}
+}
+
+// enclosingObject returns the nearest object literal that directly or
+// indirectly encloses nameStart. It scans only a bounded neighbourhood and skips
+// strings/comments, which also prevents CSS inside a JavaScript string from
+// masquerading as an object. A quote immediately before nameStart is treated as
+// the candidate property's own quote rather than as an enclosing string.
+func enclosingObject(data []byte, nameStart int) (start, end int, ok bool) {
+	from := nameStart - headerClusterWindow
+	if from < 0 {
+		from = 0
+	}
+	limit := nameStart
+	if limit > from && isHeaderQuote(data[limit-1]) {
+		limit--
+	}
+
+	stack := make([]int, 0, 4)
+	for i := from; i < limit; i++ {
+		switch data[i] {
+		case '"', '\'', '`':
+			next, closed := skipHeaderLiteral(data, i, limit)
+			if !closed {
+				return 0, 0, false
+			}
+			i = next
+		case '/':
+			if i+1 < limit && data[i+1] == '/' {
+				return 0, 0, false
+			}
+			if i+1 < limit && data[i+1] == '*' {
+				next, closed := skipHeaderBlockComment(data, i+2, limit)
+				if !closed {
+					return 0, 0, false
+				}
+				i = next
+			}
+		case '{':
+			stack = append(stack, i)
+		case '}':
+			if len(stack) > 0 {
+				stack = stack[:len(stack)-1]
+			}
+		}
+	}
+	if len(stack) == 0 {
+		return 0, 0, false
+	}
+	start = stack[len(stack)-1]
+
+	maxEnd := start + headerClusterWindow
+	if maxEnd >= len(data) {
+		maxEnd = len(data) - 1
+	}
+	depth := 1
+	for i := start + 1; i <= maxEnd; i++ {
+		switch data[i] {
+		case '"', '\'', '`':
+			next, closed := skipHeaderLiteral(data, i, maxEnd+1)
+			if !closed {
+				return 0, 0, false
+			}
+			i = next
+		case '/':
+			if i+1 <= maxEnd && data[i+1] == '/' {
+				return 0, 0, false
+			}
+			if i+1 <= maxEnd && data[i+1] == '*' {
+				next, closed := skipHeaderBlockComment(data, i+2, maxEnd+1)
+				if !closed {
+					return 0, 0, false
+				}
+				i = next
+			}
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return start, i, true
+			}
+		}
+	}
+	return 0, 0, false
+}
+
+func isHeaderQuote(c byte) bool {
+	return c == '"' || c == '\'' || c == '`'
+}
+
+func skipHeaderLiteral(data []byte, opening, limit int) (int, bool) {
+	quote := data[opening]
+	for i := opening + 1; i < limit; i++ {
+		if data[i] == '\\' {
+			i++
+			continue
+		}
+		if data[i] == quote {
+			return i, true
+		}
+	}
+	return limit, false
+}
+
+func skipHeaderBlockComment(data []byte, start, limit int) (int, bool) {
+	for i := start; i+1 < limit; i++ {
+		if data[i] == '*' && data[i+1] == '/' {
+			return i + 1, true
+		}
+	}
+	return limit, false
 }
 
 // inHeaderBlock reports whether the name at nameStart is enclosed by the nearest
@@ -407,4 +647,28 @@ func cleanHeaderValue(v string) string {
 		v = strings.TrimSuffix(v, esc)
 	}
 	return strings.TrimSpace(v)
+}
+
+// usefulHeaderValue rejects bare JavaScript sentinels and control keywords that
+// cannot be an extracted on-the-wire value. `headers:{"Content-Type":void 0}` is
+// a common library default meaning "do not send this header"; `case`, `return`
+// and `function` arise when a permissive pair regex crosses minified control
+// flow. Quoted spellings remain valid because an application may intentionally
+// send the literal text "null" or "undefined".
+func usefulHeaderValue(raw, cleaned string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false
+	}
+	switch raw[0] {
+	case '"', '\'', '`':
+		return true
+	}
+	switch strings.ToLower(cleaned) {
+	case "case", "else", "function", "if", "null", "return", "switch",
+		"undefined", "void":
+		return false
+	default:
+		return true
+	}
 }

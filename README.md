@@ -506,14 +506,16 @@ built-in rules are validated before being reported:
   (`Object`). Strict, self-describing formats (AWS keys, GitHub PATs, JWTs,
   bearer tokens, …) are matched unchanged.
 - **HTTP headers** are separated from the object literals, CSS declarations and
-  framework directives that share the `name: value` shape. A name that
-  identifies itself — `Authorization`, `Content-Type`, `Referer`, or anything
-  `X-`-prefixed — is reported wherever it appears. A name that does not is
-  reported only inside a header map: `age`, `date`, `host`, `origin` and
-  `accept` are registered headers *and* everyday object keys, so `{name:"Ada",
-  age:30}` is not a header while `fetch(u,{headers:{age:"30"}})` is. Enclosure
-  is established structurally rather than by proximity, so the `body:{age:30}`
-  after a `headers:{…}` map does not inherit its context.
+  framework attributes that share the `name: value` shape. Bare object entries
+  normally require a structurally identified header map such as `headers:{…}`,
+  `requestHeaders={…}` or `new Headers({…})`; names alone are not enough because
+  both standard names and `X-`-prefixed names occur in framework metadata. Small
+  anonymous maps are retained when multiple header-specific names corroborate
+  one another, and security-bearing custom names such as `X-Api-Key` remain
+  independently reportable. Header setter calls, indexed assignments and raw
+  header lines remain supported. Enclosure is established structurally rather
+  than by proximity, so the `body:{age:30}` after a `headers:{…}` map does not
+  inherit its context.
 - **IPv4** uses a strict dotted-quad (octets 0–255, no leading zeros) and is
   rejected when it sits inside a longer decimal stream, which is how SVG
   coordinates and version arrays appear (`38.13.44.25.57…`, `1.11.16.2 57.17…`).
