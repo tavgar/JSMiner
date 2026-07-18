@@ -104,6 +104,17 @@ var baseJSRules = map[string]bool{
 	"sendgrid_key": true,
 	"google_oauth": true,
 	"aws_akia":     true,
+	// AI provider keys leak from browser-side model calls, so they are JS-relevant.
+	"anthropic_key":     true,
+	"openai_key":        true,
+	"openai_legacy":     true,
+	"openrouter_key":    true,
+	"groq_key":          true,
+	"xai_key":           true,
+	"perplexity_key":    true,
+	"huggingface_token": true,
+	"replicate_key":     true,
+	"langsmith_key":     true,
 }
 
 // default patterns (simplified)
@@ -137,6 +148,21 @@ var defaultPatterns = map[string]string{
 	"sendgrid_key": `\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b`,
 	"google_oauth": `\bya29\.[A-Za-z0-9_-]{20,}`,
 	"aws_akia":     `\b(?:A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}\b`,
+
+	// AI provider keys. LLM credentials are routinely hard-coded into front-end
+	// bundles (a "call the model straight from the browser" prototype that ships),
+	// so they are worth matching on their own signature like the rules above.
+	// Each prefix is vendor-assigned and long enough that a hit is not accidental.
+	"anthropic_key":     `\bsk-ant-(?:api|admin)[0-9]{2}-[A-Za-z0-9_-]{80,120}\b`,
+	"openai_key":        `\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{40,}\b`,
+	"openai_legacy":     `\bsk-[A-Za-z0-9]{48}\b`,
+	"openrouter_key":    `\bsk-or-v1-[a-f0-9]{64}\b`,
+	"groq_key":          `\bgsk_[A-Za-z0-9]{52}\b`,
+	"xai_key":           `\bxai-[A-Za-z0-9]{80}\b`,
+	"perplexity_key":    `\bpplx-[A-Za-z0-9]{32,}\b`,
+	"huggingface_token": `\bhf_[A-Za-z0-9]{34,}\b`,
+	"replicate_key":     `\br8_[A-Za-z0-9]{37}\b`,
+	"langsmith_key":     `\blsv2_(?:pt|sk)_[a-f0-9]{32}_[a-f0-9]{10}\b`,
 }
 
 // defaultSeverities ranks the default rules. Distinctive provider/cloud
@@ -157,6 +183,17 @@ var defaultSeverities = map[string]string{
 	"sendgrid_key": SeverityHigh,
 	"google_oauth": SeverityHigh,
 	"aws_akia":     SeverityHigh,
+
+	"anthropic_key":     SeverityHigh,
+	"openai_key":        SeverityHigh,
+	"openai_legacy":     SeverityHigh,
+	"openrouter_key":    SeverityHigh,
+	"groq_key":          SeverityHigh,
+	"xai_key":           SeverityHigh,
+	"perplexity_key":    SeverityHigh,
+	"huggingface_token": SeverityHigh,
+	"replicate_key":     SeverityHigh,
+	"langsmith_key":     SeverityHigh,
 
 	"bearer":   SeverityMedium,
 	"api_key":  SeverityMedium,

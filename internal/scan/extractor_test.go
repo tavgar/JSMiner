@@ -118,6 +118,65 @@ func TestProviderTokenPatterns(t *testing.T) {
 	}
 }
 
+// TestAIProviderKeyPatterns verifies the LLM-provider key detectors fire on the
+// vendor-assigned shapes, rank High, and are not confused by the `sk-` prefix
+// they share (an OpenAI project key must not be reported as an Anthropic one).
+func TestAIProviderKeyPatterns(t *testing.T) {
+	e := NewExtractor(false, false)
+	hex64 := strings.Repeat("a1b2c3d4", 8)
+	cases := []struct{ rule, value string }{
+		{"anthropic_key", "sk-ant-api03-" + strings.Repeat("Ab3-_", 18) + "AA"},
+		{"openai_key", "sk-proj-" + strings.Repeat("Ab3-_", 12)},
+		{"openai_legacy", "sk-" + strings.Repeat("Ab3xY9zQ", 6)},
+		{"openrouter_key", "sk-or-v1-" + hex64},
+		{"groq_key", "gsk_" + strings.Repeat("Ab3xY9zQ13", 5) + "ab"},
+		{"xai_key", "xai-" + strings.Repeat("Ab3xY9zQ", 10)},
+		{"perplexity_key", "pplx-" + strings.Repeat("Ab3xY9zQ", 4)},
+		{"huggingface_token", "hf_" + strings.Repeat("AbcdefghiJ", 3) + "klmn"},
+		{"replicate_key", "r8_" + strings.Repeat("Ab3xY9z", 5) + "Qz"},
+		{"langsmith_key", "lsv2_pt_" + strings.Repeat("a1b2", 8) + "_" + "a1b2c3d4e5"},
+	}
+	var lines []string
+	for i, c := range cases {
+		lines = append(lines, fmt.Sprintf("var v%d=%q;", i, c.value))
+	}
+	matches, err := e.ScanReader("bundle.js", strings.NewReader(strings.Join(lines, "\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cases {
+		var got *Match
+		for i, m := range matches {
+			if m.Pattern == c.rule {
+				got = &matches[i]
+				break
+			}
+		}
+		if got == nil {
+			t.Errorf("expected a %s match for %q", c.rule, c.value)
+			continue
+		}
+		if got.Value != c.value {
+			t.Errorf("%s matched %q, want %q", c.rule, got.Value, c.value)
+		}
+		if got.Severity != SeverityHigh {
+			t.Errorf("%s severity = %q, want %q", c.rule, got.Severity, SeverityHigh)
+		}
+	}
+	// The `sk-` family must not cross-match: each key belongs to exactly one rule.
+	skRules := map[string]bool{"anthropic_key": true, "openai_key": true, "openai_legacy": true, "openrouter_key": true}
+	for _, m := range matches {
+		if !skRules[m.Pattern] {
+			continue
+		}
+		for _, c := range cases {
+			if m.Value == c.value && m.Pattern != c.rule {
+				t.Errorf("%q matched by %s, want only %s", c.value, m.Pattern, c.rule)
+			}
+		}
+	}
+}
+
 // TestProviderTokenPatternsSafeMode confirms the provider detectors also run in
 // safe mode (they are registered as JS rules), since minified JS bundles are the
 // primary place these tokens leak.
