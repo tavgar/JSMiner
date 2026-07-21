@@ -41,6 +41,13 @@ type Extractor struct {
 	snippet           bool
 	calibrator        *autoCalibrator
 	recoverSourceMaps bool
+
+	// DOM source hints are hidden cross-phase intelligence: when enabled by the
+	// CLI's -dom/-full modes, concurrent JS scans accumulate parameter/storage
+	// names for the later browser instrumentation pass.
+	domHintsMu      sync.Mutex
+	collectDOMHints bool
+	domHints        map[string]DOMSourceHint
 }
 
 // SetRecoverSourceMaps toggles recovery of original source from JavaScript
@@ -147,6 +154,20 @@ var baseJSRules = map[string]bool{
 	"sentry_token":          true,
 	"docker_pat":            true,
 	"basic_auth_url":        true,
+	// Hot 2025/2026 stack: modern email, vector DB/RAG, feature flags, IaC,
+	// headless CMS and dev tooling — all JS-relevant, so run in safe mode too.
+	"resend_key":            true,
+	"pinecone_key":          true,
+	"elevenlabs_key":        true,
+	"tavily_key":            true,
+	"launchdarkly_key":      true,
+	"netlify_token":         true,
+	"hashicorp_vault_token": true,
+	"terraform_cloud_token": true,
+	"pulumi_token":          true,
+	"atlassian_token":       true,
+	"bitbucket_token":       true,
+	"contentful_token":      true,
 }
 
 // default patterns (simplified)
@@ -232,6 +253,24 @@ var defaultPatterns = map[string]string{
 	// Credentials embedded directly in a URL's userinfo (scheme://user:pass@host).
 	// A classic, high-value leak in hard-coded connection strings and API URLs.
 	"basic_auth_url": `[a-zA-Z][a-zA-Z0-9+.-]*://[^/\s:@"']+:[^/\s:@"']+@[^\s/:"']+`,
+
+	// Signatures for the technologies dominating 2025/2026 web/AI stacks — modern
+	// transactional email, vector databases and RAG/agent tooling, feature-flag
+	// platforms, infrastructure-as-code, headless CMS and developer tooling. Each
+	// has a vendor-assigned prefix distinctive enough to stand alone, and these
+	// creds routinely land in front-end bundles and framework config.
+	"resend_key":            `\bre_[A-Za-z0-9]{8,10}_[A-Za-z0-9]{16,}\b`,
+	"pinecone_key":          `\bpcsk_[A-Za-z0-9_]{40,}\b`,
+	"elevenlabs_key":        `\bsk_[a-f0-9]{48}\b`,
+	"tavily_key":            `\btvly-(?:dev-)?[A-Za-z0-9]{32}\b`,
+	"launchdarkly_key":      `\b(?:sdk|mob|api)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`,
+	"netlify_token":         `\bnfp_[A-Za-z0-9]{36,}\b`,
+	"hashicorp_vault_token": `\bhvs\.[A-Za-z0-9_-]{24,}`,
+	"terraform_cloud_token": `\b[a-z0-9]{14}\.atlasv1\.[A-Za-z0-9_-]{60,}`,
+	"pulumi_token":          `\bpul-[a-f0-9]{40}\b`,
+	"atlassian_token":       `\bATATT3xFfGF0[A-Za-z0-9_=\-]{100,}`,
+	"bitbucket_token":       `\bATBB[A-Za-z0-9]{32,}`,
+	"contentful_token":      `\bCFPAT-[A-Za-z0-9_-]{43}\b`,
 }
 
 // defaultSeverities ranks the default rules. Distinctive provider/cloud
@@ -292,6 +331,19 @@ var defaultSeverities = map[string]string{
 	"sentry_token":          SeverityHigh,
 	"docker_pat":            SeverityHigh,
 	"basic_auth_url":        SeverityHigh,
+
+	"resend_key":            SeverityHigh,
+	"pinecone_key":          SeverityHigh,
+	"elevenlabs_key":        SeverityHigh,
+	"tavily_key":            SeverityHigh,
+	"launchdarkly_key":      SeverityHigh,
+	"netlify_token":         SeverityHigh,
+	"hashicorp_vault_token": SeverityHigh,
+	"terraform_cloud_token": SeverityHigh,
+	"pulumi_token":          SeverityHigh,
+	"atlassian_token":       SeverityHigh,
+	"bitbucket_token":       SeverityHigh,
+	"contentful_token":      SeverityHigh,
 
 	// A Twilio Account SID is a public identifier, not a secret on its own, but a
 	// hit is a strong indicator of Twilio credentials nearby — Medium, review-worthy.
@@ -656,6 +708,7 @@ func (e *Extractor) scanDataWithEndpoints(source string, data []byte, isJS bool)
 		return nil, err
 	}
 	if isJS {
+		e.captureDOMSourceHints(data)
 		// Raw regex scanning already covers values that appear contiguously in the
 		// source. Limit the additional AST pass to reconstructed values so a large
 		// bundle does not run hundreds of rules over every ordinary string twice.
@@ -706,6 +759,7 @@ func (e *Extractor) scanDataPostRequests(source string, data []byte, isJS bool) 
 	if e.isAllowed(source) || !isJS {
 		return nil, nil
 	}
+	e.captureDOMSourceHints(data)
 
 	seen := make(map[string]struct{})
 	var matches []Match

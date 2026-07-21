@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -110,6 +111,22 @@ func vulnServer() *httptest.Server {
 	// cross-origin or executable destination.
 	mux.HandleFunc("/href", page(`<a id=out>current</a>
 <script>document.getElementById('out').href = location.href;</script>`))
+
+	// A parameter name that exists only in JavaScript. The seed URL has no query,
+	// so this flow is reachable only when static source hints feed the DOM pass.
+	mux.HandleFunc("/hinted-eval", page(`<script>
+  var p = new URLSearchParams(location.search).get('dom_payload');
+  if (p) { try { eval(p); } catch (e) {} }
+</script>`))
+
+	// Two fields drive separate sinks; unique form canaries must identify which
+	// field reached which sink instead of reporting the old generic "input".
+	mux.HandleFunc("/form-fields", page(`<form><input name=title><textarea name=body></textarea></form><div id=out></div>
+<script>
+  document.querySelector('[name=body]').addEventListener('input', function(e){
+    document.getElementById('out').innerHTML=e.target.value;
+  });
+</script>`))
 
 	// localStorage -> innerHTML (sensitive source; only our marker is ever seeded)
 	mux.HandleFunc("/storage", page(`<div id=out></div>
@@ -329,6 +346,48 @@ func TestDOMURLFlowIncludesTriageEvidence(t *testing.T) {
 	}
 	if f.Triage == nil || f.Triage.Verdict != DOMTriageLikelyBenign {
 		t.Errorf("same-origin query propagation triage = %+v, want likely_benign", f.Triage)
+	}
+}
+
+func TestDOMJavaScriptHintFeedsConfirmProbe(t *testing.T) {
+	defer domTestSetup(t)()
+	srv := vulnServer()
+	defer srv.Close()
+
+	res := runDOM(t, srv.URL+"/hinted-eval", func(c *DOMScanConfig) {
+		c.Mode = DOMModeConfirm
+		c.SourceHints = []DOMSourceHint{{
+			Kind: SourceURLQuery, Name: "dom_payload",
+			Discovered: []string{DOMHintJavaScriptAccess},
+		}}
+	})
+	f := findFlow(res, SourceURLQuery, "dom_payload", "eval")
+	if f == nil {
+		t.Fatalf("JavaScript-only parameter was not probed; findings=%s", summarize(res))
+	}
+	if !f.Confirmed || f.Triage == nil || f.Triage.Verdict != DOMTriageConfirmed {
+		t.Fatalf("hinted eval flow was not confirmed: %+v", f)
+	}
+	if f.Source == nil || !reflect.DeepEqual(f.Source.DiscoveredBy, []string{DOMHintJavaScriptAccess}) {
+		t.Fatalf("hint provenance missing: %+v", f.Source)
+	}
+	if res.Summary.HintProbesSent == 0 {
+		t.Error("summary did not count source-intelligence probes")
+	}
+}
+
+func TestDOMFormFieldsHaveUniqueIdentity(t *testing.T) {
+	defer domTestSetup(t)()
+	srv := vulnServer()
+	defer srv.Close()
+
+	res := runDOM(t, srv.URL+"/form-fields", nil)
+	f := findFlow(res, SourceFormInput, "body", "innerHTML")
+	if f == nil {
+		t.Fatalf("named form field -> innerHTML flow missing; findings=%s", summarize(res))
+	}
+	if findFlow(res, SourceFormInput, "input", "innerHTML") != nil {
+		t.Error("form flow fell back to ambiguous generic input identity")
 	}
 }
 

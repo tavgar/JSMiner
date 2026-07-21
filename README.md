@@ -85,10 +85,11 @@ Flags:
   requested even when it points to the same host or a subdomain; when enabled,
   redirects may cross domains. The received page/response body and its inline
   findings are still scanned.
-- `-full` enable full discovery mode. This is equivalent to combining
-  `-crawl -crawl-passive -crawl-permute`; the normal crawl depth, page, passive
-  and permutation limits still apply and can be adjusted with their individual
-  flags.
+- `-full` enable the complete discovery and DOM-validation pipeline. This combines
+  `-crawl -crawl-passive -crawl-permute` with DOM scanning in `confirm` mode,
+  feeds JavaScript/passive source names and discovered routes into that DOM pass,
+  and still honours the individual crawl, DOM, passive and permutation limits.
+  An explicit `-dom-mode observe|canary` overrides the full-mode DOM default.
 - `-crawl` crawl the in-scope endpoints and paths discovered on each page to
   reach more JavaScript files and secrets. Discovered `endpoint_url`,
   `endpoint_path` (and, with `-posts`, `post_url`/`post_path`) values that match
@@ -230,13 +231,15 @@ Flags:
   status and each page render; `-vvv` adds a per-item trace (target enqueue/skip
   decisions, method probes, parameter replays, permutations, followed imports).
   Diagnostics go to stderr so they never mix into the results on stdout.
-- `-dom` enable opt-in DOM vulnerability scanning for URL targets — see
-  [DOM scanning](#dom-scanning) below. Disabled by default and never enabled by
+- `-dom` enable DOM vulnerability scanning for URL targets — see
+  [DOM scanning](#dom-scanning) below. It is also enabled in `confirm` mode by
   `-full`. It renders and instruments each page in headless Chrome to find DOM
   XSS source-to-sink flows and analyse `postMessage`, reusing the same scope,
   headers, cookies, TLS, redirect, throttle, timeout and Chromium settings as the
   rest of the scanner. With `-crawl`/`-full` it follows the in-scope link graph to
-  more pages; on its own it scans only the given targets.
+  more pages; routes found in JavaScript and validated crawl results are also
+  admitted as bounded DOM seeds.
+- `-dom-confirm` convenience alias for `-dom -dom-mode confirm`.
 - `-dom-mode` DOM scan mode (default `canary`): `observe` records dangerous sink
   activity without changing any inputs; `canary` injects unique, non-executing
   markers and reports the source-to-sink flows they reveal; `confirm` additionally
@@ -246,6 +249,9 @@ Flags:
 - `-dom-max-probes` max DOM probes across the whole scan (default `1000`, `0` for
   unlimited), so a page or app can never drive unbounded probes. The limit is
   reported in the summary.
+- `-dom-max-params` max JavaScript/passive parameter names and storage/cookie
+  keys injected per DOM page (default `100`). The global probe and URL-length
+  limits still apply.
 - `-dom-workers` DOM pages to scan in parallel (default `4`), independent of
   `-crawl-workers`.
 - `-dom-timeout` per-page DOM scan budget in seconds (default `25`).
@@ -360,7 +366,7 @@ Wayback or Common Crawl. Gathering is passive with respect to the target, but
 the validation phase is active and consumes the normal crawl page/request budget:
 
 ```
-jsminer -full -render=false https://example.com/
+jsminer -full https://example.com/
 jsminer -crawl -crawl-passive -crawl-passive-sources wayback -crawl-passive-max 50 https://example.com/
 ```
 
@@ -693,9 +699,9 @@ Matches will stream to stdout or to the file specified with `-output`.
 
 ## DOM scanning
 
-`-dom` turns on an **automation-first DOM vulnerability scanner**. It is opt-in,
-applies only to URL targets where browser rendering is available, and is never
-enabled implicitly by `-full`. It reuses everything the rest of JSMiner already
+`-dom` turns on an **automation-first DOM vulnerability scanner**. It applies
+only to URL targets where browser rendering is available; `-full` enables it in
+`confirm` mode. It reuses everything the rest of JSMiner already
 does — target handling, crawling, scope, request headers, authentication cookies,
 TLS settings, redirect policy, throttling, timeouts and Chromium provisioning —
 so a DOM scan behaves like the scans you already run, just with the page
@@ -704,7 +710,9 @@ separately installed scanner.
 
 ```bash
 jsminer -dom https://target.example
+jsminer -dom-confirm https://target.example
 jsminer -crawl -dom -format jsonl https://target.example
+jsminer -full https://target.example
 ```
 
 ### What it detects
@@ -719,6 +727,20 @@ properties, `document.referrer`, `window.name`, form inputs, cookies,
 `localStorage`, `sessionStorage`, and web-message (`postMessage`) data. Each
 source (each parameter individually) carries a **unique probe identity**, so a
 detected sink is tied to the exact input that controlled it.
+
+Before rendering, JSMiner mines names used by `URLSearchParams`, router query
+objects, request URLs/bodies, `localStorage`, `sessionStorage` and common cookie
+APIs from every JavaScript bundle and recovered source map. It also retains only
+the parameter names—not values—from bounded Wayback/Common Crawl hints. Those
+typed source hints are scoped to the original target, ranked above synthetic
+markers, and injected into each DOM route under `-dom-max-params`, the URL-length
+guard and the global probe budget. Findings report `discovered_by` provenance.
+Document-like endpoints and validated crawl/passive routes become additional DOM
+seeds; obvious scripts, JSON and static assets do not.
+
+Live forms are enumerated after load and every usable input receives a different
+canary keyed by its `name`/`id`, so a result identifies `form_input[body]` rather
+than ambiguously attributing every form flow to `form_input[input]`.
 
 Sinks: `innerHTML`/`outerHTML`, `insertAdjacentHTML`, `document.write`/`writeln`,
 `eval`, `Function`, string `setTimeout`/`setInterval`, script-URL assignments,
@@ -814,8 +836,9 @@ jsminer -dom -format jsonl -fail-on high https://target.example
 
 ### Safety
 
-DOM scanning can alter application behaviour, so it always requires explicit
-enablement; active confirmation requires `-dom-mode confirm`; destructive form
+DOM scanning can alter application behaviour. It requires `-dom`, `-dom-confirm`
+or `-full`; active confirmation is enabled by `-dom-confirm`, `-dom-mode confirm`
+or the default `-full` pipeline. Destructive form
 values and state-changing confirmation actions are avoided; crawl scope is
 respected for navigations and generated probes; probes are not sent to
 third-party origins and client-side redirects out of scope are not followed

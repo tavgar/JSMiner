@@ -127,6 +127,11 @@ type CrawlOptions struct {
 	// never unbounded independently of the crawl's own page budget.
 	PassiveMax int
 
+	// OnDOMSourceHints receives sanitized source names learned outside response
+	// bodies (currently archived query names). Values are never included. The CLI
+	// uses this only when a later DOM scan is enabled.
+	OnDOMSourceHints func([]DOMSourceHint)
+
 	// ResumeFile, when non-empty, turns on crawl checkpointing: the crawl reloads
 	// its state from this file at start (when it holds a checkpoint for the same
 	// seed) and periodically writes its state back to it, so a run killed part way
@@ -458,6 +463,21 @@ func (e *Extractor) crawlBFS(seedURL string, opts CrawlOptions, scanPage func(u,
 		// can produce findings, next hops, method probes or permutation input.
 		if opts.DiscoverPassive {
 			passive := discoverPassiveURLs(seed, opts.PassiveSources, opts.PassiveMax)
+			if opts.OnDOMSourceHints != nil {
+				var hints []DOMSourceHint
+				for _, candidate := range passive {
+					provenance := DOMHintPassiveWayback
+					if candidate.Source == passiveSourceCommonCrawl {
+						provenance = DOMHintPassiveCommon
+					}
+					for _, name := range candidate.ParamNames {
+						hints = append(hints, DOMSourceHint{
+							Kind: SourceURLQuery, Name: name, Discovered: []string{provenance},
+						})
+					}
+				}
+				opts.OnDOMSourceHints(hints)
+			}
 			stats.PassiveFound = len(passive)
 			// Bound repeated historical templates without consuming the live
 			// classer's quota. Only a path that later validates is enrolled in the

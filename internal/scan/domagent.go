@@ -10,10 +10,11 @@ import (
 // random, non-executing marker used only for correlation; ID is the stable
 // probe identity (kind:name) that appears in findings.
 type domCanary struct {
-	ID    string `json:"id"`
-	Token string `json:"token"`
-	Kind  string `json:"kind"`
-	Name  string `json:"name"`
+	ID           string   `json:"id"`
+	Token        string   `json:"token"`
+	Kind         string   `json:"kind"`
+	Name         string   `json:"name"`
+	DiscoveredBy []string `json:"discoveredBy,omitempty"`
 	// Value is the string actually injected into the source. It defaults to Token
 	// when empty. Confirm-mode payloads set Value to an executing payload that
 	// still embeds Token, so a sink hit is attributed by matching Token while the
@@ -86,6 +87,7 @@ type domRawFinding struct {
 	ProbeID    string         `json:"probeId"`
 	SourceKind string         `json:"sourceKind"`
 	SourceName string         `json:"sourceName"`
+	Discovered []string       `json:"discoveredBy"`
 	Transform  string         `json:"transform"`
 	Stack      []domRawFrame  `json:"stack"`
 	FrameURL   string         `json:"frameUrl"`
@@ -247,9 +249,9 @@ const domAgentScript = `
       var c = CANARIES[i];
       if (!c || !c.token) continue;
       if (value.indexOf(c.token) !== -1) {
-        out.push({ id: c.id, kind: c.kind, name: c.name, token: c.token, transform: '' });
+        out.push({ id: c.id, kind: c.kind, name: c.name, token: c.token, transform: '', discoveredBy: c.discoveredBy || [] });
       } else if (decoded !== value && decoded.indexOf(c.token) !== -1) {
-        out.push({ id: c.id, kind: c.kind, name: c.name, token: c.token, transform: 'url_decoded' });
+        out.push({ id: c.id, kind: c.kind, name: c.name, token: c.token, transform: 'url_decoded', discoveredBy: c.discoveredBy || [] });
       }
     }
     return out;
@@ -328,7 +330,8 @@ const domAgentScript = `
           emit({
             kind: 'flow', sink: sink, argument: arg, context: ctx,
             value: preview(value, mc.token), probeId: mc.id,
-            sourceKind: mc.kind, sourceName: mc.name, transform: mc.transform,
+            sourceKind: mc.kind, sourceName: mc.name, discoveredBy: mc.discoveredBy,
+            transform: mc.transform,
             stack: stack, url: ctx === 'url' ? analyseURL(value, mc.token) : null
           });
 

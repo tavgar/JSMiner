@@ -87,6 +87,12 @@ type DOMScanConfig struct {
 	Sources map[string]bool
 	Sinks   map[string]bool
 
+	// SourceHints are parameter/storage/cookie names mined by the static crawl or
+	// passive indexes. MaxSourceHintsPerPage bounds how many are applied to one
+	// rendered route; zero selects the default rather than removing the bound.
+	SourceHints           []DOMSourceHint
+	MaxSourceHintsPerPage int
+
 	// Messages enables postMessage analysis as a separately controllable feature.
 	Messages bool
 
@@ -108,13 +114,14 @@ type DOMScanConfig struct {
 // bounded pages and probes, a modest worker pool and postMessage analysis on.
 func DefaultDOMScanConfig() DOMScanConfig {
 	return DOMScanConfig{
-		Mode:        DOMModeCanary,
-		MaxPages:    50,
-		MaxProbes:   1000,
-		Workers:     4,
-		PageTimeout: 25 * time.Second,
-		Messages:    true,
-		MaxDepth:    2,
+		Mode:                  DOMModeCanary,
+		MaxPages:              50,
+		MaxProbes:             1000,
+		Workers:               4,
+		PageTimeout:           25 * time.Second,
+		Messages:              true,
+		MaxDepth:              2,
+		MaxSourceHintsPerPage: 100,
 	}
 }
 
@@ -133,6 +140,8 @@ type DOMScanSummary struct {
 	TimedOut           bool           `json:"timed_out"`
 	DurationMS         int64          `json:"duration_ms"`
 	Errors             []string       `json:"errors,omitempty"`
+	SourceHints        int            `json:"source_hints"`
+	HintProbesSent     int            `json:"hint_probes_sent"`
 }
 
 // DOMScanResult is the deduplicated findings and the summary of a DOM scan.
@@ -149,6 +158,7 @@ type domScanner struct {
 	mu           sync.Mutex
 	findings     []DOMFinding
 	probes       int
+	hintProbes   int
 	pagesScanned int
 	pagesFailed  int
 	errs         []string
@@ -334,12 +344,16 @@ func (s *domScanner) runObserve(ctx context.Context, baseHost, pageURL, relay st
 // postMessage passes, and — in confirm mode — follows up with controlled,
 // non-visible confirmation probes.
 func (s *domScanner) runCanary(ctx context.Context, baseHost, pageURL, relay string) ([]string, error) {
-	canaries, injectedURL, referrer := s.buildCanaries(pageURL)
+	canaries, injectedURL, referrer := s.buildCanaries(pageURL, s.probeCapacity())
+	if len(canaries) == 0 {
+		return s.runObserve(ctx, baseHost, pageURL, relay)
+	}
 	if !s.reserveProbes(len(canaries)) {
 		// Probe budget exhausted before this page: fall back to a pure observation
 		// so the page is still not wasted, but inject nothing.
 		return s.runObserve(ctx, baseHost, pageURL, relay)
 	}
+	s.noteHintProbes(canaries)
 
 	agentSrc := buildDOMAgent(s.agentConfig(s.cfg.Mode, relay, canaries))
 	if err := s.loadPage(ctx, agentSrc, injectedURL, referrer); err != nil {
@@ -356,17 +370,20 @@ func (s *domScanner) runCanary(ctx context.Context, baseHost, pageURL, relay str
 
 	offset, _ := s.readAndIngest(ctx, baseHost, pageURL, PhaseInitialLoad, TriggerPageLoad, "", 0)
 
-	// Interaction pass: fill forms with a form-input canary and submit, and click
-	// controls, to reach event-triggered and delayed flows.
+	// Interaction pass: give each real form field its own canary, then submit and
+	// click controls to reach event-triggered and delayed flows. Per-field identity
+	// avoids the old ambiguity where every input was reported simply as "input".
 	if s.sourceEnabled(SourceFormInput) {
-		if fic := s.formInputCanary(); s.reserveProbes(1) {
+		var formCanaries []domCanary
+		for _, fic := range s.formInputCanaries(ctx) {
+			if !s.reserveProbes(1) {
+				break
+			}
 			canaries = append(canaries, fic)
-			// The form-input canary must also be known to the agent; re-arming via a
-			// fresh navigation would lose state, so push it to the agent's canary list
-			// in-page before filling.
+			formCanaries = append(formCanaries, fic)
 			s.addCanaryToAgent(ctx, fic)
-			s.fillForms(ctx, fic.Value)
 		}
+		s.fillFormCanaries(ctx, formCanaries)
 	}
 	// Always re-read after the interaction pass: filling forms and clicking can
 	// drive event-triggered and delayed flows even when no control reported a click.
@@ -425,7 +442,7 @@ func (s *domScanner) runConfirm(ctx context.Context, baseHost, pageURL, relay st
 			continue
 		}
 		if k.kind == SourceFormInput {
-			s.fillForms(ctx, payload)
+			s.fillFormField(ctx, k.name, payload)
 		} else if k.kind == SourceWebMessage {
 			s.sendWebMessage(ctx, payload)
 		}
@@ -496,29 +513,86 @@ func (s *domScanner) addCanaryToAgent(ctx context.Context, c domCanary) {
 	_ = chromedp.Run(ctx, chromedp.Evaluate(expr, nil))
 }
 
-// fillForms fills every form control with value, dispatches input/change so
-// frameworks observe it, and requests submit — reaching flows behind input and
-// submit handlers. It is only ever called in canary/confirm mode (observe never
-// changes inputs).
-func (s *domScanner) fillForms(ctx context.Context, value string) {
-	js := `(function(v){try{
-	  var forms=document.querySelectorAll('form');var n=0;
-	  forms.forEach(function(f){
-	    f.querySelectorAll('input,textarea').forEach(function(inp){
-	      var t=(inp.type||'text').toLowerCase();
-	      if(['hidden','submit','button','reset','image','file','checkbox','radio'].indexOf(t)!==-1)return;
-	      try{inp.value=v;inp.dispatchEvent(new Event('input',{bubbles:true}));inp.dispatchEvent(new Event('change',{bubbles:true}));n++;}catch(e){}
-	    });
-	    try{if(typeof f.requestSubmit==='function')f.requestSubmit();else f.submit();}catch(e){}
-	  });
-	  // Also feed inputs that are not inside a form.
-	  document.querySelectorAll('input,textarea').forEach(function(inp){
-	    if(inp.form)return;var t=(inp.type||'text').toLowerCase();
+func (s *domScanner) formInputCanaries(ctx context.Context) []domCanary {
+	js := `(function(){try{
+	  var nodes=Array.prototype.slice.call(document.querySelectorAll('input,textarea'));
+	  var seen={},out=[];
+	  nodes.forEach(function(el,i){
+	    var t=(el.type||'text').toLowerCase();
 	    if(['hidden','submit','button','reset','image','file','checkbox','radio'].indexOf(t)!==-1)return;
-	    try{inp.value=v;inp.dispatchEvent(new Event('input',{bubbles:true}));inp.dispatchEvent(new Event('change',{bubbles:true}));}catch(e){}
+	    var k=el.getAttribute('name')||el.id||('field_'+i);
+	    if(!seen[k]){seen[k]=1;out.push(k);}
 	  });
+	  return out.slice(0,100);
+	}catch(e){return [];}})()`
+	var names []string
+	if err := chromedp.Run(ctx, chromedp.Evaluate(js, &names)); err != nil {
+		return nil
+	}
+	maxFields := s.cfg.MaxSourceHintsPerPage
+	if maxFields <= 0 || maxFields > 100 {
+		maxFields = 100
+	}
+	if len(names) > maxFields {
+		names = names[:maxFields]
+	}
+	out := make([]domCanary, 0, len(names))
+	for _, name := range names {
+		if !validDOMSourceHintName(name) {
+			continue
+		}
+		tok := randomCanary()
+		out = append(out, domCanary{
+			ID: SourceFormInput + ":" + name, Token: tok, Kind: SourceFormInput,
+			Name: name, Value: tok, DiscoveredBy: []string{DOMHintDOMForm},
+		})
+	}
+	return out
+}
+
+// fillFormCanaries fills each field with its unique value, dispatches the events
+// frameworks listen for, and submits each containing form once.
+func (s *domScanner) fillFormCanaries(ctx context.Context, canaries []domCanary) {
+	if len(canaries) == 0 {
+		return
+	}
+	values := make(map[string]string, len(canaries))
+	for _, canary := range canaries {
+		values[canary.Name] = canary.Value
+	}
+	data, err := json.Marshal(values)
+	if err != nil {
+		return
+	}
+	js := `(function(values){try{
+	  var nodes=Array.prototype.slice.call(document.querySelectorAll('input,textarea'));var n=0,forms=[];
+	  nodes.forEach(function(el,i){
+	    var t=(el.type||'text').toLowerCase();
+	    if(['hidden','submit','button','reset','image','file','checkbox','radio'].indexOf(t)!==-1)return;
+	    var k=el.getAttribute('name')||el.id||('field_'+i);if(!Object.prototype.hasOwnProperty.call(values,k))return;
+	    try{el.value=values[k];el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));n++;if(el.form&&forms.indexOf(el.form)<0)forms.push(el.form);}catch(e){}
+	  });
+	  forms.forEach(function(f){try{
+	    f.addEventListener('submit',function(ev){ev.preventDefault();},{capture:true,once:true});
+	    if(typeof f.requestSubmit==='function')f.requestSubmit();
+	    else f.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));
+	  }catch(e){}});
 	  return n;
-	}catch(e){return 0;}})(` + jsString(value) + `)`
+	}catch(e){return 0;}})(` + string(data) + `)`
+	_ = chromedp.Run(ctx, chromedp.Evaluate(js, nil), chromedp.Sleep(domInteractionSettle()))
+}
+
+func (s *domScanner) fillFormField(ctx context.Context, name, value string) {
+	data, err := json.Marshal(map[string]string{name: value})
+	if err != nil {
+		return
+	}
+	js := `(function(values){try{
+	  var nodes=Array.prototype.slice.call(document.querySelectorAll('input,textarea'));var forms=[];
+	  nodes.forEach(function(el,i){var k=el.getAttribute('name')||el.id||('field_'+i);if(!Object.prototype.hasOwnProperty.call(values,k))return;
+	    try{el.value=values[k];el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));if(el.form&&forms.indexOf(el.form)<0)forms.push(el.form);}catch(e){}});
+	  forms.forEach(function(f){try{f.addEventListener('submit',function(ev){ev.preventDefault();},{capture:true,once:true});if(typeof f.requestSubmit==='function')f.requestSubmit();else f.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));}catch(e){}});return 1;
+	}catch(e){return 0;}})(` + string(data) + `)`
 	_ = chromedp.Run(ctx, chromedp.Evaluate(js, nil), chromedp.Sleep(domInteractionSettle()))
 }
 
@@ -528,7 +602,11 @@ func (s *domScanner) clickExplore(ctx context.Context) bool {
 	js := `(function(){try{
 	  var sel='button,[role=button],[onclick],a[href^="#"],a[href^="javascript:"]';
 	  var nodes=Array.prototype.slice.call(document.querySelectorAll(sel)).slice(0,25);
-	  var n=0;nodes.forEach(function(el){try{el.click();n++;}catch(e){}});
+	  var n=0;nodes.forEach(function(el){try{
+	    var tag=(el.tagName||'').toLowerCase(),type=(el.getAttribute&&el.getAttribute('type')||'').toLowerCase();
+	    if(tag==='button'&&(type===''||type==='submit'||type==='reset'))return;
+	    el.click();n++;
+	  }catch(e){}});
 	  return n;
 	}catch(e){return 0;}})()`
 	var n int
@@ -606,38 +684,128 @@ func (s *domScanner) collectLinks(ctx context.Context, baseHost string) ([]strin
 // buildCanaries derives the canary set for a page from its enabled sources,
 // returning the canaries, the URL to navigate to (query/fragment canaries
 // injected) and the referrer URL to set (empty when the referrer source is off).
-func (s *domScanner) buildCanaries(pageURL string) (canaries []domCanary, injectedURL, referrer string) {
+const domMaxInjectedURLLength = 16 << 10
+
+func (s *domScanner) buildCanaries(pageURL string, maxCanaries int) (canaries []domCanary, injectedURL, referrer string) {
 	u, err := url.Parse(pageURL)
 	if err != nil {
 		return nil, pageURL, ""
 	}
 
-	// URL query parameters: one distinct canary per existing parameter, so the
-	// exact controlling parameter is identifiable even when several exist, plus a
-	// synthetic parameter to catch code reading an arbitrary/added parameter.
+	seen := make(map[string]bool)
+	hasCapacity := func() bool { return maxCanaries < 0 || len(canaries) < maxCanaries }
+	mergeDiscovery := func(kind, name string, discovered []string) bool {
+		id := kind + ":" + name
+		for i := range canaries {
+			if canaries[i].ID == id {
+				canaries[i].DiscoveredBy = uniqueSortedStrings(append(canaries[i].DiscoveredBy, discovered...))
+				return true
+			}
+		}
+		return false
+	}
+	add := func(kind, name string, discovered []string) (domCanary, bool) {
+		key := kind + "\x1f" + name
+		if seen[key] {
+			mergeDiscovery(kind, name, discovered)
+			return domCanary{}, false
+		}
+		if !hasCapacity() {
+			return domCanary{}, false
+		}
+		seen[key] = true
+		tok := randomCanary()
+		c := domCanary{
+			ID: kind + ":" + name, Token: tok, Kind: kind, Name: name,
+			DiscoveredBy: uniqueSortedStrings(discovered),
+		}
+		canaries = append(canaries, c)
+		return c, true
+	}
+
+	q := u.Query()
+	setQueryCanary := func(name string, discovered []string, enforceLength bool) bool {
+		if seen[SourceURLQuery+"\x1f"+name] {
+			mergeDiscovery(SourceURLQuery, name, discovered)
+			return false
+		}
+		if !hasCapacity() {
+			return false
+		}
+		tok := randomCanary()
+		if enforceLength {
+			trial := cloneURLValues(q)
+			trial.Set(name, tok)
+			candidate := *u
+			candidate.RawQuery = trial.Encode()
+			if len(candidate.String()) > domMaxInjectedURLLength {
+				return false
+			}
+		}
+		q.Set(name, tok)
+		seen[SourceURLQuery+"\x1f"+name] = true
+		canaries = append(canaries, domCanary{
+			ID: SourceURLQuery + ":" + name, Token: tok, Kind: SourceURLQuery, Name: name,
+			DiscoveredBy: uniqueSortedStrings(discovered),
+		})
+		return true
+	}
+
+	// URL query parameters already present on the route retain first priority.
 	if s.sourceEnabled(SourceURLQuery) {
-		q := u.Query()
 		names := make([]string, 0, len(q))
 		for name := range q {
 			names = append(names, name)
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			tok := randomCanary()
-			q.Set(name, tok)
-			canaries = append(canaries, domCanary{ID: SourceURLQuery + ":" + name, Token: tok, Kind: SourceURLQuery, Name: name})
+			setQueryCanary(name, []string{"page_url"}, false)
 		}
-		tok := randomCanary()
-		q.Set("jsmq", tok)
-		canaries = append(canaries, domCanary{ID: SourceURLQuery + ":jsmq", Token: tok, Kind: SourceURLQuery, Name: "jsmq"})
+	}
+
+	// Static/passive names are tried on every same-scope route. Direct JavaScript
+	// access evidence ranks before request-body and passive archive hints.
+	hints := s.sourceHintsForPage(u.Hostname())
+	maxHints := s.cfg.MaxSourceHintsPerPage
+	if maxHints <= 0 {
+		maxHints = DefaultDOMScanConfig().MaxSourceHintsPerPage
+	}
+	usedHints := 0
+	for _, hint := range hints {
+		if usedHints >= maxHints {
+			break
+		}
+		if !s.sourceEnabled(hint.Kind) {
+			continue
+		}
+		if seen[hint.Kind+"\x1f"+hint.Name] {
+			mergeDiscovery(hint.Kind, hint.Name, hint.Discovered)
+			usedHints++
+			continue
+		}
+		var added bool
+		if hint.Kind == SourceURLQuery {
+			added = setQueryCanary(hint.Name, hint.Discovered, true)
+		} else {
+			_, added = add(hint.Kind, hint.Name, hint.Discovered)
+		}
+		if added {
+			usedHints++
+		}
+	}
+
+	// Keep a generic added parameter after real names so arbitrary-query readers
+	// are still detected without displacing higher-value intelligence.
+	if s.sourceEnabled(SourceURLQuery) {
+		setQueryCanary("jsmq", []string{"synthetic"}, true)
 		u.RawQuery = q.Encode()
 	}
 
 	// URL fragment: read only by client-side code, never sent to the server.
 	if s.sourceEnabled(SourceURLFragment) {
-		tok := randomCanary()
-		u.Fragment = tok
-		canaries = append(canaries, domCanary{ID: SourceURLFragment + ":fragment", Token: tok, Kind: SourceURLFragment, Name: "fragment"})
+		if c, ok := add(SourceURLFragment, "fragment", []string{"synthetic"}); ok {
+			u.Fragment = c.Token
+		}
 	}
 
 	// JS-settable sources are seeded by the agent before page scripts run.
@@ -645,7 +813,6 @@ func (s *domScanner) buildCanaries(pageURL string) (canaries []domCanary, inject
 		if !s.sourceEnabled(kind) {
 			continue
 		}
-		tok := randomCanary()
 		name := ""
 		switch kind {
 		case SourceCookie:
@@ -657,7 +824,7 @@ func (s *domScanner) buildCanaries(pageURL string) (canaries []domCanary, inject
 		case SourceWindowName:
 			name = "window.name"
 		}
-		canaries = append(canaries, domCanary{ID: kind + ":" + name, Token: tok, Kind: kind, Name: name})
+		add(kind, name, []string{"synthetic"})
 	}
 
 	injectedURL = u.String()
@@ -665,13 +832,64 @@ func (s *domScanner) buildCanaries(pageURL string) (canaries []domCanary, inject
 	// Referrer: set to an in-scope URL carrying the canary so document.referrer
 	// reflects it without contacting any off-scope host.
 	if s.sourceEnabled(SourceReferrer) {
-		tok := randomCanary()
-		ref := &url.URL{Scheme: u.Scheme, Host: u.Host, Path: "/", RawQuery: "jsmref=" + tok}
-		referrer = ref.String()
-		canaries = append(canaries, domCanary{ID: SourceReferrer + ":referrer", Token: tok, Kind: SourceReferrer, Name: "referrer"})
+		if c, ok := add(SourceReferrer, "referrer", []string{"synthetic"}); ok {
+			ref := &url.URL{Scheme: u.Scheme, Host: u.Host, Path: "/", RawQuery: "jsmref=" + c.Token}
+			referrer = ref.String()
+		}
 	}
 
 	return canaries, injectedURL, referrer
+}
+
+func cloneURLValues(in url.Values) url.Values {
+	out := make(url.Values, len(in))
+	for key, values := range in {
+		out[key] = append([]string(nil), values...)
+	}
+	return out
+}
+
+func (s *domScanner) sourceHintsForPage(host string) []DOMSourceHint {
+	byKey := make(map[string]DOMSourceHint)
+	for _, hint := range s.cfg.SourceHints {
+		if !validDOMSourceHintName(hint.Name) {
+			continue
+		}
+		if hint.ScopeHost != "" && !sameScope(hint.ScopeHost, host) {
+			continue
+		}
+		hint.ScopeHost = "" // scope has been enforced; merge identical page hints
+		mergeDOMSourceHint(byKey, hint)
+	}
+	hints := make([]DOMSourceHint, 0, len(byKey))
+	for _, hint := range byKey {
+		hints = append(hints, hint)
+	}
+	sort.SliceStable(hints, func(i, j int) bool {
+		pi, pj := domHintPriority(hints[i]), domHintPriority(hints[j])
+		if pi != pj {
+			return pi < pj
+		}
+		if hints[i].Kind != hints[j].Kind {
+			return hints[i].Kind < hints[j].Kind
+		}
+		return hints[i].Name < hints[j].Name
+	})
+	return hints
+}
+
+func domHintPriority(hint DOMSourceHint) int {
+	for _, source := range hint.Discovered {
+		if source == DOMHintJavaScriptAccess {
+			return 0
+		}
+	}
+	for _, source := range hint.Discovered {
+		if source == DOMHintJavaScriptURL || source == DOMHintJavaScriptRequest {
+			return 1
+		}
+	}
+	return 2
 }
 
 // injectSourceURL rebuilds pageURL with canary c injected into its URL-carried
@@ -695,11 +913,6 @@ func (s *domScanner) injectSourceURL(pageURL string, c domCanary) string {
 		u.Fragment = val
 	}
 	return u.String()
-}
-
-func (s *domScanner) formInputCanary() domCanary {
-	tok := randomCanary()
-	return domCanary{ID: SourceFormInput + ":input", Token: tok, Kind: SourceFormInput, Name: "input", Value: tok}
 }
 
 func (s *domScanner) webMessageCanary() domCanary {
@@ -764,7 +977,7 @@ func (s *domScanner) mapFinding(target, pageURL string, rf domRawFinding, phase,
 	case "flow":
 		f.Type = DOMTypeFlow
 		f.Sink = &DOMSink{Name: rf.Sink, Argument: rf.Argument}
-		f.Source = &DOMSource{Kind: rf.SourceKind, Name: rf.SourceName}
+		f.Source = &DOMSource{Kind: rf.SourceKind, Name: rf.SourceName, DiscoveredBy: uniqueSortedStrings(rf.Discovered)}
 		f.ProbeID = rf.ProbeID
 		if rf.URL != nil {
 			f.URL = &DOMURLEvidence{
@@ -955,6 +1168,41 @@ func (s *domScanner) reserveProbes(n int) bool {
 	return true
 }
 
+// probeCapacity snapshots the remaining global canary budget. A negative value
+// means unlimited. Concurrent workers still reserve atomically afterwards; the
+// snapshot mainly prevents one late page from constructing a canary set that
+// can never fit and unnecessarily falling all the way back to observe mode.
+func (s *domScanner) probeCapacity() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cfg.MaxProbes <= 0 {
+		return -1
+	}
+	left := s.cfg.MaxProbes - s.probes
+	if left < 0 {
+		return 0
+	}
+	return left
+}
+
+func (s *domScanner) noteHintProbes(canaries []domCanary) {
+	n := 0
+	for _, canary := range canaries {
+		for _, source := range canary.DiscoveredBy {
+			if source != "synthetic" && source != "page_url" {
+				n++
+				break
+			}
+		}
+	}
+	if n == 0 {
+		return
+	}
+	s.mu.Lock()
+	s.hintProbes += n
+	s.mu.Unlock()
+}
+
 func (s *domScanner) budgetExhausted() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1028,6 +1276,8 @@ func (s *domScanner) buildSummary(cfg DOMScanConfig, findingCount int, findings 
 		TimedOut:           s.timedOut,
 		DurationMS:         dur.Milliseconds(),
 		Errors:             append([]string(nil), s.errs...),
+		SourceHints:        len(cfg.SourceHints),
+		HintProbesSent:     s.hintProbes,
 	}
 }
 

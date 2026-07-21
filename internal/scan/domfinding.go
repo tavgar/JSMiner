@@ -13,7 +13,7 @@ import (
 // structured output so downstream consumers can detect an incompatible change.
 // Bump the minor version when adding fields, the major version when changing or
 // removing an existing field's meaning.
-const DOMSchemaVersion = "dom.1.1"
+const DOMSchemaVersion = "dom.1.2"
 
 // DOM finding types. These strings are stable public identifiers: automated
 // triage keys off them, so their spellings must not change. New analyses
@@ -83,8 +83,9 @@ type DOMStackFrame struct {
 // specific input (name, e.g. a query parameter name or cookie name) a flow
 // originated from.
 type DOMSource struct {
-	Kind string `json:"kind"`
-	Name string `json:"name,omitempty"`
+	Kind         string   `json:"kind"`
+	Name         string   `json:"name,omitempty"`
+	DiscoveredBy []string `json:"discovered_by,omitempty"`
 }
 
 // DOMSink identifies the security-sensitive browser API a flow reached and

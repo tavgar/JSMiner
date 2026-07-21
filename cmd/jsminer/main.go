@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -105,7 +106,7 @@ func main() {
 	quiet := flag.Bool("quiet", false, "suppress banner")
 	proxyAddr := flag.String("proxy", "", "run as proxy on address (e.g., :8080)")
 	crawl := flag.Bool("crawl", false, "crawl in-scope endpoints/paths discovered on each page to reach more JS and secrets")
-	full := flag.Bool("full", false, "full discovery mode: enables -crawl, -crawl-passive and -crawl-permute")
+	full := flag.Bool("full", false, "full discovery mode: enables crawl/passive/permutation plus confirmed DOM scanning with discovered source hints")
 	crawlDepth := flag.Int("crawl-depth", 2, "max link hops to follow beyond the seed page in crawl/full mode")
 	crawlAll := flag.Bool("crawl-all", false, "crawl to unlimited depth until no new in-scope pages remain (still bounded by -crawl-max-pages; pair with -crawl-max-pages 0 for no page cap)")
 	crawlMaxPages := flag.Int("crawl-max-pages", 200, "max pages to fetch during a crawl (0 = unlimited)")
@@ -141,14 +142,17 @@ func main() {
 	noDownloadBrowser := flag.Bool("no-download-browser", false, "never download a Chromium; only use -chrome-path, a bundled or cached browser, or one on PATH")
 	browserDest := flag.String("browser-dest", "", "with -download-browser, extract Chromium into <dir>/chromium so <dir> (binary + chromium/) ships as a self-contained bundle")
 
-	// DOM vulnerability scanning (opt-in; disabled by default and never enabled by
-	// -full). It reuses the same target handling, scope, headers, cookies, TLS,
+	// DOM vulnerability scanning. It is enabled explicitly by -dom/-dom-confirm
+	// and implicitly in confirm mode by -full. It reuses target handling, scope,
+	// headers, cookies, TLS,
 	// redirects, throttling, timeouts and Chromium configuration as the rest of the
 	// scanner, and applies only to URL targets where browser rendering is available.
 	dom := flag.Bool("dom", false, "enable DOM vulnerability scanning (DOM XSS source-to-sink flows + postMessage analysis) for URL targets; renders and instruments pages in headless Chrome")
 	domMode := flag.String("dom-mode", "canary", "DOM scan mode: observe (record sink activity, change nothing), canary (inject non-executing markers and report flows), confirm (controlled, non-visible confirmation probes)")
+	domConfirm := flag.Bool("dom-confirm", false, "enable DOM scanning in confirm mode (convenience alias for -dom -dom-mode confirm)")
 	domMaxPages := flag.Int("dom-max-pages", 50, "max pages to DOM-scan (0 = unlimited; bounds runaway link graphs independently of -crawl-max-pages)")
 	domMaxProbes := flag.Int("dom-max-probes", 1000, "max DOM probes across the whole scan, so a page or app cannot cause unbounded probes (0 = unlimited)")
+	domMaxParams := flag.Int("dom-max-params", 100, "max static/passive parameter and storage-key hints injected per DOM page")
 	domWorkers := flag.Int("dom-workers", 4, "DOM pages to scan in parallel (independent of -crawl-workers)")
 	domTimeout := flag.Int("dom-timeout", 25, "per-page DOM scan budget in seconds")
 	domSources := flag.String("dom-sources", "", "comma-separated source families to probe (default all): url_query,url_fragment,referrer,window_name,form_input,cookie,local_storage,session_storage,web_message")
@@ -163,6 +167,13 @@ func main() {
 		log.Fatal(err)
 	}
 	leftover := flag.Args()
+	domModeExplicit := false
+	flag.CommandLine.Visit(func(f *flag.Flag) {
+		if f.Name == "dom-mode" {
+			domModeExplicit = true
+		}
+	})
+	domEnabled, effectiveDOMMode := resolveDOMSettings(*dom, *domConfirm, *full, *domMode, domModeExplicit)
 
 	// Browser provisioning must be configured before any render (or an explicit
 	// -download-browser) resolves a browser. An explicit -chrome-path wins;
@@ -234,6 +245,23 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: jsminer [URL|PATH|-] [flags]")
 		os.Exit(2)
 	}
+	if *proxyAddr == "" && domEnabled {
+		hasURLTarget := false
+		for _, target := range targets {
+			if isURL(target) {
+				hasURLTarget = true
+				break
+			}
+		}
+		if !*render {
+			fmt.Fprintln(os.Stderr, "jsminer: DOM scanning enabled by -dom/-dom-confirm/-full requires rendering; do not pass -render=false")
+			os.Exit(2)
+		}
+		if !hasURLTarget {
+			fmt.Fprintln(os.Stderr, "jsminer: DOM scanning enabled by -dom/-dom-confirm/-full needs at least one URL target")
+			os.Exit(2)
+		}
+	}
 
 	if *pluginsFlag != "" {
 		for _, pl := range strings.Split(*pluginsFlag, ",") {
@@ -297,6 +325,7 @@ func main() {
 	}
 
 	extractor := scan.NewExtractor(*safe, *longSecret)
+	extractor.SetCollectDOMSourceHints(domEnabled)
 	extractor.SetSnippet(*snippet)
 	if *noSourceMaps {
 		extractor.SetRecoverSourceMaps(false)
@@ -333,6 +362,8 @@ func main() {
 
 	scanStartedAt := time.Now().UTC()
 	var allMatches []scan.Match
+	var domTargets []string
+	var domSourceHints []scan.DOMSourceHint
 	for _, target := range targets {
 		var ms []scan.Match
 		var err error
@@ -351,6 +382,10 @@ func main() {
 				}
 			}
 		} else if isURL(target) {
+			// Each target gets its own source-hint scope. The extractor can scan
+			// pages concurrently inside a crawl, so take the completed corpus only
+			// after that target's scan returns.
+			extractor.TakeDOMSourceHints()
 			if *crawl || *full {
 				opts := scan.DefaultCrawlOptions()
 				opts.MaxDepth = *crawlDepth
@@ -375,6 +410,9 @@ func main() {
 					opts.DiscoverWellKnown = false
 				}
 				opts.DiscoverPassive = *crawlPassive || *full
+				if domEnabled {
+					opts.OnDOMSourceHints = extractor.AddDOMSourceHints
+				}
 				opts.PassiveMax = *crawlPassiveMax
 				if *crawlPassiveSources != "" {
 					opts.PassiveSources = strings.Split(*crawlPassiveSources, ",")
@@ -466,6 +504,24 @@ func main() {
 			f.Close()
 		}
 
+		// Feed the DOM phase before output filters discard endpoint classes. Static
+		// JS access names, request-body fields and passive archive query names are
+		// scoped to this seed; discovered document-like routes become extra DOM
+		// seeds under the independent DOM page budget.
+		if domEnabled && isURL(target) {
+			host := ""
+			if parsed, parseErr := url.Parse(target); parseErr == nil {
+				host = parsed.Hostname()
+			}
+			for _, hint := range extractor.TakeDOMSourceHints() {
+				hint.ScopeHost = host
+				domSourceHints = append(domSourceHints, hint)
+			}
+			domTargets = append(domTargets, target)
+			domTargets = append(domTargets,
+				scan.DOMSeedURLsFromMatches(target, ms, *domAllowExternal, *domMaxPages)...)
+		}
+
 		if *posts {
 			// A posts crawl harvests HTML markup links (as endpoint_url matches) to
 			// follow the link graph; keep only POST endpoints and gathered URLs in the
@@ -496,18 +552,13 @@ func main() {
 		os.Exit(2)
 	}
 
-	// Optional DOM vulnerability scan. It is opt-in, applies only to URL targets,
-	// and requires rendering. Findings are kept separate from the generic match
-	// model so their richer evidence is preserved.
+	// DOM vulnerability scan. -full enables it in confirm mode unless the user
+	// explicitly selected another -dom-mode. Findings stay separate from the
+	// generic match model so their richer evidence is preserved.
 	var domResult scan.DOMScanResult
 	ranDOM := false
-	if *dom {
-		var urlTargets []string
-		for _, t := range targets {
-			if isURL(t) {
-				urlTargets = append(urlTargets, t)
-			}
-		}
+	if domEnabled {
+		urlTargets := uniqueStrings(domTargets)
 		switch {
 		case !*render:
 			fmt.Fprintln(os.Stderr, "jsminer: -dom requires rendering; do not pass -render=false")
@@ -516,12 +567,14 @@ func main() {
 			fmt.Fprintln(os.Stderr, "jsminer: -dom needs at least one URL target (DOM scanning works only where browser rendering is available)")
 			os.Exit(2)
 		}
-		cfg, err := buildDOMConfig(*domMode, *domMaxPages, *domMaxProbes, *domWorkers, *domTimeout,
+		cfg, err := buildDOMConfig(effectiveDOMMode, *domMaxPages, *domMaxProbes, *domWorkers, *domTimeout,
 			*domSources, *domSinks, *domMessages, *domAllowExternal, *crawl || *full, *crawlDepth)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "jsminer: %v\n", err)
 			os.Exit(2)
 		}
+		cfg.SourceHints = domSourceHints
+		cfg.MaxSourceHintsPerPage = *domMaxParams
 		if !*quiet {
 			cfg.Progress = func(msg string) { fmt.Fprintln(os.Stderr, "jsminer: "+msg) }
 		}
@@ -660,4 +713,28 @@ func parseFamilySet(list string, allowed []string, aliases map[string][]string) 
 
 func isURL(s string) bool {
 	return (len(s) > 7 && s[:7] == "http://") || (len(s) > 8 && s[:8] == "https://")
+}
+
+func uniqueStrings(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, value := range in {
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+func resolveDOMSettings(dom, domConfirm, full bool, mode string, modeExplicit bool) (bool, string) {
+	enabled := dom || domConfirm || full
+	if domConfirm || (full && !modeExplicit) {
+		mode = scan.DOMModeConfirm
+	}
+	return enabled, mode
 }

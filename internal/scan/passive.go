@@ -41,8 +41,9 @@ var (
 // passiveCandidate retains provenance so validated gathered-URL output and
 // telemetry can explain where a historical path hint came from.
 type passiveCandidate struct {
-	URL    string
-	Source string
+	URL        string
+	Source     string
+	ParamNames []string
 }
 
 // discoverPassiveURLs gathers, sanitizes, rebases, de-duplicates and ranks
@@ -81,7 +82,7 @@ func discoverPassiveURLs(seed *url.URL, sourceNames []string, max int) []passive
 	}
 	wg.Wait()
 
-	seen := make(map[string]struct{})
+	seen := make(map[string]int)
 	var candidates []passiveCandidate
 	for i, source := range sourceNames {
 		result := results[i]
@@ -90,15 +91,16 @@ func discoverPassiveURLs(seed *url.URL, sourceNames []string, max int) []passive
 			continue
 		}
 		for _, raw := range result.rawURLs {
-			live, ok := passivePathCandidate(seed, raw)
+			live, params, ok := passivePathCandidateDetails(seed, raw)
 			if !ok {
 				continue
 			}
-			if _, exists := seen[live]; exists {
+			if idx, exists := seen[live]; exists {
+				candidates[idx].ParamNames = uniqueSortedStrings(append(candidates[idx].ParamNames, params...))
 				continue
 			}
-			seen[live] = struct{}{}
-			candidates = append(candidates, passiveCandidate{URL: live, Source: source})
+			seen[live] = len(candidates)
+			candidates = append(candidates, passiveCandidate{URL: live, Source: source, ParamNames: params})
 		}
 	}
 
@@ -155,32 +157,47 @@ func normalizePassiveSources(in []string) []string {
 // the historical query and fragment: archived values frequently contain session
 // tokens, PII and unbounded tracking variants.
 func passivePathCandidate(seed *url.URL, raw string) (string, bool) {
+	live, _, ok := passivePathCandidateDetails(seed, raw)
+	return live, ok
+}
+
+// passivePathCandidateDetails preserves only historical query *names* as DOM
+// source hints. Values and fragments are still discarded before any live target
+// request, preventing archived tokens/PII from being replayed.
+func passivePathCandidateDetails(seed *url.URL, raw string) (string, []string, bool) {
 	raw = strings.TrimSpace(raw)
 	if seed == nil || raw == "" || len(raw) > passiveMaxRawURLLength {
-		return "", false
+		return "", nil, false
 	}
 	archived, err := url.Parse(raw)
 	if err != nil || archived.Opaque != "" ||
 		(archived.Scheme != "http" && archived.Scheme != "https") ||
 		archived.Hostname() == "" ||
 		!strings.EqualFold(strings.TrimSuffix(archived.Hostname(), "."), strings.TrimSuffix(seed.Hostname(), ".")) {
-		return "", false
+		return "", nil, false
 	}
 	if archived.Path == "" || archived.Path == "/" ||
 		len(archived.EscapedPath()) > passiveMaxPathLength ||
 		strings.Contains(archived.Path, `\`) ||
 		hasUnsafePathRune(archived.Path) {
-		return "", false
+		return "", nil, false
 	}
 	segments := strings.Split(strings.Trim(archived.Path, "/"), "/")
 	if len(segments) > passiveMaxPathSegments {
-		return "", false
+		return "", nil, false
 	}
 	for _, segment := range segments {
 		if segment == "." || segment == ".." {
-			return "", false
+			return "", nil, false
 		}
 	}
+	paramNames := make([]string, 0, len(archived.Query()))
+	for name := range archived.Query() {
+		if validDOMSourceHintName(name) {
+			paramNames = append(paramNames, name)
+		}
+	}
+	sort.Strings(paramNames)
 
 	live := *seed
 	live.User = nil
@@ -191,9 +208,9 @@ func passivePathCandidate(seed *url.URL, raw string) (string, bool) {
 	live.Fragment = ""
 	if live.EscapedPath() == "" || len(live.String()) > passiveMaxRawURLLength ||
 		!crawlableTarget(&live) {
-		return "", false
+		return "", nil, false
 	}
-	return normalizeCrawlURL(live.String()), true
+	return normalizeCrawlURL(live.String()), paramNames, true
 }
 
 func hasUnsafePathRune(s string) bool {

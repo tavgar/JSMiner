@@ -247,6 +247,54 @@ func TestSaaSCredentialPatterns(t *testing.T) {
 	}
 }
 
+// TestModernStackCredentialPatterns verifies the 2025/2026-stack detectors
+// (modern email, vector DB/RAG, feature flags, IaC, headless CMS, dev tooling)
+// fire on each vendor signature and rank High.
+func TestModernStackCredentialPatterns(t *testing.T) {
+	e := NewExtractor(false, false)
+	cases := []struct{ rule, value string }{
+		{"resend_key", "re_AbCdEf12_" + strings.Repeat("Ab3xY9zQ", 3)},
+		{"pinecone_key", "pcsk_" + strings.Repeat("Ab3xY9zQ", 5)},
+		{"elevenlabs_key", "sk_" + strings.Repeat("a1b2c3", 8)},
+		{"tavily_key", "tvly-" + strings.Repeat("Ab3xY9zQ", 4)},
+		{"launchdarkly_key", "sdk-a1b2c3d4-a1b2-c3d4-a1b2-c3d4a1b2c3d4"},
+		{"netlify_token", "nfp_" + strings.Repeat("Ab3xY9zQ", 5)},
+		{"hashicorp_vault_token", "hvs." + strings.Repeat("Ab3xY9zQ", 4)},
+		{"terraform_cloud_token", "abcd1234efgh56.atlasv1." + strings.Repeat("Ab3xY9zQ", 8)},
+		{"pulumi_token", "pul-" + strings.Repeat("a1b2c3d4", 5)},
+		{"atlassian_token", "ATATT3xFfGF0" + strings.Repeat("Ab3xY9zQ", 13)},
+		{"bitbucket_token", "ATBB" + strings.Repeat("Ab3xY9zQ", 4)},
+		{"contentful_token", "CFPAT-" + strings.Repeat("Ab3xY9zQ", 5) + "abc"},
+	}
+	var lines []string
+	for i, c := range cases {
+		lines = append(lines, fmt.Sprintf("x%d = %s", i, c.value))
+	}
+	matches, err := e.ScanReader("bundle.js", strings.NewReader(strings.Join(lines, "\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cases {
+		var got *Match
+		for i, m := range matches {
+			if m.Pattern == c.rule {
+				got = &matches[i]
+				break
+			}
+		}
+		if got == nil {
+			t.Errorf("expected a %s match for %q", c.rule, c.value)
+			continue
+		}
+		if got.Value != c.value {
+			t.Errorf("%s matched %q, want %q", c.rule, got.Value, c.value)
+		}
+		if got.Severity != SeverityHigh {
+			t.Errorf("%s severity = %q, want %q", c.rule, got.Severity, SeverityHigh)
+		}
+	}
+}
+
 // TestProviderTokenPatternsSafeMode confirms the provider detectors also run in
 // safe mode (they are registered as JS rules), since minified JS bundles are the
 // primary place these tokens leak.

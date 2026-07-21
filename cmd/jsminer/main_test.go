@@ -127,3 +127,19 @@ func TestBuildDOMConfigSourceSelection(t *testing.T) {
 		t.Error("expected error for unknown sink family")
 	}
 }
+
+func TestResolveDOMSettingsMakesFullConfirmed(t *testing.T) {
+	enabled, mode := resolveDOMSettings(false, false, true, scan.DOMModeCanary, false)
+	if !enabled || mode != scan.DOMModeConfirm {
+		t.Fatalf("-full DOM settings = enabled:%t mode:%s", enabled, mode)
+	}
+	// An explicit mode remains an escape hatch for a less active full crawl.
+	_, mode = resolveDOMSettings(false, false, true, scan.DOMModeObserve, true)
+	if mode != scan.DOMModeObserve {
+		t.Fatalf("explicit mode was overridden: %s", mode)
+	}
+	enabled, mode = resolveDOMSettings(false, true, false, scan.DOMModeCanary, true)
+	if !enabled || mode != scan.DOMModeConfirm {
+		t.Fatalf("-dom-confirm settings = enabled:%t mode:%s", enabled, mode)
+	}
+}

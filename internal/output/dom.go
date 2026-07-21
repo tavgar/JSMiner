@@ -249,6 +249,10 @@ func (p *Printer) printPrettyReport(w io.Writer, r Report) error {
 		}
 		fmt.Fprintf(w, "\n[dom] %s: %d finding(s) across %d page(s), %d probe(s) sent (limit %d); mode=%s\n",
 			status, s.Findings, s.PagesScanned, s.ProbesSent, s.ProbesLimit, s.Mode)
+		if s.SourceHints > 0 {
+			fmt.Fprintf(w, "[dom] source intelligence: %d hint(s), %d hint probe(s) applied\n",
+				s.SourceHints, s.HintProbesSent)
+		}
 	}
 	return nil
 }
@@ -302,6 +306,9 @@ func printDOMFinding(w io.Writer, f scan.DOMFinding) {
 	}
 	if f.ValuePreview != "" {
 		fmt.Fprintf(w, "\n    value=%s", f.ValuePreview)
+	}
+	if f.Source != nil && len(f.Source.DiscoveredBy) > 0 {
+		fmt.Fprintf(w, "\n    discovered_by=%s", strings.Join(f.Source.DiscoveredBy, ","))
 	}
 	if f.URL != nil {
 		fmt.Fprintf(w, "\n    url=resolved=%t", f.URL.Resolved)
