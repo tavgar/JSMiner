@@ -30,10 +30,12 @@ const (
 // output layer render both kinds coherently across pretty, json and jsonl
 // without the caller reaching into format internals.
 type Report struct {
-	Matches    []scan.Match
-	DOM        []scan.DOMFinding
-	DOMSummary *scan.DOMScanSummary
-	ScanTime   time.Time
+	Matches           []scan.Match
+	DOM               []scan.DOMFinding
+	DOMSummary        *scan.DOMScanSummary
+	Reflections       []scan.ReflectionFinding
+	ReflectionSummary *scan.ReflectionScanSummary
+	ScanTime          time.Time
 }
 
 // jsonlMatch is one ordinary finding as a streaming record. Field names mirror
@@ -142,13 +144,23 @@ func (p *Printer) printJSONL(w io.Writer, r Report) error {
 		}
 	}
 
-	return enc.Encode(p.summaryRecord(r, matches, dom))
+	// Reflection findings carry their own "reflection" type, so each line is a
+	// self-describing NDJSON record alongside the match and DOM records.
+	refl := append([]scan.ReflectionFinding(nil), r.Reflections...)
+	scan.SortReflectionFindings(refl)
+	for i := range refl {
+		if err := enc.Encode(refl[i]); err != nil {
+			return err
+		}
+	}
+
+	return enc.Encode(p.summaryRecord(r, matches, dom, refl))
 }
 
 // summaryRecord builds the trailing scan_summary object, merging DOM scan
 // statistics (when a DOM scan ran) with a severity breakdown spanning both
 // ordinary and DOM findings.
-func (p *Printer) summaryRecord(r Report, matches []scan.Match, dom []scan.DOMFinding) map[string]any {
+func (p *Printer) summaryRecord(r Report, matches []scan.Match, dom []scan.DOMFinding, refl []scan.ReflectionFinding) map[string]any {
 	bySev := map[string]int{
 		scan.SeverityHigh: 0, scan.SeverityMedium: 0, scan.SeverityLow: 0, scan.SeverityInfo: 0,
 	}
@@ -158,16 +170,23 @@ func (p *Printer) summaryRecord(r Report, matches []scan.Match, dom []scan.DOMFi
 	for _, f := range dom {
 		bySev[strings.ToLower(f.Severity)]++
 	}
+	for _, f := range refl {
+		bySev[strings.ToLower(f.Severity)]++
+	}
 	rec := map[string]any{
 		"type":                 recordTypeSummary,
 		"schema_version":       JSONLSchemaVersion,
-		"total_findings":       len(matches) + len(dom),
+		"total_findings":       len(matches) + len(dom) + len(refl),
 		"match_findings":       len(matches),
 		"dom_findings":         len(dom),
+		"reflection_findings":  len(refl),
 		"findings_by_severity": bySev,
 	}
 	if r.DOMSummary != nil {
 		rec["dom"] = r.DOMSummary
+	}
+	if r.ReflectionSummary != nil {
+		rec["reflection"] = r.ReflectionSummary
 	}
 	return rec
 }
@@ -176,19 +195,21 @@ func (p *Printer) summaryRecord(r Report, matches []scan.Match, dom []scan.DOMFi
 // superset of the ordinary scanOutput, so ordinary scans keep their exact
 // structure while DOM scans gain their richer detail.
 type jsonReport struct {
-	SchemaVersion string               `json:"schema_version"`
-	Checksum      string               `json:"checksum"`
-	ScanTime      string               `json:"scan_time"`
-	Results       []outMatch           `json:"results"`
-	DOMFindings   []scan.DOMFinding    `json:"dom_findings,omitempty"`
-	DOMSummary    *scan.DOMScanSummary `json:"dom_summary,omitempty"`
+	SchemaVersion     string                      `json:"schema_version"`
+	Checksum          string                      `json:"checksum"`
+	ScanTime          string                      `json:"scan_time"`
+	Results           []outMatch                  `json:"results"`
+	DOMFindings       []scan.DOMFinding           `json:"dom_findings,omitempty"`
+	DOMSummary        *scan.DOMScanSummary        `json:"dom_summary,omitempty"`
+	ReflectionResults []scan.ReflectionFinding    `json:"reflection_findings,omitempty"`
+	ReflectionSummary *scan.ReflectionScanSummary `json:"reflection_summary,omitempty"`
 }
 
-// printJSONReport renders the json format. With no DOM findings it defers to the
-// legacy PrintScan so ordinary output is byte-for-byte unchanged; with DOM
-// findings it emits the superset document.
+// printJSONReport renders the json format. With no DOM or reflection findings it
+// defers to the legacy PrintScan so ordinary output is byte-for-byte unchanged;
+// otherwise it emits the superset document.
 func (p *Printer) printJSONReport(w io.Writer, r Report) error {
-	if len(r.DOM) == 0 && r.DOMSummary == nil {
+	if len(r.DOM) == 0 && r.DOMSummary == nil && len(r.Reflections) == 0 && r.ReflectionSummary == nil {
 		return p.PrintScan(w, r.Matches, r.ScanTime)
 	}
 
@@ -211,15 +232,19 @@ func (p *Printer) printJSONReport(w io.Writer, r Report) error {
 	}
 	dom := append([]scan.DOMFinding(nil), r.DOM...)
 	scan.SortDOMFindings(dom)
+	refl := append([]scan.ReflectionFinding(nil), r.Reflections...)
+	scan.SortReflectionFindings(refl)
 
 	enc := json.NewEncoder(w)
 	return enc.Encode(jsonReport{
-		SchemaVersion: JSONLSchemaVersion,
-		Checksum:      ResultsChecksum(r.Matches),
-		ScanTime:      scanTime.UTC().Format(time.RFC3339Nano),
-		Results:       out,
-		DOMFindings:   dom,
-		DOMSummary:    r.DOMSummary,
+		SchemaVersion:     JSONLSchemaVersion,
+		Checksum:          ResultsChecksum(r.Matches),
+		ScanTime:          scanTime.UTC().Format(time.RFC3339Nano),
+		Results:           out,
+		DOMFindings:       dom,
+		DOMSummary:        r.DOMSummary,
+		ReflectionResults: refl,
+		ReflectionSummary: r.ReflectionSummary,
 	})
 }
 
@@ -230,29 +255,31 @@ func (p *Printer) printPrettyReport(w io.Writer, r Report) error {
 	if err := p.PrintScan(w, r.Matches, r.ScanTime); err != nil {
 		return err
 	}
-	if len(r.DOM) == 0 && r.DOMSummary == nil {
-		return nil
-	}
-	dom := append([]scan.DOMFinding(nil), r.DOM...)
-	scan.SortDOMFindings(dom)
-	fmt.Fprintln(w, "\n=== DOM Findings ===")
-	for _, f := range dom {
-		printDOMFinding(w, f)
-	}
-	if r.DOMSummary != nil {
-		s := r.DOMSummary
-		status := "complete"
-		if s.TimedOut {
-			status = "timed-out"
-		} else if s.Partial {
-			status = "partial"
+	if len(r.DOM) > 0 || r.DOMSummary != nil {
+		dom := append([]scan.DOMFinding(nil), r.DOM...)
+		scan.SortDOMFindings(dom)
+		fmt.Fprintln(w, "\n=== DOM Findings ===")
+		for _, f := range dom {
+			printDOMFinding(w, f)
 		}
-		fmt.Fprintf(w, "\n[dom] %s: %d finding(s) across %d page(s), %d probe(s) sent (limit %d); mode=%s\n",
-			status, s.Findings, s.PagesScanned, s.ProbesSent, s.ProbesLimit, s.Mode)
-		if s.SourceHints > 0 {
-			fmt.Fprintf(w, "[dom] source intelligence: %d hint(s), %d hint probe(s) applied\n",
-				s.SourceHints, s.HintProbesSent)
+		if r.DOMSummary != nil {
+			s := r.DOMSummary
+			status := "complete"
+			if s.TimedOut {
+				status = "timed-out"
+			} else if s.Partial {
+				status = "partial"
+			}
+			fmt.Fprintf(w, "\n[dom] %s: %d finding(s) across %d page(s), %d probe(s) sent (limit %d); mode=%s\n",
+				status, s.Findings, s.PagesScanned, s.ProbesSent, s.ProbesLimit, s.Mode)
+			if s.SourceHints > 0 {
+				fmt.Fprintf(w, "[dom] source intelligence: %d hint(s), %d hint probe(s) applied\n",
+					s.SourceHints, s.HintProbesSent)
+			}
 		}
+	}
+	if len(r.Reflections) > 0 || r.ReflectionSummary != nil {
+		printReflectionSection(w, r)
 	}
 	return nil
 }

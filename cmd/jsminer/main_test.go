@@ -59,26 +59,51 @@ func TestExitCodeThresholds(t *testing.T) {
 	high := []scan.Match{{Severity: scan.SeverityHigh}}
 	med := []scan.Match{{Severity: scan.SeverityMedium}}
 	domHigh := []scan.DOMFinding{{Severity: scan.SeverityHigh}}
+	reflMed := []scan.ReflectionFinding{{Severity: scan.SeverityMedium}}
 
 	cases := []struct {
 		name    string
 		failOn  string
 		matches []scan.Match
 		dom     []scan.DOMFinding
+		refl    []scan.ReflectionFinding
 		want    int
 	}{
-		{"empty-any-match", "", med, nil, 1},
-		{"empty-any-dom", "", nil, domHigh, 1},
-		{"empty-none", "", nil, nil, 0},
-		{"high-only-medium", "high", med, nil, 0},
-		{"high-with-high-match", "high", high, nil, 1},
-		{"high-with-high-dom", "high", nil, domHigh, 1},
-		{"medium-with-medium", "medium", med, nil, 1},
-		{"medium-with-low", "medium", []scan.Match{{Severity: scan.SeverityLow}}, nil, 0},
+		{"empty-any-match", "", med, nil, nil, 1},
+		{"empty-any-dom", "", nil, domHigh, nil, 1},
+		{"empty-any-reflection", "", nil, nil, reflMed, 1},
+		{"empty-none", "", nil, nil, nil, 0},
+		{"high-only-medium", "high", med, nil, nil, 0},
+		{"high-with-high-match", "high", high, nil, nil, 1},
+		{"high-with-high-dom", "high", nil, domHigh, nil, 1},
+		{"high-with-medium-reflection", "high", nil, nil, reflMed, 0},
+		{"medium-with-medium", "medium", med, nil, nil, 1},
+		{"medium-with-medium-reflection", "medium", nil, nil, reflMed, 1},
+		{"medium-with-low", "medium", []scan.Match{{Severity: scan.SeverityLow}}, nil, nil, 0},
 	}
 	for _, c := range cases {
-		if got := exitCode(c.failOn, c.matches, c.dom); got != c.want {
+		if got := exitCode(c.failOn, c.matches, c.dom, c.refl); got != c.want {
 			t.Errorf("%s: exitCode(%q) = %d, want %d", c.name, c.failOn, got, c.want)
+		}
+	}
+}
+
+// TestReflectionEnabledByFullAndFlag verifies that reflection scanning turns on
+// for -reflection and for -full, and stays off otherwise.
+func TestReflectionEnabledByFullAndFlag(t *testing.T) {
+	cases := []struct {
+		name       string
+		reflection bool
+		full       bool
+		want       bool
+	}{
+		{"off", false, false, false},
+		{"explicit-flag", true, false, true},
+		{"via-full", false, true, true},
+	}
+	for _, c := range cases {
+		if got := c.reflection || c.full; got != c.want {
+			t.Errorf("%s: reflectionEnabled = %t, want %t", c.name, got, c.want)
 		}
 	}
 }

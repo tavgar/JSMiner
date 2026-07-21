@@ -86,10 +86,11 @@ Flags:
   redirects may cross domains. The received page/response body and its inline
   findings are still scanned.
 - `-full` enable the complete discovery and DOM-validation pipeline. This combines
-  `-crawl -crawl-passive -crawl-permute` with DOM scanning in `confirm` mode,
-  feeds JavaScript/passive source names and discovered routes into that DOM pass,
-  and still honours the individual crawl, DOM, passive and permutation limits.
-  An explicit `-dom-mode observe|canary` overrides the full-mode DOM default.
+  `-crawl -crawl-passive -crawl-permute` with DOM scanning in `confirm` mode plus
+  reflected-input scanning, feeds JavaScript/passive source names and discovered
+  routes into both param-driven passes, and still honours the individual crawl,
+  DOM, passive and permutation limits. An explicit `-dom-mode observe|canary`
+  overrides the full-mode DOM default.
 - `-crawl` crawl the in-scope endpoints and paths discovered on each page to
   reach more JavaScript files and secrets. Discovered `endpoint_url`,
   `endpoint_path` (and, with `-posts`, `post_url`/`post_path`) values that match
@@ -263,6 +264,14 @@ Flags:
 - `-dom-messages` analyse `postMessage` as part of a DOM scan (default `true`).
 - `-dom-allow-external` allow DOM navigation and probes to reach third-party
   origins and follow client-side redirects out of scope (default `false`).
+- `-reflection` enable reflected-input scanning — see
+  [Reflection scanning](#reflection-scanning) below. It is also enabled by
+  `-full`. It replays the same gathered parameters the DOM scan uses (static
+  JS-mined, passive-archive and on-page query names) with an inert marker over
+  plain HTTP and reports **server-side reflections** in the response body, the
+  non-DOM counterpart to `-dom`. It needs a URL target but no rendering (works
+  with `-render=false`), stays in scope, and reuses the DOM `-dom-max-pages`,
+  `-dom-max-params`, `-dom-max-probes` and `-dom-workers` bounds.
 - `-fail-on` exit non-zero when a finding at or above this severity is present:
   `info|low|medium|high` (empty keeps the historical behaviour: exit `1` on any
   finding). Exit codes: `0` no finding at/above the threshold, `1` at least one,
@@ -844,6 +853,49 @@ respected for navigations and generated probes; probes are not sent to
 third-party origins and client-side redirects out of scope are not followed
 unless `-dom-allow-external` is given; and the scanner reports when instrumentation
 appears to disturb page execution.
+
+## Reflection scanning
+
+`-reflection` turns on **reflected-input scanning**: the non-DOM counterpart to
+`-dom`. Where the DOM scanner renders a page and instruments its sinks to find
+DOM XSS *flows*, reflection scanning replays the very same gathered parameters —
+statically JS-mined access names (`searchParams.get("q")`), request-body and
+passive-archive query names, and each route's own query string — with an inert
+marker over plain HTTP, then inspects the raw response body for a **server-side
+reflection**. It never renders and never executes anything (the probe carries
+only HTML/JS metacharacters, no script or event handler), so it is safe to run
+alongside a normal scan and needs no browser.
+
+```sh
+jsminer -reflection https://target.example
+jsminer -reflection -render=false https://target.example/search?q=x
+jsminer -crawl -reflection -format jsonl https://target.example
+jsminer -full https://target.example      # reflection + DOM + full discovery
+```
+
+For every candidate parameter, one request injects `param=<marker>` and the
+response is searched for the marker. When it is found the scanner:
+
+- classifies the **reflection context** — `html_text`, `html_attribute`,
+  `script`, `html_comment` or `unknown`;
+- reports which inert **breakout characters** (`< > " ' `` ` ``) survived
+  **unencoded**, by isolating the segment the probe placed between two unique
+  markers, so a reflection whose dangerous characters are HTML-encoded is
+  distinguished from one that is not;
+- assigns a conservative severity: a reflection that lands in an exploitable
+  context with the necessary breakout characters unencoded is `medium`
+  (high-confidence, `worth_reviewing`); a reflected-but-encoded value is `low`
+  (`likely_benign`). Severity is **capped at medium** — a reflection is a strong
+  candidate, but the scanner never claims execution it did not confirm.
+
+Parameters are batched into as few requests as the URL-length and per-request
+bounds allow, redirects are kept in the target's scope (unless
+`-dom-allow-external`), and the whole scan is bounded by the shared DOM knobs:
+`-dom-max-pages` (distinct routes), `-dom-max-params` (parameters per route),
+`-dom-max-probes` (total HTTP requests) and `-dom-workers` (parallelism).
+Findings are their own `reflection` record type in every output format
+(`pretty`, `json`, `jsonl`) and a `reflection` scan summary is emitted, kept
+separate from the DOM findings model.
 
 ## Testing
 

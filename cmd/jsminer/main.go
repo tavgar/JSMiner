@@ -159,6 +159,14 @@ func main() {
 	domSinks := flag.String("dom-sinks", "", "comma-separated sink families to hook (default all): innerHTML,outerHTML,insertAdjacentHTML,document.write,srcdoc,eval,Function,setTimeout,script.src,navigation,event-handler")
 	domMessages := flag.Bool("dom-messages", true, "analyse postMessage (listeners, messages, origin/source inspection, cross-origin leaks) as part of a DOM scan")
 	domAllowExternal := flag.Bool("dom-allow-external", false, "allow DOM navigation and probes to reach third-party origins and follow client-side redirects out of scope")
+
+	// Reflection scanning replays the same gathered parameters (static/JS-mined,
+	// passive and on-page query names) with an inert marker and inspects the raw
+	// HTTP response for a server-side reflection — the non-DOM counterpart to
+	// -dom. It is enabled explicitly by -reflection and implicitly by -full, needs
+	// a URL target but not rendering, and reuses the DOM page/param/probe/worker
+	// bounds so the two param-driven scans are tuned together.
+	reflection := flag.Bool("reflection", false, "enable reflected-input scanning: replay gathered parameters (JS-mined, passive and on-page query names) and report server-side reflections in the HTTP response; needs a URL target, no rendering required")
 	failOn := flag.String("fail-on", "", "exit non-zero when a finding at or above this severity is present: info|low|medium|high (empty = exit 1 on any finding)")
 
 	var headerFlags headerSlice
@@ -174,6 +182,10 @@ func main() {
 		}
 	})
 	domEnabled, effectiveDOMMode := resolveDOMSettings(*dom, *domConfirm, *full, *domMode, domModeExplicit)
+	reflectionEnabled := *reflection || *full
+	// Both param-driven scans feed off the same hidden source-hint corpus, so the
+	// intelligence pass is enabled whenever either is on.
+	hintsEnabled := domEnabled || reflectionEnabled
 
 	// Browser provisioning must be configured before any render (or an explicit
 	// -download-browser) resolves a browser. An explicit -chrome-path wins;
@@ -245,7 +257,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: jsminer [URL|PATH|-] [flags]")
 		os.Exit(2)
 	}
-	if *proxyAddr == "" && domEnabled {
+	if *proxyAddr == "" && (domEnabled || reflectionEnabled) {
 		hasURLTarget := false
 		for _, target := range targets {
 			if isURL(target) {
@@ -253,12 +265,14 @@ func main() {
 				break
 			}
 		}
-		if !*render {
+		// Rendering is a DOM-scan requirement only; reflection scanning uses plain
+		// HTTP fetches and works with -render=false.
+		if domEnabled && !*render {
 			fmt.Fprintln(os.Stderr, "jsminer: DOM scanning enabled by -dom/-dom-confirm/-full requires rendering; do not pass -render=false")
 			os.Exit(2)
 		}
 		if !hasURLTarget {
-			fmt.Fprintln(os.Stderr, "jsminer: DOM scanning enabled by -dom/-dom-confirm/-full needs at least one URL target")
+			fmt.Fprintln(os.Stderr, "jsminer: DOM/reflection scanning enabled by -dom/-dom-confirm/-reflection/-full needs at least one URL target")
 			os.Exit(2)
 		}
 	}
@@ -325,7 +339,7 @@ func main() {
 	}
 
 	extractor := scan.NewExtractor(*safe, *longSecret)
-	extractor.SetCollectDOMSourceHints(domEnabled)
+	extractor.SetCollectDOMSourceHints(hintsEnabled)
 	extractor.SetSnippet(*snippet)
 	if *noSourceMaps {
 		extractor.SetRecoverSourceMaps(false)
@@ -410,7 +424,7 @@ func main() {
 					opts.DiscoverWellKnown = false
 				}
 				opts.DiscoverPassive = *crawlPassive || *full
-				if domEnabled {
+				if hintsEnabled {
 					opts.OnDOMSourceHints = extractor.AddDOMSourceHints
 				}
 				opts.PassiveMax = *crawlPassiveMax
@@ -504,11 +518,11 @@ func main() {
 			f.Close()
 		}
 
-		// Feed the DOM phase before output filters discard endpoint classes. Static
-		// JS access names, request-body fields and passive archive query names are
-		// scoped to this seed; discovered document-like routes become extra DOM
-		// seeds under the independent DOM page budget.
-		if domEnabled && isURL(target) {
+		// Feed the DOM/reflection phases before output filters discard endpoint
+		// classes. Static JS access names, request-body fields and passive archive
+		// query names are scoped to this seed; discovered document-like routes become
+		// extra seeds under the independent page budget shared by both scans.
+		if hintsEnabled && isURL(target) {
 			host := ""
 			if parsed, parseErr := url.Parse(target); parseErr == nil {
 				host = parsed.Hostname()
@@ -588,6 +602,40 @@ func main() {
 		ranDOM = true
 	}
 
+	// Reflected-input scan. It replays the same gathered parameters against the
+	// discovered routes over plain HTTP (no rendering) and reports server-side
+	// reflections, keeping its findings separate from the DOM model. It reuses the
+	// DOM page/param/probe/worker bounds so both param-driven scans are tuned by
+	// the same knobs.
+	var reflectionResult scan.ReflectionScanResult
+	ranReflection := false
+	if reflectionEnabled {
+		urlTargets := uniqueStrings(domTargets)
+		if len(urlTargets) == 0 {
+			fmt.Fprintln(os.Stderr, "jsminer: -reflection needs at least one URL target")
+			os.Exit(2)
+		}
+		cfg := scan.DefaultReflectionScanConfig()
+		cfg.MaxURLs = *domMaxPages
+		cfg.MaxParams = *domMaxParams
+		cfg.MaxProbes = *domMaxProbes
+		cfg.Workers = *domWorkers
+		cfg.ParamHints = domSourceHints
+		cfg.AllowExternal = *domAllowExternal
+		if !*quiet {
+			cfg.Progress = func(msg string) { fmt.Fprintln(os.Stderr, "jsminer: "+msg) }
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		res, err := extractor.ScanReflections(ctx, urlTargets, cfg)
+		stop()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "jsminer: reflection scan failed: %v\n", err)
+			os.Exit(2)
+		}
+		reflectionResult = res
+		ranReflection = true
+	}
+
 	var out *os.File = os.Stdout
 	if *outFile != "" {
 		f, err := os.Create(*outFile)
@@ -601,12 +649,17 @@ func main() {
 	showSource := *showSourceFlag || len(targets) > 1
 	printer := output.NewPrinter(*format, !*quiet, showSource, *snippet, version)
 
-	useReport := ranDOM || *format == "jsonl" || *format == "ndjson"
+	useReport := ranDOM || ranReflection || *format == "jsonl" || *format == "ndjson"
 	if useReport {
 		report := output.Report{Matches: allMatches, DOM: domResult.Findings, ScanTime: scanStartedAt}
 		if ranDOM {
 			summary := domResult.Summary
 			report.DOMSummary = &summary
+		}
+		if ranReflection {
+			report.Reflections = reflectionResult.Findings
+			rsum := reflectionResult.Summary
+			report.ReflectionSummary = &rsum
 		}
 		if err := printer.PrintReport(out, report); err != nil {
 			log.Fatal(err)
@@ -615,7 +668,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	os.Exit(exitCode(*failOn, allMatches, domResult.Findings))
+	os.Exit(exitCode(*failOn, allMatches, domResult.Findings, reflectionResult.Findings))
 }
 
 // exitCode maps the findings to the process exit status. With no threshold it
@@ -623,9 +676,9 @@ func main() {
 // a threshold it exits 1 only when a finding at or above it is present. A
 // scanner or configuration failure exits 2 and is handled at the call site
 // before this runs.
-func exitCode(failOn string, matches []scan.Match, dom []scan.DOMFinding) int {
+func exitCode(failOn string, matches []scan.Match, dom []scan.DOMFinding, reflections []scan.ReflectionFinding) int {
 	if failOn == "" {
-		if len(matches) > 0 || len(dom) > 0 {
+		if len(matches) > 0 || len(dom) > 0 || len(reflections) > 0 {
 			return 1
 		}
 		return 0
@@ -637,6 +690,11 @@ func exitCode(failOn string, matches []scan.Match, dom []scan.DOMFinding) int {
 		}
 	}
 	for _, f := range dom {
+		if scan.SeverityRank(f.Severity) >= threshold {
+			return 1
+		}
+	}
+	for _, f := range reflections {
 		if scan.SeverityRank(f.Severity) >= threshold {
 			return 1
 		}
