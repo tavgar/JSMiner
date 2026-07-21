@@ -5,6 +5,8 @@ import (
 	"io"
 	"reflect"
 	"testing"
+
+	"github.com/tavgar/JSMiner/internal/scan"
 )
 
 func TestReorderFlagArgsSupportsFlagsAfterTargets(t *testing.T) {
@@ -48,5 +50,80 @@ func TestReorderFlagArgsDoesNotSwallowTargetAfterBoolean(t *testing.T) {
 	}
 	if want := []string{"first.js", "second.js"}; !reflect.DeepEqual(fs.Args(), want) {
 		t.Fatalf("targets = %#v, want %#v", fs.Args(), want)
+	}
+}
+
+// TestExitCodeThresholds verifies the -fail-on exit semantics: with no threshold
+// any finding exits 1; with a threshold only a finding at or above it does.
+func TestExitCodeThresholds(t *testing.T) {
+	high := []scan.Match{{Severity: scan.SeverityHigh}}
+	med := []scan.Match{{Severity: scan.SeverityMedium}}
+	domHigh := []scan.DOMFinding{{Severity: scan.SeverityHigh}}
+
+	cases := []struct {
+		name    string
+		failOn  string
+		matches []scan.Match
+		dom     []scan.DOMFinding
+		want    int
+	}{
+		{"empty-any-match", "", med, nil, 1},
+		{"empty-any-dom", "", nil, domHigh, 1},
+		{"empty-none", "", nil, nil, 0},
+		{"high-only-medium", "high", med, nil, 0},
+		{"high-with-high-match", "high", high, nil, 1},
+		{"high-with-high-dom", "high", nil, domHigh, 1},
+		{"medium-with-medium", "medium", med, nil, 1},
+		{"medium-with-low", "medium", []scan.Match{{Severity: scan.SeverityLow}}, nil, 0},
+	}
+	for _, c := range cases {
+		if got := exitCode(c.failOn, c.matches, c.dom); got != c.want {
+			t.Errorf("%s: exitCode(%q) = %d, want %d", c.name, c.failOn, got, c.want)
+		}
+	}
+}
+
+// TestBuildDOMConfigValidatesMode rejects an unknown mode as a config failure.
+func TestBuildDOMConfigValidatesMode(t *testing.T) {
+	if _, err := buildDOMConfig("nope", 10, 100, 2, 20, "", "", true, false, false, 2); err == nil {
+		t.Fatal("expected error for invalid -dom-mode")
+	}
+	cfg, err := buildDOMConfig("confirm", 10, 100, 2, 20, "", "", true, true, true, 3)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Mode != scan.DOMModeConfirm || !cfg.Crawl || cfg.MaxDepth != 3 || !cfg.AllowExternal {
+		t.Errorf("config not wired from flags: %+v", cfg)
+	}
+}
+
+// TestBuildDOMConfigSourceSelection checks source-family selection, aliases and
+// rejection of unknown families.
+func TestBuildDOMConfigSourceSelection(t *testing.T) {
+	cfg, err := buildDOMConfig("canary", 10, 100, 2, 20, "url_query,web_message", "", true, false, false, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Sources[scan.SourceURLQuery] || !cfg.Sources[scan.SourceWebMessage] {
+		t.Error("selected families missing")
+	}
+	if cfg.Sources[scan.SourceCookie] {
+		t.Error("unselected family should be absent")
+	}
+
+	// Alias expansion.
+	cfg2, err := buildDOMConfig("canary", 10, 100, 2, 20, "url_full", "", true, false, false, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg2.Sources[scan.SourceURLQuery] || !cfg2.Sources[scan.SourceURLFragment] {
+		t.Error("url_full alias did not expand to query+fragment")
+	}
+
+	if _, err := buildDOMConfig("canary", 10, 100, 2, 20, "bogus_source", "", true, false, false, 2); err == nil {
+		t.Error("expected error for unknown source family")
+	}
+	if _, err := buildDOMConfig("canary", 10, 100, 2, 20, "", "bogus_sink", true, false, false, 2); err == nil {
+		t.Error("expected error for unknown sink family")
 	}
 }

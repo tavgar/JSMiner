@@ -68,7 +68,12 @@ Flags may appear before or after the input path or URL.
 
 Flags:
 
-- `-format` output format, `pretty` or `json` (default `pretty`).
+- `-format` output format, `pretty`, `json` or `jsonl` (default `pretty`).
+  `jsonl` streams newline-delimited JSON (one complete record per line): a
+  leading `scan_meta` record with a `schema_version`, one record per finding, and
+  a trailing `scan_summary`. Nothing else is written to stdout, so it pipes
+  cleanly into `jq` and CI tooling. `pretty` and `json` are unchanged, and an
+  ordinary (non-DOM) `json` scan keeps its exact existing structure.
 - `-safe` safe mode - ignore non-JS files and patterns that aren't JavaScript specific (default `false`).
 - `-allow` allowlist file. Sources whose names end with any suffix listed in this file are ignored.
 - `-rules` extra regex rules YAML file.
@@ -225,6 +230,37 @@ Flags:
   status and each page render; `-vvv` adds a per-item trace (target enqueue/skip
   decisions, method probes, parameter replays, permutations, followed imports).
   Diagnostics go to stderr so they never mix into the results on stdout.
+- `-dom` enable opt-in DOM vulnerability scanning for URL targets — see
+  [DOM scanning](#dom-scanning) below. Disabled by default and never enabled by
+  `-full`. It renders and instruments each page in headless Chrome to find DOM
+  XSS source-to-sink flows and analyse `postMessage`, reusing the same scope,
+  headers, cookies, TLS, redirect, throttle, timeout and Chromium settings as the
+  rest of the scanner. With `-crawl`/`-full` it follows the in-scope link graph to
+  more pages; on its own it scans only the given targets.
+- `-dom-mode` DOM scan mode (default `canary`): `observe` records dangerous sink
+  activity without changing any inputs; `canary` injects unique, non-executing
+  markers and reports the source-to-sink flows they reveal; `confirm` additionally
+  runs controlled, non-visible confirmation probes (never a visible `alert()`).
+- `-dom-max-pages` max pages to DOM-scan (default `50`, `0` for unlimited),
+  independent of `-crawl-max-pages`.
+- `-dom-max-probes` max DOM probes across the whole scan (default `1000`, `0` for
+  unlimited), so a page or app can never drive unbounded probes. The limit is
+  reported in the summary.
+- `-dom-workers` DOM pages to scan in parallel (default `4`), independent of
+  `-crawl-workers`.
+- `-dom-timeout` per-page DOM scan budget in seconds (default `25`).
+- `-dom-sources` comma-separated source families to probe (default all):
+  `url_query,url_fragment,referrer,window_name,form_input,cookie,local_storage,session_storage,web_message`
+  (aliases `url_full`/`location` expand to `url_query,url_fragment`).
+- `-dom-sinks` comma-separated sink families to hook (default all):
+  `innerHTML,outerHTML,insertAdjacentHTML,document.write,srcdoc,eval,Function,setTimeout,script.src,navigation,event-handler`.
+- `-dom-messages` analyse `postMessage` as part of a DOM scan (default `true`).
+- `-dom-allow-external` allow DOM navigation and probes to reach third-party
+  origins and follow client-side redirects out of scope (default `false`).
+- `-fail-on` exit non-zero when a finding at or above this severity is present:
+  `info|low|medium|high` (empty keeps the historical behaviour: exit `1` on any
+  finding). Exit codes: `0` no finding at/above the threshold, `1` at least one,
+  `2` a scanner or configuration failure.
 - `-proxy` run as HTTP/HTTPS proxy on the specified address (e.g. `:8080`).
 - `-targets` file with additional URLs/paths to scan, one per line.
 - `-plugins` comma-separated list of Go plugins providing custom rules.
@@ -655,11 +691,126 @@ certificate to intercept HTTPS responses.
 
 Matches will stream to stdout or to the file specified with `-output`.
 
+## DOM scanning
+
+`-dom` turns on an **automation-first DOM vulnerability scanner**. It is opt-in,
+applies only to URL targets where browser rendering is available, and is never
+enabled implicitly by `-full`. It reuses everything the rest of JSMiner already
+does — target handling, crawling, scope, request headers, authentication cookies,
+TLS settings, redirect policy, throttling, timeouts and Chromium provisioning —
+so a DOM scan behaves like the scans you already run, just with the page
+instrumented in headless Chrome. It needs no separate service, Node.js runtime or
+separately installed scanner.
+
+```bash
+jsminer -dom https://target.example
+jsminer -crawl -dom -format jsonl https://target.example
+```
+
+### What it detects
+
+The scanner instruments each page before its own scripts run (in every frame) and
+watches for **attacker-controllable data reaching a security-sensitive browser
+sink**. A finding is an *observed source-to-sink flow*, not merely the presence
+of a dangerous API.
+
+Sources: URL query parameters, URL fragment, full/document URL and `location`
+properties, `document.referrer`, `window.name`, form inputs, cookies,
+`localStorage`, `sessionStorage`, and web-message (`postMessage`) data. Each
+source (each parameter individually) carries a **unique probe identity**, so a
+detected sink is tied to the exact input that controlled it.
+
+Sinks: `innerHTML`/`outerHTML`, `insertAdjacentHTML`, `document.write`/`writeln`,
+`eval`, `Function`, string `setTimeout`/`setInterval`, script-URL assignments,
+navigation-URL assignments, and event-handler-attribute assignments.
+
+### Modes
+
+- **`observe`** — record dangerous sink activity without changing any inputs.
+- **`canary`** (default) — inject unique, non-executing markers and report the
+  source-to-sink flows they reveal.
+- **`confirm`** — additionally run controlled, non-visible confirmation probes.
+
+A canary reaching a sink is **not** automatically called confirmed XSS. Findings
+distinguish: a dangerous sink observed, a controllable source-to-sink flow, and
+(only in `confirm` mode, via a hidden execution beacon — never `alert()`)
+confirmed execution. **Severity** (impact) and **confidence** (evidence quality)
+are kept separate: e.g. a canary reaching a dangerous HTML sink is `medium`
+severity / `high` confidence, a JS-execution sink is `high`/`high`, and confirmed
+execution is `high`/`certain`.
+
+### Web-message analysis
+
+`postMessage` is analysed as a separately controllable feature (`-dom-messages`).
+It reports observed listeners and messages, the expected message-data shape when
+determinable, whether message data reaches a dangerous sink, and whether a
+listener appears to inspect `event.origin` / `event.source`. Origin/source
+inspection is reported as **evidence, not proof** — JSMiner never claims an
+"origin validation bypass" it did not actually test for. It also flags
+cross-origin sends of URL-derived data.
+
+### Evidence and output
+
+Every DOM finding uses a richer model (it is **not** compressed into the generic
+`params` string) with bounded previews and bounded stack depth, and never emits
+full secrets, cookies, storage values or message contents:
+
+```json
+{
+  "type": "dom_flow",
+  "target": "https://example.test",
+  "page_url": "https://example.test/search?q=...",
+  "frame_url": "https://example.test/",
+  "source": { "kind": "url_query", "name": "q" },
+  "sink": { "name": "Element.innerHTML", "argument": 0 },
+  "probe_id": "url_query:q",
+  "value_preview": "Hi jsmdomc…",
+  "context": "html",
+  "stack": [ { "url": "https://example.test/app.js", "line": 42, "column": 17 } ],
+  "trigger": "page_load",
+  "severity": "medium",
+  "confidence": "high",
+  "confirmed": false,
+  "fingerprint": "…"
+}
+```
+
+Findings are **deduplicated** by a deterministic fingerprint built only from
+stable properties (target origin, page route, frame, source kind+name, sink name,
+script location) — random canary values, timestamps and transient browser
+identifiers never affect identity. The same flow reached through several triggers
+is emitted once with its trigger evidence combined. Partial and timed-out scans
+are clearly marked, and one failed page never discards findings from successful
+pages.
+
+Use `-format jsonl` for streaming NDJSON (a `scan_summary` record ends the
+stream, reporting pages scanned, probes sent and the probe limit), and `-fail-on`
+to drive CI:
+
+```bash
+jsminer -dom -format jsonl -fail-on high https://target.example
+# exit 0: nothing at/above high   exit 1: a high finding   exit 2: scanner failure
+```
+
+### Safety
+
+DOM scanning can alter application behaviour, so it always requires explicit
+enablement; active confirmation requires `-dom-mode confirm`; destructive form
+values and state-changing confirmation actions are avoided; crawl scope is
+respected for navigations and generated probes; probes are not sent to
+third-party origins and client-side redirects out of scope are not followed
+unless `-dom-allow-external` is given; and the scanner reports when instrumentation
+appears to disturb page execution.
+
 ## Testing
 
 ```
 go test ./...
 ```
+
+The DOM-scanner integration tests drive a real headless Chrome against local,
+deliberately-vulnerable pages (never a public target) and are skipped
+automatically when no Chrome/Chromium is available.
 
 ## License
 

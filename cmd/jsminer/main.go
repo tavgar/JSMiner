@@ -90,7 +90,7 @@ func reorderFlagArgs(args []string, fs *flag.FlagSet) []string {
 }
 
 func main() {
-	format := flag.String("format", "pretty", "output format: pretty or json")
+	format := flag.String("format", "pretty", "output format: pretty, json or jsonl (NDJSON streaming)")
 	safe := flag.Bool("safe", false, "safe mode - only scan JS")
 	allowFile := flag.String("allow", "", "allowlist file")
 	rulesFile := flag.String("rules", "", "extra regex rules YAML")
@@ -140,6 +140,23 @@ func main() {
 	downloadBrowser := flag.Bool("download-browser", false, "provision the bundled Chromium now (download if needed) and print its path, then exit if no target is given")
 	noDownloadBrowser := flag.Bool("no-download-browser", false, "never download a Chromium; only use -chrome-path, a bundled or cached browser, or one on PATH")
 	browserDest := flag.String("browser-dest", "", "with -download-browser, extract Chromium into <dir>/chromium so <dir> (binary + chromium/) ships as a self-contained bundle")
+
+	// DOM vulnerability scanning (opt-in; disabled by default and never enabled by
+	// -full). It reuses the same target handling, scope, headers, cookies, TLS,
+	// redirects, throttling, timeouts and Chromium configuration as the rest of the
+	// scanner, and applies only to URL targets where browser rendering is available.
+	dom := flag.Bool("dom", false, "enable DOM vulnerability scanning (DOM XSS source-to-sink flows + postMessage analysis) for URL targets; renders and instruments pages in headless Chrome")
+	domMode := flag.String("dom-mode", "canary", "DOM scan mode: observe (record sink activity, change nothing), canary (inject non-executing markers and report flows), confirm (controlled, non-visible confirmation probes)")
+	domMaxPages := flag.Int("dom-max-pages", 50, "max pages to DOM-scan (0 = unlimited; bounds runaway link graphs independently of -crawl-max-pages)")
+	domMaxProbes := flag.Int("dom-max-probes", 1000, "max DOM probes across the whole scan, so a page or app cannot cause unbounded probes (0 = unlimited)")
+	domWorkers := flag.Int("dom-workers", 4, "DOM pages to scan in parallel (independent of -crawl-workers)")
+	domTimeout := flag.Int("dom-timeout", 25, "per-page DOM scan budget in seconds")
+	domSources := flag.String("dom-sources", "", "comma-separated source families to probe (default all): url_query,url_fragment,referrer,window_name,form_input,cookie,local_storage,session_storage,web_message")
+	domSinks := flag.String("dom-sinks", "", "comma-separated sink families to hook (default all): innerHTML,outerHTML,insertAdjacentHTML,document.write,srcdoc,eval,Function,setTimeout,script.src,navigation,event-handler")
+	domMessages := flag.Bool("dom-messages", true, "analyse postMessage (listeners, messages, origin/source inspection, cross-origin leaks) as part of a DOM scan")
+	domAllowExternal := flag.Bool("dom-allow-external", false, "allow DOM navigation and probes to reach third-party origins and follow client-side redirects out of scope")
+	failOn := flag.String("fail-on", "", "exit non-zero when a finding at or above this severity is present: info|low|medium|high (empty = exit 1 on any finding)")
+
 	var headerFlags headerSlice
 	flag.Var(&headerFlags, "header", "HTTP header in 'Key: Value' format. May be repeated")
 	if err := flag.CommandLine.Parse(reorderFlagArgs(os.Args[1:], flag.CommandLine)); err != nil {
@@ -472,6 +489,52 @@ func main() {
 
 	allMatches = scan.UniqueMatches(allMatches)
 
+	// Validate the failure threshold up front: an unrecognised value is a
+	// configuration failure (exit 2), not a silent no-op.
+	if *failOn != "" && scan.SeverityRank(*failOn) == 0 {
+		fmt.Fprintf(os.Stderr, "jsminer: invalid -fail-on %q (want info|low|medium|high)\n", *failOn)
+		os.Exit(2)
+	}
+
+	// Optional DOM vulnerability scan. It is opt-in, applies only to URL targets,
+	// and requires rendering. Findings are kept separate from the generic match
+	// model so their richer evidence is preserved.
+	var domResult scan.DOMScanResult
+	ranDOM := false
+	if *dom {
+		var urlTargets []string
+		for _, t := range targets {
+			if isURL(t) {
+				urlTargets = append(urlTargets, t)
+			}
+		}
+		switch {
+		case !*render:
+			fmt.Fprintln(os.Stderr, "jsminer: -dom requires rendering; do not pass -render=false")
+			os.Exit(2)
+		case len(urlTargets) == 0:
+			fmt.Fprintln(os.Stderr, "jsminer: -dom needs at least one URL target (DOM scanning works only where browser rendering is available)")
+			os.Exit(2)
+		}
+		cfg, err := buildDOMConfig(*domMode, *domMaxPages, *domMaxProbes, *domWorkers, *domTimeout,
+			*domSources, *domSinks, *domMessages, *domAllowExternal, *crawl || *full, *crawlDepth)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "jsminer: %v\n", err)
+			os.Exit(2)
+		}
+		if !*quiet {
+			cfg.Progress = func(msg string) { fmt.Fprintln(os.Stderr, "jsminer: "+msg) }
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		domResult, err = extractor.ScanDOM(ctx, urlTargets, cfg)
+		stop()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "jsminer: DOM scan failed: %v\n", err)
+			os.Exit(2)
+		}
+		ranDOM = true
+	}
+
 	var out *os.File = os.Stdout
 	if *outFile != "" {
 		f, err := os.Create(*outFile)
@@ -484,13 +547,115 @@ func main() {
 
 	showSource := *showSourceFlag || len(targets) > 1
 	printer := output.NewPrinter(*format, !*quiet, showSource, *snippet, version)
-	if err := printer.PrintScan(out, allMatches, scanStartedAt); err != nil {
+
+	useReport := ranDOM || *format == "jsonl" || *format == "ndjson"
+	if useReport {
+		report := output.Report{Matches: allMatches, DOM: domResult.Findings, ScanTime: scanStartedAt}
+		if ranDOM {
+			summary := domResult.Summary
+			report.DOMSummary = &summary
+		}
+		if err := printer.PrintReport(out, report); err != nil {
+			log.Fatal(err)
+		}
+	} else if err := printer.PrintScan(out, allMatches, scanStartedAt); err != nil {
 		log.Fatal(err)
 	}
 
-	if len(allMatches) > 0 {
-		os.Exit(1)
+	os.Exit(exitCode(*failOn, allMatches, domResult.Findings))
+}
+
+// exitCode maps the findings to the process exit status. With no threshold it
+// preserves the historical behaviour (exit 1 on any finding, 0 otherwise). With
+// a threshold it exits 1 only when a finding at or above it is present. A
+// scanner or configuration failure exits 2 and is handled at the call site
+// before this runs.
+func exitCode(failOn string, matches []scan.Match, dom []scan.DOMFinding) int {
+	if failOn == "" {
+		if len(matches) > 0 || len(dom) > 0 {
+			return 1
+		}
+		return 0
 	}
+	threshold := scan.SeverityRank(failOn)
+	for _, m := range matches {
+		if scan.SeverityRank(m.Severity) >= threshold {
+			return 1
+		}
+	}
+	for _, f := range dom {
+		if scan.SeverityRank(f.Severity) >= threshold {
+			return 1
+		}
+	}
+	return 0
+}
+
+// buildDOMConfig assembles a DOMScanConfig from the CLI flags, validating the
+// mode and the source/sink family lists. It reuses the crawl toggle and depth so
+// a DOM scan follows the same in-scope link graph the rest of the scanner does.
+func buildDOMConfig(mode string, maxPages, maxProbes, workers, timeout int, sources, sinks string, messages, allowExternal, crawl bool, depth int) (scan.DOMScanConfig, error) {
+	cfg := scan.DefaultDOMScanConfig()
+	switch mode {
+	case scan.DOMModeObserve, scan.DOMModeCanary, scan.DOMModeConfirm:
+		cfg.Mode = mode
+	default:
+		return cfg, fmt.Errorf("invalid -dom-mode %q (want observe|canary|confirm)", mode)
+	}
+	cfg.MaxPages = maxPages
+	cfg.MaxProbes = maxProbes
+	cfg.Workers = workers
+	if timeout > 0 {
+		cfg.PageTimeout = time.Duration(timeout) * time.Second
+	}
+	cfg.Messages = messages
+	cfg.AllowExternal = allowExternal
+	cfg.Crawl = crawl
+	cfg.MaxDepth = depth
+
+	srcSet, err := parseFamilySet(sources, scan.DOMSourceFamilies(), scan.DOMSourceAliases())
+	if err != nil {
+		return cfg, fmt.Errorf("-dom-sources: %w", err)
+	}
+	cfg.Sources = srcSet
+	sinkSet, err := parseFamilySet(sinks, scan.DOMSinkFamilies(), nil)
+	if err != nil {
+		return cfg, fmt.Errorf("-dom-sinks: %w", err)
+	}
+	cfg.Sinks = sinkSet
+	return cfg, nil
+}
+
+// parseFamilySet turns a comma-separated family list into an enable-set,
+// validating each token against the allowed set (applying aliases first). An
+// empty list returns nil, meaning "all families enabled".
+func parseFamilySet(list string, allowed []string, aliases map[string][]string) (map[string]bool, error) {
+	list = strings.TrimSpace(list)
+	if list == "" {
+		return nil, nil
+	}
+	valid := make(map[string]bool, len(allowed))
+	for _, a := range allowed {
+		valid[a] = true
+	}
+	set := make(map[string]bool)
+	for _, raw := range strings.Split(list, ",") {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		if expanded, ok := aliases[name]; ok {
+			for _, e := range expanded {
+				set[e] = true
+			}
+			continue
+		}
+		if !valid[name] {
+			return nil, fmt.Errorf("unknown family %q", name)
+		}
+		set[name] = true
+	}
+	return set, nil
 }
 
 func isURL(s string) bool {

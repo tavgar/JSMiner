@@ -41,6 +41,11 @@ func severityRank(sev string) int {
 	}
 }
 
+// SeverityRank exposes the severity ordering to callers outside the package —
+// chiefly the CLI's -fail-on threshold check. Higher ranks are more severe; an
+// unrecognised label ranks 0, which callers use to detect an invalid threshold.
+func SeverityRank(sev string) int { return severityRank(sev) }
+
 // SortBySeverity orders matches from highest to lowest severity, preserving the
 // original relative order within each band so discovery order is kept for ties.
 func SortBySeverity(ms []Match) {
