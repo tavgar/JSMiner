@@ -10,6 +10,8 @@ func TestDOMSeedURLsFromMatches(t *testing.T) {
 		{Source: "https://app.test/assets/app.js", Pattern: "endpoint_path", Value: "/account/view?tab=profile"},
 		{Source: "https://app.test/", Pattern: "endpoint_path", Value: "/assets/chunk.js"},
 		{Source: "https://app.test/", Pattern: "endpoint_url", Value: "https://outside.test/page"},
+		{Source: "https://app.test/", Pattern: "endpoint_path", Value: "/api/users"},
+		{Source: "https://app.test/", Pattern: "post_path", Value: "/login"},
 		{Source: "https://app.test/", Pattern: GatheredURLPattern, Value: "https://app.test/archive"},
 	}
 	got := DOMSeedURLsFromMatches("https://app.test/", matches, false, 10)

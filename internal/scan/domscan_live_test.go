@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -131,6 +132,18 @@ func vulnServer() *httptest.Server {
 	// localStorage -> innerHTML (sensitive source; only our marker is ever seeded)
 	mux.HandleFunc("/storage", page(`<div id=out></div>
 <script>document.getElementById('out').innerHTML = localStorage.getItem('jsmls') || '';</script>`))
+
+	// Browser-only discovery material used to prove the DOM pass can feed the
+	// ordinary scanner without a preceding RenderURLWithStates navigation.
+	mux.HandleFunc("/artifacts", page(`<script>
+  document.body.insertAdjacentHTML('beforeend','<a href="/rendered-only">dynamic</a>');
+  fetch('/live-data?from=browser');
+</script>`))
+	mux.HandleFunc("/rendered-only", page(`rendered route`))
+	mux.HandleFunc("/live-data", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"ok":true}`)
+	})
 
 	// a hub linking to many pages, for page/probe-limit tests
 	var links strings.Builder
@@ -441,16 +454,20 @@ func TestDOMEnforcesPageAndProbeLimits(t *testing.T) {
 	res := runDOM(t, srv.URL+"/hub", func(c *DOMScanConfig) {
 		c.Crawl = true
 		c.MaxDepth = 3
-		c.MaxPages = 2
-		c.MaxProbes = 20
+		c.MaxPages = 3
+		c.MaxProbes = 30
+		c.Workers = 2 // exercises concurrent isolated tabs in the shared browser
 	})
-	if res.Summary.PagesScanned > 2 {
-		t.Errorf("page limit exceeded: scanned %d, limit 2", res.Summary.PagesScanned)
+	if res.Summary.PagesScanned > 3 {
+		t.Errorf("page limit exceeded: scanned %d, limit 3", res.Summary.PagesScanned)
 	}
-	if res.Summary.ProbesSent > 20 {
-		t.Errorf("probe limit exceeded: sent %d, limit 20", res.Summary.ProbesSent)
+	if res.Summary.PagesFailed != 0 {
+		t.Fatalf("concurrent shared-browser pages failed: %v", res.Summary.Errors)
 	}
-	if res.Summary.ProbesLimit != 20 {
+	if res.Summary.ProbesSent > 30 {
+		t.Errorf("probe limit exceeded: sent %d, limit 30", res.Summary.ProbesSent)
+	}
+	if res.Summary.ProbesLimit != 30 {
 		t.Errorf("summary should report the probe limit, got %d", res.Summary.ProbesLimit)
 	}
 }
@@ -494,6 +511,97 @@ func TestDOMObserveModeDoesNotInject(t *testing.T) {
 	}
 	if !sawSink {
 		t.Logf("no dom_sink observed (page may not have run the sink under observe); findings=%s", summarize(res))
+	}
+}
+
+func TestDOMSharedRenderReturnsOrdinaryDiscovery(t *testing.T) {
+	defer domTestSetup(t)()
+	srv := vulnServer()
+	defer srv.Close()
+
+	res := runDOM(t, srv.URL+"/artifacts", func(c *DOMScanConfig) {
+		c.CollectRenderedArtifacts = true
+		c.ArtifactEndpoints = true
+	})
+	want := map[string]bool{
+		srv.URL + "/rendered-only":          false,
+		srv.URL + "/live-data?from=browser": false,
+	}
+	for _, m := range res.Matches {
+		if m.Pattern == "endpoint_url" {
+			if _, ok := want[m.Value]; ok {
+				want[m.Value] = true
+			}
+		}
+	}
+	for endpoint, found := range want {
+		if !found {
+			t.Errorf("shared DOM render did not return dynamic endpoint %s; matches=%+v", endpoint, res.Matches)
+		}
+	}
+}
+
+func TestDOMConfirmBatchesSourcesIntoOneReload(t *testing.T) {
+	defer domTestSetup(t)()
+	var documentLoads atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			documentLoads.Add(1)
+		}
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<!doctype html><body><div id=a></div><div id=b></div><script>
+		var q=new URLSearchParams(location.search);
+		document.getElementById('a').innerHTML=q.get('a')||'';
+		document.getElementById('b').innerHTML=q.get('b')||'';
+		</script></body>`)
+	}))
+	defer srv.Close()
+
+	res := runDOM(t, srv.URL+"/?a=1&b=2", func(c *DOMScanConfig) {
+		c.Mode = DOMModeConfirm
+		c.Sources = map[string]bool{SourceURLQuery: true}
+		c.Messages = false
+	})
+	for _, name := range []string{"a", "b"} {
+		f := findFlow(res, SourceURLQuery, name, "innerHTML")
+		if f == nil || !f.Confirmed {
+			t.Fatalf("source %s was not confirmed in the batch: %+v", name, f)
+		}
+	}
+	if got := documentLoads.Load(); got != 2 {
+		t.Fatalf("document loads = %d, want initial + one batched confirmation", got)
+	}
+}
+
+func TestDOMSharedRenderReusesBrowserResourceBodies(t *testing.T) {
+	defer domTestSetup(t)()
+	var scriptLoads, dataLoads atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<!doctype html><body><script src="/app.js"></script></body>`)
+	})
+	mux.HandleFunc("/app.js", func(w http.ResponseWriter, r *http.Request) {
+		scriptLoads.Add(1)
+		w.Header().Set("Content-Type", "application/javascript")
+		fmt.Fprint(w, `fetch('/data')`)
+	})
+	mux.HandleFunc("/data", func(w http.ResponseWriter, r *http.Request) {
+		dataLoads.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"ok":true}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	_ = runDOM(t, srv.URL+"/", func(c *DOMScanConfig) {
+		c.CollectRenderedArtifacts = true
+	})
+	if got := scriptLoads.Load(); got != 1 {
+		t.Fatalf("script fetched %d times, want browser response reused", got)
+	}
+	if got := dataLoads.Load(); got != 1 {
+		t.Fatalf("XHR fetched %d times, want browser response reused", got)
 	}
 }
 

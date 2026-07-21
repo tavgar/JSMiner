@@ -92,10 +92,24 @@ func (e *Extractor) TakeDOMSourceHints() []DOMSourceHint {
 }
 
 func (e *Extractor) captureDOMSourceHints(data []byte) {
+	e.captureDOMSourceHintsWithRequests(data, nil, false)
+}
+
+// captureDOMSourceHintsFromRequests reuses a POST parser result the caller
+// already needs, avoiding a second full pass over large JavaScript bundles.
+func (e *Extractor) captureDOMSourceHintsFromRequests(data []byte, requests []jsEndpoint) {
+	e.captureDOMSourceHintsWithRequests(data, requests, true)
+}
+
+func (e *Extractor) captureDOMSourceHintsWithRequests(data []byte, requests []jsEndpoint, parsed bool) {
 	e.domHintsMu.Lock()
 	on := e.collectDOMHints
 	e.domHintsMu.Unlock()
 	if !on {
+		return
+	}
+	if parsed {
+		e.AddDOMSourceHints(discoverDOMSourceHintsFromRequests(data, requests))
 		return
 	}
 	e.AddDOMSourceHints(discoverDOMSourceHints(data))
@@ -158,6 +172,10 @@ func validDOMSourceHintName(name string) bool {
 // bodies, which catches both explicit searchParams.get("q") code and parameters
 // that are only present in fetch/axios configuration.
 func discoverDOMSourceHints(data []byte) []DOMSourceHint {
+	return discoverDOMSourceHintsFromRequests(data, parseJSPostRequests(data))
+}
+
+func discoverDOMSourceHintsFromRequests(data []byte, requests []jsEndpoint) []DOMSourceHint {
 	byKey := make(map[string]DOMSourceHint)
 	add := func(kind, name, provenance string) {
 		mergeDOMSourceHint(byKey, DOMSourceHint{Kind: kind, Name: name, Discovered: []string{provenance}})
@@ -211,7 +229,7 @@ func discoverDOMSourceHints(data []byte) []DOMSourceHint {
 
 	// parseJSPostRequests already understands fetch, axios, XHR, jQuery and
 	// several common wrappers. Reuse it only while the hint pass is enabled.
-	for _, request := range parseJSPostRequests(data) {
+	for _, request := range requests {
 		for _, name := range queryNamesFromURL(request.Value) {
 			add(SourceURLQuery, name, DOMHintJavaScriptURL)
 		}

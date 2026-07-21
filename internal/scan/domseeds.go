@@ -3,8 +3,11 @@ package scan
 import (
 	"net/url"
 	"path"
+	"regexp"
 	"strings"
 )
+
+var domAPIRouteRe = regexp.MustCompile(`(?i)(?:^|/)(?:api|graphql|gql|rest|rpc|v[0-9]+)(?:/|$)`)
 
 // DOMSeedURLsFromMatches turns routes found by the static/rendered crawl into
 // browser instrumentation seeds. It keeps query names, drops fragments and
@@ -18,7 +21,7 @@ func DOMSeedURLsFromMatches(seed string, matches []Match, allowExternal bool, ma
 	var out []string
 	for _, match := range matches {
 		switch match.Pattern {
-		case GatheredURLPattern, "endpoint_url", "endpoint_path", "post_url", "post_path":
+		case GatheredURLPattern, "endpoint_url", "endpoint_path":
 		default:
 			continue
 		}
@@ -63,6 +66,13 @@ func normalizeDOMSeed(u *url.URL) string {
 }
 
 func isDOMDocumentCandidate(u *url.URL) bool {
+	// Extensionless API routes are common endpoint discoveries but are not browser
+	// documents. Rendering them repeats a request the crawl already made and often
+	// just opens Chrome's JSON viewer. Keep the heuristic deliberately narrow so
+	// ordinary extensionless application routes remain eligible.
+	if domAPIRouteRe.MatchString(u.Path) {
+		return false
+	}
 	ext := strings.ToLower(path.Ext(u.Path))
 	if ext == "" {
 		return true

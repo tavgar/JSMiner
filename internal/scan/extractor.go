@@ -759,11 +759,11 @@ func (e *Extractor) scanDataPostRequests(source string, data []byte, isJS bool) 
 	if e.isAllowed(source) || !isJS {
 		return nil, nil
 	}
-	e.captureDOMSourceHints(data)
-
 	seen := make(map[string]struct{})
 	var matches []Match
-	for _, ep := range parseJSPostRequests(data) {
+	requests := parseJSPostRequests(data)
+	e.captureDOMSourceHintsFromRequests(data, requests)
+	for _, ep := range requests {
 		p := "post_path"
 		if ep.IsURL {
 			p = "post_url"

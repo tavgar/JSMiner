@@ -186,6 +186,10 @@ func main() {
 	// Both param-driven scans feed off the same hidden source-hint corpus, so the
 	// intelligence pass is enabled whenever either is on.
 	hintsEnabled := domEnabled || reflectionEnabled
+	// When DOM scanning is enabled, its pre-navigation instrumentation owns the
+	// single browser pass. The ordinary phase remains an HTTP/static crawl and the
+	// DOM result feeds rendered HTML/scripts/requests back as ordinary matches.
+	scanRender, sharedDOMRender := resolveRenderStrategy(*render, domEnabled)
 
 	// Browser provisioning must be configured before any render (or an explicit
 	// -download-browser) resolves a browser. An explicit -chrome-path wins;
@@ -476,23 +480,23 @@ func main() {
 					}
 				}
 				if *posts {
-					ms, err = extractor.ScanURLPostsCrawl(target, *external, *render, opts)
+					ms, err = extractor.ScanURLPostsCrawl(target, *external, scanRender, opts)
 					if err != nil {
 						err = fmt.Errorf("failed to crawl POST requests from URL %s: %w", target, err)
 					}
 				} else {
-					ms, err = extractor.ScanURLCrawl(target, *endpoints, *external, *render, opts)
+					ms, err = extractor.ScanURLCrawl(target, *endpoints, *external, scanRender, opts)
 					if err != nil {
 						err = fmt.Errorf("failed to crawl endpoints from URL %s: %w", target, err)
 					}
 				}
 			} else if *posts {
-				ms, err = extractor.ScanURLPosts(target, *external, *render)
+				ms, err = extractor.ScanURLPosts(target, *external, scanRender)
 				if err != nil {
 					err = fmt.Errorf("failed to scan POST requests from URL %s: %w", target, err)
 				}
 			} else {
-				ms, err = extractor.ScanURL(target, *endpoints, *external, *render)
+				ms, err = extractor.ScanURL(target, *endpoints, *external, scanRender)
 				if err != nil {
 					err = fmt.Errorf("failed to scan endpoints from URL %s: %w", target, err)
 				}
@@ -589,6 +593,10 @@ func main() {
 		}
 		cfg.SourceHints = domSourceHints
 		cfg.MaxSourceHintsPerPage = *domMaxParams
+		cfg.CollectRenderedArtifacts = sharedDOMRender
+		cfg.ArtifactEndpoints = *endpoints
+		cfg.ArtifactPosts = *posts
+		cfg.ArtifactExternal = *external
 		if !*quiet {
 			cfg.Progress = func(msg string) { fmt.Fprintln(os.Stderr, "jsminer: "+msg) }
 		}
@@ -600,6 +608,30 @@ func main() {
 			os.Exit(2)
 		}
 		ranDOM = true
+
+		// The instrumented DOM navigation is also the rendered-discovery pass.
+		// Merge its ordinary findings only after DOM scanning so the initial static
+		// crawl never launches a second browser for the same page.
+		renderedMatches := domResult.Matches
+		if *posts {
+			renderedMatches = scan.FilterPostMatches(renderedMatches)
+		} else if *endpoints {
+			gathered := scan.FilterGatheredMatches(renderedMatches)
+			renderedMatches = append(scan.FilterEndpointMatches(renderedMatches), gathered...)
+		}
+		allMatches = scan.UniqueMatches(append(allMatches, renderedMatches...))
+
+		// Dynamic scripts scanned from the shared render can contribute additional
+		// parameter intelligence and routes to the later non-rendering reflection pass.
+		if len(domResult.SourceHints) > 0 {
+			domSourceHints = append(domSourceHints, domResult.SourceHints...)
+		}
+		for _, target := range targets {
+			if isURL(target) {
+				domTargets = append(domTargets,
+					scan.DOMSeedURLsFromMatches(target, domResult.Matches, *domAllowExternal, *domMaxPages)...)
+			}
+		}
 	}
 
 	// Reflected-input scan. It replays the same gathered parameters against the
@@ -795,4 +827,11 @@ func resolveDOMSettings(dom, domConfirm, full bool, mode string, modeExplicit bo
 		mode = scan.DOMModeConfirm
 	}
 	return enabled, mode
+}
+
+// resolveRenderStrategy gives one component ownership of browser navigation.
+// Without DOM scanning the ordinary renderer behaves as before; with DOM
+// scanning it returns rendered discovery artifacts from the instrumented pass.
+func resolveRenderStrategy(render, domEnabled bool) (ordinaryRender, domArtifacts bool) {
+	return render && !domEnabled, render && domEnabled
 }

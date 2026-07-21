@@ -90,7 +90,9 @@ Flags:
   reflected-input scanning, feeds JavaScript/passive source names and discovered
   routes into both param-driven passes, and still honours the individual crawl,
   DOM, passive and permutation limits. An explicit `-dom-mode observe|canary`
-  overrides the full-mode DOM default.
+  overrides the full-mode DOM default. Rendered discovery and DOM instrumentation
+  share one browser navigation per page; reflection remains a separate batched
+  plain-HTTP pass and does not launch a browser.
 - `-crawl` crawl the in-scope endpoints and paths discovered on each page to
   reach more JavaScript files and secrets. Discovered `endpoint_url`,
   `endpoint_path` (and, with `-posts`, `post_url`/`post_path`) values that match
@@ -717,6 +719,13 @@ so a DOM scan behaves like the scans you already run, just with the page
 instrumented in headless Chrome. It needs no separate service, Node.js runtime or
 separately installed scanner.
 
+When DOM scanning and ordinary rendering are both enabled, the instrumented DOM
+navigation is also the rendered-discovery pass: its HTML states, loaded scripts,
+XHR/fetch URLs and body-bearing requests feed the ordinary scanner. JSMiner does
+not first render the page normally and then render it again for DOM analysis.
+Confirmation can still require a follow-up navigation after a real flow is found;
+compatible sources are batched by sink context into that follow-up.
+
 ```bash
 jsminer -dom https://target.example
 jsminer -dom-confirm https://target.example
@@ -873,8 +882,9 @@ jsminer -crawl -reflection -format jsonl https://target.example
 jsminer -full https://target.example      # reflection + DOM + full discovery
 ```
 
-For every candidate parameter, one request injects `param=<marker>` and the
-response is searched for the marker. When it is found the scanner:
+Candidate parameters receive unique markers and are batched into as few bounded
+plain-HTTP requests as URL length and the probe limits allow. Each response is
+then searched for every marker in its batch. When one is found the scanner:
 
 - classifies the **reflection context** — `html_text`, `html_attribute`,
   `script`, `html_comment` or `unknown`;

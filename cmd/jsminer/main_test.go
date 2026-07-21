@@ -168,3 +168,24 @@ func TestResolveDOMSettingsMakesFullConfirmed(t *testing.T) {
 		t.Fatalf("-dom-confirm settings = enabled:%t mode:%s", enabled, mode)
 	}
 }
+
+func TestResolveRenderStrategyHasSingleBrowserOwner(t *testing.T) {
+	cases := []struct {
+		name                       string
+		render, dom                bool
+		wantOrdinary, wantDOMOwner bool
+	}{
+		{"ordinary-render", true, false, true, false},
+		{"shared-dom-render", true, true, false, true},
+		{"render-disabled", false, false, false, false},
+	}
+	for _, c := range cases {
+		ordinary, domOwner := resolveRenderStrategy(c.render, c.dom)
+		if ordinary != c.wantOrdinary || domOwner != c.wantDOMOwner {
+			t.Errorf("%s: ordinary=%t dom=%t, want %t/%t", c.name, ordinary, domOwner, c.wantOrdinary, c.wantDOMOwner)
+		}
+		if ordinary && domOwner {
+			t.Errorf("%s assigned the same page to two renderers", c.name)
+		}
+	}
+}

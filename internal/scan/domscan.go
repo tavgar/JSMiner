@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"sort"
 	"strings"
@@ -106,6 +107,15 @@ type DOMScanConfig struct {
 	// redirect out of scope is not followed for probing.
 	AllowExternal bool
 
+	// CollectRenderedArtifacts makes the instrumented DOM navigation the shared
+	// browser pass for ordinary rendered discovery too. The resulting HTML,
+	// scripts and live requests are scanned after the browser phase and returned
+	// as ordinary Matches, avoiding a preceding RenderURLWithStates navigation.
+	CollectRenderedArtifacts bool
+	ArtifactEndpoints        bool
+	ArtifactPosts            bool
+	ArtifactExternal         bool
+
 	// Progress, when set, receives short human-readable status lines (stderr).
 	Progress func(msg string)
 }
@@ -147,13 +157,241 @@ type DOMScanSummary struct {
 // DOMScanResult is the deduplicated findings and the summary of a DOM scan.
 type DOMScanResult struct {
 	Findings []DOMFinding
-	Summary  DOMScanSummary
+	// Matches are ordinary findings and endpoint discoveries collected from the
+	// same instrumented page loads when CollectRenderedArtifacts is enabled.
+	Matches []Match
+	// SourceHints are additional scoped names learned from scripts that only the
+	// shared browser pass discovered. They feed later non-rendering reflection
+	// probes without leaking names between separate CLI targets.
+	SourceHints []DOMSourceHint
+	Summary     DOMScanSummary
+}
+
+// domRenderedPage is the bounded discovery material captured from one
+// instrumented navigation. It deliberately remains internal: callers consume
+// the ordinary matches produced from it, not a second browser-specific schema.
+type domRenderedPage struct {
+	PageURL    string
+	BaseHost   string
+	HTMLStates [][]byte
+	Scripts    []string
+	Requests   []HTTPRequest
+	XHRURLs    []string
+	Resources  []domRenderedResource
+}
+
+type domRenderedResource struct {
+	URL      string
+	MimeType string
+	Header   http.Header
+	Body     []byte
+	Script   bool
+	XHR      bool
+}
+
+type domPageCapture struct {
+	mu        sync.Mutex
+	frozen    bool
+	states    [][]byte
+	stateSig  map[string]struct{}
+	scripts   map[string]struct{}
+	xhrURLs   map[string]struct{}
+	requests  map[network.RequestID]*HTTPRequest
+	resources map[network.RequestID]*domRenderedResource
+	bodyBytes int
+}
+
+const (
+	domMaxCapturedResources = 500
+	domMaxCapturedBodyBytes = 64 << 20
+)
+
+func newDOMPageCapture() *domPageCapture {
+	return &domPageCapture{
+		stateSig: make(map[string]struct{}), scripts: make(map[string]struct{}),
+		xhrURLs: make(map[string]struct{}), requests: make(map[network.RequestID]*HTTPRequest),
+		resources: make(map[network.RequestID]*domRenderedResource),
+	}
+}
+
+func (c *domPageCapture) response(id network.RequestID, url, mime string, resourceType network.ResourceType, headers network.Headers) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.frozen {
+		return
+	}
+	isScript := strings.HasSuffix(strings.ToLower(url), ".js") || strings.Contains(strings.ToLower(mime), "javascript")
+	isXHR := resourceType == network.ResourceTypeXHR || resourceType == network.ResourceTypeFetch
+	if isScript {
+		c.scripts[url] = struct{}{}
+	}
+	if isScript || isXHR {
+		if len(c.resources) >= domMaxCapturedResources {
+			return
+		}
+		h := make(http.Header)
+		for key, value := range headers {
+			h.Set(key, fmt.Sprintf("%v", value))
+		}
+		c.resources[id] = &domRenderedResource{
+			URL: url, MimeType: mime, Header: h, Script: isScript, XHR: isXHR,
+		}
+	}
+}
+
+func (c *domPageCapture) request(id network.RequestID, method, requestURL string, resourceType network.ResourceType) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.frozen {
+		return
+	}
+	switch method {
+	case "POST", "PUT", "PATCH":
+		c.requests[id] = &HTTPRequest{URL: requestURL}
+	default:
+		if (resourceType == network.ResourceTypeXHR || resourceType == network.ResourceTypeFetch) &&
+			(strings.HasPrefix(requestURL, "http://") || strings.HasPrefix(requestURL, "https://")) {
+			c.xhrURLs[requestURL] = struct{}{}
+		}
+	}
+}
+
+func (c *domPageCapture) resolveRequestBodies(ctx context.Context) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	pending := make(map[network.RequestID]*HTTPRequest, len(c.requests))
+	for id, request := range c.requests {
+		pending[id] = request
+	}
+	c.mu.Unlock()
+	actions := make([]chromedp.Action, 0, len(pending))
+	for id, request := range pending {
+		id, request := id, request
+		actions = append(actions, chromedp.ActionFunc(func(ctx context.Context) error {
+			if body, err := network.GetRequestPostData(id).Do(ctx); err == nil {
+				request.Body = body
+			}
+			return nil
+		}))
+	}
+	if len(actions) > 0 {
+		_ = chromedp.Run(ctx, actions...)
+	}
+}
+
+func (c *domPageCapture) resolveResponseBodies(ctx context.Context) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	pending := make(map[network.RequestID]*domRenderedResource, len(c.resources))
+	for id, resource := range c.resources {
+		pending[id] = resource
+	}
+	c.mu.Unlock()
+	actions := make([]chromedp.Action, 0, len(pending))
+	for id, resource := range pending {
+		if len(resource.Body) > 0 {
+			continue
+		}
+		id, resource := id, resource
+		actions = append(actions, chromedp.ActionFunc(func(ctx context.Context) error {
+			if body, err := network.GetResponseBody(id).Do(ctx); err == nil {
+				if len(body) > MaxResponseBodyBytes {
+					body = body[:MaxResponseBodyBytes]
+				}
+				c.mu.Lock()
+				if len(resource.Body) == 0 && c.bodyBytes+len(body) <= domMaxCapturedBodyBytes {
+					resource.Body = append([]byte(nil), body...)
+					c.bodyBytes += len(body)
+				}
+				c.mu.Unlock()
+			}
+			return nil
+		}))
+	}
+	if len(actions) > 0 {
+		_ = chromedp.Run(ctx, actions...)
+	}
+}
+
+func (c *domPageCapture) addState(data []byte) {
+	if c == nil || len(data) == 0 {
+		return
+	}
+	sig := structuralSig(data)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.frozen {
+		return
+	}
+	if _, exists := c.stateSig[sig]; exists {
+		return
+	}
+	c.stateSig[sig] = struct{}{}
+	c.states = append(c.states, append([]byte(nil), data...))
+}
+
+func (c *domPageCapture) freeze() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.frozen = true
+	c.mu.Unlock()
+}
+
+func (c *domPageCapture) snapshot(pageURL, baseHost string) domRenderedPage {
+	if c == nil {
+		return domRenderedPage{}
+	}
+	c.mu.Lock()
+	c.frozen = true
+	defer c.mu.Unlock()
+	p := domRenderedPage{PageURL: pageURL, BaseHost: baseHost}
+	for _, state := range c.states {
+		p.HTMLStates = append(p.HTMLStates, append([]byte(nil), state...))
+	}
+	for script := range c.scripts {
+		p.Scripts = append(p.Scripts, script)
+	}
+	for xhrURL := range c.xhrURLs {
+		p.XHRURLs = append(p.XHRURLs, xhrURL)
+	}
+	for _, request := range c.requests {
+		p.Requests = append(p.Requests, *request)
+	}
+	for _, resource := range c.resources {
+		copyResource := *resource
+		copyResource.Header = resource.Header.Clone()
+		copyResource.Body = append([]byte(nil), resource.Body...)
+		p.Resources = append(p.Resources, copyResource)
+	}
+	sort.Strings(p.Scripts)
+	sort.Strings(p.XHRURLs)
+	sort.Slice(p.Requests, func(i, j int) bool {
+		if p.Requests[i].URL != p.Requests[j].URL {
+			return p.Requests[i].URL < p.Requests[j].URL
+		}
+		return p.Requests[i].Body < p.Requests[j].Body
+	})
+	sort.Slice(p.Resources, func(i, j int) bool { return p.Resources[i].URL < p.Resources[j].URL })
+	return p
 }
 
 // domScanner holds the mutable state of a running DOM scan, shared (and
 // synchronised) across its worker goroutines.
 type domScanner struct {
-	cfg DOMScanConfig
+	cfg        DOMScanConfig
+	browserCtx context.Context
 
 	mu           sync.Mutex
 	findings     []DOMFinding
@@ -165,6 +403,8 @@ type domScanner struct {
 	partial      bool
 	timedOut     bool
 	visited      map[string]struct{}
+	rendered     []domRenderedPage
+	hintCache    map[string][]DOMSourceHint
 }
 
 // ScanDOM runs the opt-in DOM vulnerability scan over the given URL targets. It
@@ -184,14 +424,38 @@ func (e *Extractor) ScanDOM(ctx context.Context, targets []string, cfg DOMScanCo
 	if cfg.PageTimeout <= 0 {
 		cfg.PageTimeout = 25 * time.Second
 	}
-	s := &domScanner{cfg: cfg, visited: make(map[string]struct{})}
-
+	s := &domScanner{
+		cfg: cfg, visited: make(map[string]struct{}),
+		hintCache: make(map[string][]DOMSourceHint),
+	}
+	validTargets := make([]*url.URL, 0, len(targets))
 	for _, target := range targets {
 		u, err := url.Parse(target)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 			s.addErr(fmt.Sprintf("skip non-URL target %q", target))
 			continue
 		}
+		validTargets = append(validTargets, u)
+	}
+	if len(validTargets) == 0 {
+		result := DOMScanResult{}
+		result.Summary = s.buildSummary(cfg, 0, nil, time.Since(start))
+		return result, nil
+	}
+
+	// One Chromium process owns the whole DOM scan. Each page below receives an
+	// isolated browser context/tab, so cookies and storage cannot bleed between
+	// workers while process startup, code pages and the network service are reused.
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(ctx, renderExecOptions()...)
+	defer cancelAlloc()
+	browserCtx, cancelBrowser := newRenderContext(allocCtx)
+	defer cancelBrowser()
+	if err := chromedp.Run(browserCtx); err != nil {
+		return DOMScanResult{}, fmt.Errorf("start browser: %w", err)
+	}
+	s.browserCtx = browserCtx
+
+	for _, u := range validTargets {
 		if ctx.Err() != nil {
 			break
 		}
@@ -199,6 +463,11 @@ func (e *Extractor) ScanDOM(ctx context.Context, targets []string, cfg DOMScanCo
 	}
 
 	result := DOMScanResult{Findings: DedupDOMFindings(s.snapshotFindings())}
+	if cfg.CollectRenderedArtifacts {
+		matches, hints := e.scanDOMRenderedPages(s.snapshotRendered(), cfg)
+		result.Matches = UniqueMatches(matches)
+		result.SourceHints = hints
+	}
 	result.Summary = s.buildSummary(cfg, len(result.Findings), result.Findings, time.Since(start))
 	if ctx.Err() != nil {
 		result.Summary.Partial = true
@@ -294,64 +563,94 @@ func (s *domScanner) scanPage(ctx context.Context, baseHost, pageURL string) ([]
 	// backoff sleep cannot consume the page budget.
 	globalThrottle.waitHost(hostOf(pageURL))
 
-	allocCtx, cancelAlloc := chromedp.NewExecAllocator(ctx, renderExecOptions()...)
-	defer cancelAlloc()
-	pctx, cancelCtx := newRenderContext(allocCtx)
+	// Reuse the scan-wide Chromium process, but isolate this page's cookies,
+	// storage and cache from every other worker.
+	pctx, cancelCtx := chromedp.NewContext(s.browserCtx, chromedp.WithNewBrowserContext())
 	defer cancelCtx()
 	pctx, cancelTimeout := context.WithTimeout(pctx, s.cfg.PageTimeout)
 	defer cancelTimeout()
 
-	// Note render-time rate-limit responses so a 429 the browser hits backs off
-	// the rest of the scan, exactly as the normal render path does.
+	var capture *domPageCapture
+	if s.cfg.CollectRenderedArtifacts {
+		capture = newDOMPageCapture()
+	}
+	// Note render-time rate-limit responses and, when this is the shared render,
+	// retain the same script/request evidence the ordinary renderer used to gather.
 	chromedp.ListenTarget(pctx, func(ev interface{}) {
-		if e, ok := ev.(*network.EventResponseReceived); ok {
+		switch e := ev.(type) {
+		case *network.EventResponseReceived:
 			noteRenderResponse(e.Response.URL, int(e.Response.Status), e.Response.Headers)
+			capture.response(e.RequestID, e.Response.URL, e.Response.MimeType, e.Type, e.Response.Headers)
+		case *network.EventRequestWillBeSent:
+			if e.Request != nil {
+				capture.request(e.RequestID, e.Request.Method, e.Request.URL, e.Type)
+			}
 		}
 	})
 
 	relay := randomToken()
 
+	var (
+		links []string
+		err   error
+	)
 	switch s.cfg.Mode {
 	case DOMModeObserve:
-		return s.runObserve(pctx, baseHost, pageURL, relay)
+		links, err = s.runObserve(pctx, baseHost, pageURL, relay, capture)
 	default: // canary and confirm both start from a canary pass
-		return s.runCanary(pctx, baseHost, pageURL, relay)
+		links, err = s.runCanary(pctx, baseHost, pageURL, relay, capture)
 	}
+	if capture != nil {
+		capture.resolveRequestBodies(pctx)
+		capture.resolveResponseBodies(pctx)
+		rendered := capture.snapshot(pageURL, baseHost)
+		if len(rendered.HTMLStates) > 0 {
+			s.addRendered(rendered)
+		}
+	}
+	return links, err
 }
 
 // runObserve loads the page with no input modification and records dangerous
 // sink activity only. It still explores state via clicks (which do not change
 // application inputs) so sinks reached after interaction are observed too.
-func (s *domScanner) runObserve(ctx context.Context, baseHost, pageURL, relay string) ([]string, error) {
+func (s *domScanner) runObserve(ctx context.Context, baseHost, pageURL, relay string, capture *domPageCapture) ([]string, error) {
 	agentSrc := buildDOMAgent(s.agentConfig(DOMModeObserve, relay, nil))
 	if err := s.loadPage(ctx, agentSrc, pageURL, ""); err != nil {
 		return nil, err
 	}
 	offset, st := s.readAndIngest(ctx, baseHost, pageURL, PhaseInitialLoad, TriggerPageLoad, "", 0)
+	s.captureRenderedState(ctx, capture)
+	capture.resolveResponseBodies(ctx)
 
 	// Reveal further states through clicks; observe sinks there too.
 	s.clickExplore(ctx)
-	_, st = s.readAndIngest(ctx, baseHost, pageURL, PhaseStateExploration, TriggerInteraction, "click", offset)
+	offset, st = s.readAndIngest(ctx, baseHost, pageURL, PhaseStateExploration, TriggerInteraction, "click", offset)
+	s.captureRenderedState(ctx, capture)
+	preLinks, _ := s.collectLinks(ctx, baseHost)
+	s.exploreRenderedStates(ctx, capture, agentSrc)
+	_, st = s.readAndIngest(ctx, baseHost, pageURL, PhaseStateExploration, TriggerInteraction, "state exploration", offset)
 
 	if brokeExecution(st) {
 		s.note(pageURL, "instrumentation hook errors observed during load")
 	}
-	return s.collectLinks(ctx, baseHost)
+	postLinks, _ := s.collectLinks(ctx, baseHost)
+	return uniqueSortedStrings(append(preLinks, postLinks...)), nil
 }
 
 // runCanary injects canary markers into every enabled source, records the
 // source-to-sink flows they produce across the initial load, interaction and
 // postMessage passes, and — in confirm mode — follows up with controlled,
 // non-visible confirmation probes.
-func (s *domScanner) runCanary(ctx context.Context, baseHost, pageURL, relay string) ([]string, error) {
+func (s *domScanner) runCanary(ctx context.Context, baseHost, pageURL, relay string, capture *domPageCapture) ([]string, error) {
 	canaries, injectedURL, referrer := s.buildCanaries(pageURL, s.probeCapacity())
 	if len(canaries) == 0 {
-		return s.runObserve(ctx, baseHost, pageURL, relay)
+		return s.runObserve(ctx, baseHost, pageURL, relay, capture)
 	}
 	if !s.reserveProbes(len(canaries)) {
 		// Probe budget exhausted before this page: fall back to a pure observation
 		// so the page is still not wasted, but inject nothing.
-		return s.runObserve(ctx, baseHost, pageURL, relay)
+		return s.runObserve(ctx, baseHost, pageURL, relay, capture)
 	}
 	s.noteHintProbes(canaries)
 
@@ -369,6 +668,8 @@ func (s *domScanner) runCanary(ctx context.Context, baseHost, pageURL, relay str
 	}
 
 	offset, _ := s.readAndIngest(ctx, baseHost, pageURL, PhaseInitialLoad, TriggerPageLoad, "", 0)
+	s.captureRenderedState(ctx, capture)
+	capture.resolveResponseBodies(ctx)
 
 	// Interaction pass: give each real form field its own canary, then submit and
 	// click controls to reach event-triggered and delayed flows. Per-field identity
@@ -381,14 +682,15 @@ func (s *domScanner) runCanary(ctx context.Context, baseHost, pageURL, relay str
 			}
 			canaries = append(canaries, fic)
 			formCanaries = append(formCanaries, fic)
-			s.addCanaryToAgent(ctx, fic)
 		}
+		s.addCanariesToAgent(ctx, formCanaries)
 		s.fillFormCanaries(ctx, formCanaries)
 	}
 	// Always re-read after the interaction pass: filling forms and clicking can
 	// drive event-triggered and delayed flows even when no control reported a click.
 	s.clickExplore(ctx)
 	offset, _ = s.readAndIngest(ctx, baseHost, pageURL, PhaseStateExploration, TriggerInteraction, "form/click", offset)
+	s.captureRenderedState(ctx, capture)
 
 	// postMessage pass: deliver a canary via postMessage and record any flow.
 	if s.cfg.Messages && s.sourceEnabled(SourceWebMessage) && s.reserveProbes(1) {
@@ -396,11 +698,22 @@ func (s *domScanner) runCanary(ctx context.Context, baseHost, pageURL, relay str
 		s.addCanaryToAgent(ctx, wm)
 		s.sendWebMessage(ctx, wm.Value)
 		offset, _ = s.readAndIngest(ctx, baseHost, pageURL, PhaseStateExploration, TriggerPostMessage, "postMessage", offset)
+		s.captureRenderedState(ctx, capture)
 	}
 	_ = offset
+	preLinks, _ := s.collectLinks(ctx, baseHost)
+	s.exploreRenderedStates(ctx, capture, agentSrc)
+	_, _ = s.readAndIngest(ctx, baseHost, pageURL, PhaseStateExploration, TriggerInteraction, "state exploration", offset)
+	postLinks, _ := s.collectLinks(ctx, baseHost)
+	discoveredLinks := uniqueSortedStrings(append(preLinks, postLinks...))
 
 	// Confirm pass: for flows found so far, drive a controlled, hidden execution
 	// probe. Bounded to the seed page's own flows.
+	// Discovery artifacts describe the baseline render, never the deliberately
+	// altered confirmation reloads.
+	capture.resolveRequestBodies(ctx)
+	capture.resolveResponseBodies(ctx)
+	capture.freeze()
 	if s.cfg.Mode == DOMModeConfirm {
 		s.runConfirm(ctx, baseHost, pageURL, relay)
 	}
@@ -409,47 +722,103 @@ func (s *domScanner) runCanary(ctx context.Context, baseHost, pageURL, relay str
 	if brokeExecution(stFinal) {
 		s.note(pageURL, "instrumentation hook errors observed; page execution may be affected")
 	}
-	return s.collectLinks(ctx, baseHost)
+	return discoveredLinks, nil
 }
 
 // runConfirm re-probes each distinct source that produced an executable-context
 // flow with a payload that calls a hidden confirmation beacon (never a visible
 // dialog). A fired beacon upgrades the matching flows to confirmed execution.
 func (s *domScanner) runConfirm(ctx context.Context, baseHost, pageURL, relay string) {
-	type key struct{ kind, name, ctx string }
-	targets := map[key]string{} // key -> probe id
+	type sourceKey struct{ kind, name string }
+	// One batch per parse context lets all independent sources share a navigation.
+	// A source that reached both HTML and JS receives the appropriate payload in
+	// each batch; formerly every source/context pair reloaded the entire page.
+	targets := map[string]map[sourceKey]string{} // context -> source -> original probe id
 	s.mu.Lock()
 	for _, f := range s.findings {
-		if f.Type != DOMTypeFlow || f.Source == nil {
+		// Findings are shared across concurrent workers. Confirmation must only
+		// replay flows observed on this page; otherwise every later page reloads for
+		// every earlier page's sources and can incorrectly confirm them as well.
+		if f.PageURL != pageURL || f.Type != DOMTypeFlow || f.Source == nil {
 			continue
 		}
 		if f.Context != "html" && f.Context != "js" {
 			continue // only these contexts have a safe, controlled confirmation
 		}
-		targets[key{f.Source.Kind, f.Source.Name, f.Context}] = f.ProbeID
+		if targets[f.Context] == nil {
+			targets[f.Context] = make(map[sourceKey]string)
+		}
+		targets[f.Context][sourceKey{f.Source.Kind, f.Source.Name}] = f.ProbeID
 	}
 	s.mu.Unlock()
 
-	for k, pid := range targets {
-		if ctx.Err() != nil || !s.reserveProbes(1) {
-			return
+	contexts := make([]string, 0, len(targets))
+	for sinkContext := range targets {
+		contexts = append(contexts, sinkContext)
+	}
+	sort.Strings(contexts)
+	for _, sinkContext := range contexts {
+		sources := targets[sinkContext]
+		keys := make([]sourceKey, 0, len(sources))
+		for key := range sources {
+			keys = append(keys, key)
 		}
-		payload := confirmPayload(k.ctx, pid)
-		c := domCanary{ID: pid, Token: confirmMarker(pid), Kind: k.kind, Name: k.name, Value: payload}
-		injected := s.injectSourceURL(pageURL, c)
-		agentSrc := buildDOMAgent(s.agentConfig(DOMModeConfirm, relay, []domCanary{c}))
-		if err := s.loadPage(ctx, agentSrc, injected, ""); err != nil {
+		sort.Slice(keys, func(i, j int) bool {
+			if keys[i].kind != keys[j].kind {
+				return keys[i].kind < keys[j].kind
+			}
+			return keys[i].name < keys[j].name
+		})
+
+		var canaries []domCanary
+		originalIDs := make(map[string]string)
+		injected := pageURL
+		referrer := ""
+		for _, key := range keys {
+			if ctx.Err() != nil || !s.reserveProbes(1) {
+				return
+			}
+			pid := sources[key]
+			confirmID := pid + "|" + sinkContext
+			payload := confirmPayload(sinkContext, confirmID)
+			c := domCanary{
+				ID: confirmID, Token: confirmMarker(confirmID), Kind: key.kind,
+				Name: key.name, Value: payload,
+			}
+			canaries = append(canaries, c)
+			originalIDs[confirmID] = pid
+			injected = s.injectSourceURL(injected, c)
+			if key.kind == SourceReferrer {
+				if u, err := url.Parse(pageURL); err == nil {
+					q := url.Values{"jsmref": []string{payload}}
+					referrer = (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: "/", RawQuery: q.Encode()}).String()
+				}
+			}
+		}
+		if len(canaries) == 0 {
 			continue
 		}
-		if k.kind == SourceFormInput {
-			s.fillFormField(ctx, k.name, payload)
-		} else if k.kind == SourceWebMessage {
-			s.sendWebMessage(ctx, payload)
+		agentSrc := buildDOMAgent(s.agentConfig(DOMModeConfirm, relay, canaries))
+		if err := s.loadPage(ctx, agentSrc, injected, referrer); err != nil {
+			continue
+		}
+		var formCanaries []domCanary
+		for _, c := range canaries {
+			if c.Kind == SourceFormInput {
+				formCanaries = append(formCanaries, c)
+			} else if c.Kind == SourceWebMessage {
+				s.sendWebMessage(ctx, c.Value)
+			}
+		}
+		if len(formCanaries) > 0 {
+			s.fillFormCanaries(ctx, formCanaries)
 		}
 		s.clickExplore(ctx)
 		st, _ := readAgentState(ctx)
-		if st.Confirmations[pid] {
-			s.confirmFlows(pid)
+		for confirmID, pid := range originalIDs {
+			if st.Confirmations[confirmID] {
+				s.confirmFlows(pageURL, pid, sinkContext)
+			}
 		}
 	}
 }
@@ -460,10 +829,12 @@ func (s *domScanner) runConfirm(ctx context.Context, baseHost, pageURL, relay st
 // navigates to urlStr with an optional referrer, and waits for the page to
 // settle. Errors here are the page's own load failures, kept per-page.
 func (s *domScanner) loadPage(ctx context.Context, agentSrc, urlStr, referrer string) error {
+	var scriptID page.ScriptIdentifier
 	actions := []chromedp.Action{network.Enable().WithMaxPostDataSize(MaxPostDataSize)}
 	actions = append(actions, headerActions(renderHeaders())...)
 	actions = append(actions, chromedp.ActionFunc(func(ctx context.Context) error {
-		_, err := page.AddScriptToEvaluateOnNewDocument(agentSrc).Do(ctx)
+		var err error
+		scriptID, err = page.AddScriptToEvaluateOnNewDocument(agentSrc).Do(ctx)
 		return err
 	}))
 	actions = append(actions, chromedp.ActionFunc(func(ctx context.Context) error {
@@ -482,9 +853,18 @@ func (s *domScanner) loadPage(ctx context.Context, agentSrc, urlStr, referrer st
 	}))
 	actions = append(actions,
 		chromedp.WaitReady("body", chromedp.ByQuery),
-		chromedp.Sleep(domSettle()),
+		chromedp.ActionFunc(waitForDOMQuiet),
 	)
-	return chromedp.Run(ctx, actions...)
+	err := chromedp.Run(ctx, actions...)
+	// The registration is only for this navigation. Keeping it would make every
+	// confirmation reload parse and execute all prior agents; the idempotence
+	// guard would also let the oldest configuration shadow the current probe.
+	if scriptID != "" {
+		_ = chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+			return page.RemoveScriptToEvaluateOnNewDocument(scriptID).Do(ctx)
+		}))
+	}
+	return err
 }
 
 // readAgentState reads the in-page agent state back as JSON and decodes it.
@@ -505,11 +885,21 @@ func readAgentState(ctx context.Context) (domAgentState, error) {
 // source seeded after the initial navigation (a form input, a web message) is
 // still correlated, without a state-losing reload.
 func (s *domScanner) addCanaryToAgent(ctx context.Context, c domCanary) {
-	data, err := json.Marshal(c)
+	s.addCanariesToAgent(ctx, []domCanary{c})
+}
+
+// addCanariesToAgent registers a group in one CDP evaluation. Forms can expose
+// up to 100 named controls; sending one Evaluate command per field dominated
+// local latency on large pages without adding any evidence.
+func (s *domScanner) addCanariesToAgent(ctx context.Context, canaries []domCanary) {
+	if len(canaries) == 0 {
+		return
+	}
+	data, err := json.Marshal(canaries)
 	if err != nil {
 		return
 	}
-	expr := `(function(){try{if(window.__jsmdomAddCanary)window.__jsmdomAddCanary(` + string(data) + `);}catch(e){}})()`
+	expr := `(function(cs){try{if(!window.__jsmdomAddCanary)return;for(var i=0;i<cs.length;i++)window.__jsmdomAddCanary(cs[i]);}catch(e){}})(` + string(data) + `)`
 	_ = chromedp.Run(ctx, chromedp.Evaluate(expr, nil))
 }
 
@@ -604,14 +994,17 @@ func (s *domScanner) clickExplore(ctx context.Context) bool {
 	  var nodes=Array.prototype.slice.call(document.querySelectorAll(sel)).slice(0,25);
 	  var n=0;nodes.forEach(function(el){try{
 	    var tag=(el.tagName||'').toLowerCase(),type=(el.getAttribute&&el.getAttribute('type')||'').toLowerCase();
-	    if(tag==='button'&&(type===''||type==='submit'||type==='reset'))return;
+	    if(tag==='button'&&el.form&&(type===''||type==='submit'||type==='reset'))return;
 	    el.click();n++;
 	  }catch(e){}});
 	  return n;
 	}catch(e){return 0;}})()`
 	var n int
-	if err := chromedp.Run(ctx, chromedp.Evaluate(js, &n), chromedp.Sleep(domInteractionSettle())); err != nil {
+	if err := chromedp.Run(ctx, chromedp.Evaluate(js, &n)); err != nil {
 		return false
+	}
+	if n > 0 {
+		_ = chromedp.Run(ctx, chromedp.Sleep(domInteractionSettle()))
 	}
 	return n > 0
 }
@@ -679,6 +1072,206 @@ func (s *domScanner) collectLinks(ctx context.Context, baseHost string) ([]strin
 	return out, nil
 }
 
+// captureRenderedState retains a structurally distinct HTML snapshot from the
+// already-instrumented page. It replaces the separate ordinary render in
+// DOM/full mode; failures are best-effort because DOM evidence remains useful.
+func (s *domScanner) captureRenderedState(ctx context.Context, capture *domPageCapture) {
+	if capture == nil {
+		return
+	}
+	var html string
+	if err := chromedp.Run(ctx, chromedp.OuterHTML("html", &html, chromedp.ByQuery)); err == nil {
+		capture.addState([]byte(html))
+	}
+}
+
+// exploreRenderedStates preserves the ordinary renderer's bounded form,
+// clickable and SPA-route exploration inside the already loaded tab. It
+// snapshots each structurally distinct state without launching a second baseline
+// render or Chromium process.
+func (s *domScanner) exploreRenderedStates(ctx context.Context, capture *domPageCapture, agentSrc string) {
+	if capture == nil || MaxExploreStates <= 0 || ctx.Err() != nil {
+		return
+	}
+	// Forms and route controls may create a fresh document. Keep the current
+	// instrumentation registered only for this exploration window, then remove it
+	// before confirmation installs a different canary configuration.
+	var scriptID page.ScriptIdentifier
+	_ = chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+		id, err := page.AddScriptToEvaluateOnNewDocument(agentSrc).Do(ctx)
+		if err == nil {
+			scriptID = id
+		}
+		return nil
+	}))
+	if scriptID != "" {
+		defer func() {
+			_ = chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+				return page.RemoveScriptToEvaluateOnNewDocument(scriptID).Do(ctx)
+			}))
+		}()
+	}
+	var html string
+	if err := chromedp.Run(ctx, chromedp.OuterHTML("html", &html, chromedp.ByQuery)); err != nil || html == "" {
+		return
+	}
+	states := [][]byte{[]byte(html)}
+	seen := map[string]struct{}{structuralSig([]byte(html)): {}}
+	states, _ = exploreStates(ctx, states, seen, nil)
+	for _, state := range states {
+		capture.addState(state)
+	}
+}
+
+// scanDOMRenderedPages turns artifacts from the shared instrumented navigation
+// into the same ordinary match stream previously produced by
+// RenderURLWithStates. Browser work is finished before these HTTP/script scans
+// begin, so it cannot consume a page's DOM timeout.
+func (e *Extractor) scanDOMRenderedPages(pages []domRenderedPage, cfg DOMScanConfig) ([]Match, []DOMSourceHint) {
+	visitedByHost := make(map[string]*visitedSet)
+	var matches []Match
+	var hints []DOMSourceHint
+	drainHints := func(scopeHost string) {
+		for _, hint := range e.TakeDOMSourceHints() {
+			hint.ScopeHost = scopeHost
+			hints = append(hints, hint)
+		}
+	}
+	for _, p := range pages {
+		hostKey := canonicalHost(p.BaseHost)
+		visited := visitedByHost[hostKey]
+		if visited == nil {
+			visited = newVisitedSet()
+			visitedByHost[hostKey] = visited
+		}
+		// The hint collector is process-wide on the extractor. This phase is
+		// intentionally sequential so each page's newly scanned scripts can be
+		// assigned to the scope that caused their discovery.
+		e.TakeDOMSourceHints()
+		resourceSeen := make(map[string]struct{})
+		var capturedResources []domRenderedResource
+		for _, resource := range p.Resources {
+			if len(resource.Body) == 0 {
+				continue // CDP body unavailable; the URL fallback below will fetch it
+			}
+			u, err := url.Parse(resource.URL)
+			if err != nil || (!cfg.ArtifactExternal && !sameScope(p.BaseHost, u.Hostname())) {
+				continue
+			}
+			if _, exists := resourceSeen[resource.URL]; exists {
+				continue
+			}
+			resourceSeen[resource.URL] = struct{}{}
+			visited.visit(resource.URL) // prevent the HTML/XHR fallback from refetching it
+			capturedResources = append(capturedResources, resource)
+		}
+		// Mark the complete captured set before following imports so a bundle cannot
+		// refetch a later captured chunk merely because it sorts after its importer.
+		for _, resource := range capturedResources {
+			matches = append(matches, e.scanDOMRenderedResource(resource, p.BaseHost, visited, cfg)...)
+		}
+		for i, state := range p.HTMLStates {
+			var dynamic []string
+			if i == 0 {
+				dynamic = p.Scripts
+			}
+			if cfg.ArtifactPosts {
+				matches = append(matches, e.scanHTMLStatePosts(
+					p.PageURL, p.BaseHost, state, dynamic, visited, cfg.ArtifactExternal, false,
+				)...)
+				if cfg.Crawl {
+					matches = append(matches, extractHTMLLinkMatches(state, p.PageURL)...)
+				}
+			} else {
+				matches = append(matches, e.scanHTMLState(
+					p.PageURL, p.BaseHost, state, dynamic, cfg.ArtifactEndpoints,
+					visited, cfg.ArtifactExternal, false,
+				)...)
+			}
+			if cfg.Crawl {
+				matches = append(matches, extractHTMLFormMatches(state, p.PageURL)...)
+			}
+		}
+
+		for _, request := range p.Requests {
+			matches = append(matches, Match{
+				Source: p.PageURL, Pattern: "post_url", Value: request.URL,
+				Params: request.Body, Severity: SeverityInfo,
+			})
+		}
+		if cfg.ArtifactPosts {
+			drainHints(p.BaseHost)
+			continue
+		}
+		for _, xhrURL := range p.XHRURLs {
+			matches = append(matches, Match{
+				Source: p.PageURL, Pattern: "endpoint_url", Value: xhrURL, Severity: SeverityInfo,
+			})
+			u, err := url.Parse(xhrURL)
+			if err != nil || (!cfg.ArtifactExternal && !sameScope(p.BaseHost, u.Hostname())) {
+				continue
+			}
+			if ms, err := e.scanURL(xhrURL, p.BaseHost, cfg.ArtifactEndpoints, visited, cfg.ArtifactExternal, false); err == nil {
+				matches = append(matches, ms...)
+			}
+		}
+		drainHints(p.BaseHost)
+	}
+	return matches, hints
+}
+
+// scanDOMRenderedResource scans a script or XHR/fetch response body already
+// received by Chrome. This is the request-level counterpart to sharing the page
+// render: dynamic resources are not downloaded a second time merely so the Go
+// scanner can inspect their bytes.
+func (e *Extractor) scanDOMRenderedResource(resource domRenderedResource, baseHost string, visited *visitedSet, cfg DOMScanConfig) []Match {
+	isJS := resource.Script || isJavaScriptContentType(resource.MimeType)
+	var matches []Match
+	if cfg.ArtifactPosts {
+		if !isJS {
+			return nil
+		}
+		ms, err := e.scanDataPostRequests(resource.URL, resource.Body, true)
+		if err == nil {
+			matches = append(matches, ms...)
+		}
+		matches = append(matches, e.recoverSourceMap(
+			resource.URL, resource.Body, resource.Header, baseHost,
+			cfg.ArtifactExternal, visited, true,
+		)...)
+		for _, imp := range inScopeJSImports(resource.Body, resource.URL, baseHost, cfg.ArtifactExternal) {
+			if ms, err := e.scanURLPosts(imp, baseHost, visited, cfg.ArtifactExternal, false); err == nil {
+				matches = append(matches, ms...)
+			}
+		}
+		return matches
+	}
+
+	ms, err := e.scanDataWithEndpoints(resource.URL, resource.Body, isJS)
+	if err == nil {
+		if cfg.ArtifactEndpoints {
+			ms = FilterEndpointMatches(ms)
+		}
+		matches = append(matches, ms...)
+	}
+	if isJS {
+		recovered := e.recoverSourceMap(
+			resource.URL, resource.Body, resource.Header, baseHost,
+			cfg.ArtifactExternal, visited, false,
+		)
+		if cfg.ArtifactEndpoints {
+			recovered = FilterEndpointMatches(recovered)
+		}
+		matches = append(matches, recovered...)
+		for _, imp := range inScopeJSImports(resource.Body, resource.URL, baseHost, cfg.ArtifactExternal) {
+			if imported, err := e.scanURL(imp, baseHost, cfg.ArtifactEndpoints, visited, cfg.ArtifactExternal, false); err == nil {
+				matches = append(matches, imported...)
+			}
+		}
+	}
+	return matches
+}
+
 // ---- canary construction ---------------------------------------------------
 
 // buildCanaries derives the canary set for a page from its enabled sources,
@@ -693,14 +1286,13 @@ func (s *domScanner) buildCanaries(pageURL string, maxCanaries int) (canaries []
 	}
 
 	seen := make(map[string]bool)
+	canaryIndex := make(map[string]int)
 	hasCapacity := func() bool { return maxCanaries < 0 || len(canaries) < maxCanaries }
 	mergeDiscovery := func(kind, name string, discovered []string) bool {
 		id := kind + ":" + name
-		for i := range canaries {
-			if canaries[i].ID == id {
-				canaries[i].DiscoveredBy = uniqueSortedStrings(append(canaries[i].DiscoveredBy, discovered...))
-				return true
-			}
+		if i, ok := canaryIndex[id]; ok {
+			canaries[i].DiscoveredBy = uniqueSortedStrings(append(canaries[i].DiscoveredBy, discovered...))
+			return true
 		}
 		return false
 	}
@@ -720,6 +1312,7 @@ func (s *domScanner) buildCanaries(pageURL string, maxCanaries int) (canaries []
 			DiscoveredBy: uniqueSortedStrings(discovered),
 		}
 		canaries = append(canaries, c)
+		canaryIndex[c.ID] = len(canaries) - 1
 		return c, true
 	}
 
@@ -748,6 +1341,7 @@ func (s *domScanner) buildCanaries(pageURL string, maxCanaries int) (canaries []
 			ID: SourceURLQuery + ":" + name, Token: tok, Kind: SourceURLQuery, Name: name,
 			DiscoveredBy: uniqueSortedStrings(discovered),
 		})
+		canaryIndex[SourceURLQuery+":"+name] = len(canaries) - 1
 		return true
 	}
 
@@ -850,6 +1444,15 @@ func cloneURLValues(in url.Values) url.Values {
 }
 
 func (s *domScanner) sourceHintsForPage(host string) []DOMSourceHint {
+	cacheKey := canonicalHost(host)
+	s.mu.Lock()
+	if cached, ok := s.hintCache[cacheKey]; ok {
+		out := append([]DOMSourceHint(nil), cached...)
+		s.mu.Unlock()
+		return out
+	}
+	s.mu.Unlock()
+
 	byKey := make(map[string]DOMSourceHint)
 	for _, hint := range s.cfg.SourceHints {
 		if !validDOMSourceHintName(hint.Name) {
@@ -875,6 +1478,12 @@ func (s *domScanner) sourceHintsForPage(host string) []DOMSourceHint {
 		}
 		return hints[i].Name < hints[j].Name
 	})
+	s.mu.Lock()
+	if s.hintCache == nil {
+		s.hintCache = make(map[string][]DOMSourceHint)
+	}
+	s.hintCache[cacheKey] = append([]DOMSourceHint(nil), hints...)
+	s.mu.Unlock()
 	return hints
 }
 
@@ -1105,11 +1714,12 @@ func classifyFlow(sinkContext string, confirmed bool) (severity, confidence stri
 
 // confirmFlows marks every recorded flow bearing probe id pid as confirmed
 // execution (high severity, certain confidence).
-func (s *domScanner) confirmFlows(pid string) {
+func (s *domScanner) confirmFlows(pageURL, pid, sinkContext string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i := range s.findings {
-		if s.findings[i].Type == DOMTypeFlow && s.findings[i].ProbeID == pid {
+		if s.findings[i].PageURL == pageURL && s.findings[i].Type == DOMTypeFlow &&
+			s.findings[i].ProbeID == pid && s.findings[i].Context == sinkContext {
 			s.findings[i].Confirmed = true
 			s.findings[i].Severity = SeverityHigh
 			s.findings[i].Confidence = ConfidenceCertain
@@ -1255,6 +1865,21 @@ func (s *domScanner) snapshotFindings() []DOMFinding {
 	return out
 }
 
+func (s *domScanner) addRendered(page domRenderedPage) {
+	s.mu.Lock()
+	s.rendered = append(s.rendered, page)
+	s.mu.Unlock()
+}
+
+func (s *domScanner) snapshotRendered() []domRenderedPage {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]domRenderedPage, len(s.rendered))
+	copy(out, s.rendered)
+	sort.Slice(out, func(i, j int) bool { return out[i].PageURL < out[j].PageURL })
+	return out
+}
+
 func (s *domScanner) buildSummary(cfg DOMScanConfig, findingCount int, findings []DOMFinding, dur time.Duration) DOMScanSummary {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1297,7 +1922,44 @@ func domSettle() time.Duration {
 	return d
 }
 
-func domInteractionSettle() time.Duration { return 800 * time.Millisecond }
+// waitForDOMQuiet replaces the unconditional initial sleep with an activity
+// based wait. Navigation has already reached the load event; this retains a
+// bounded window for SPA mounts and late resources but lets an idle page proceed
+// as soon as both the DOM and resource timeline have been quiet for 300ms.
+func waitForDOMQuiet(ctx context.Context) error {
+	deadline := time.Now().Add(domSettle())
+	quietMS := interactionQuietPeriod.Milliseconds()
+	expr := fmt.Sprintf(`(function(){
+		try {
+			var now=performance.now(),last=(window.__jsmdom&&window.__jsmdom.lastActivity)||0;
+			var rs=performance.getEntriesByType('resource');
+			for(var i=Math.max(0,rs.length-100);i<rs.length;i++)if(rs[i].responseEnd>last)last=rs[i].responseEnd;
+			return document.readyState!=='loading' && now-last>=%d;
+		} catch(e) { return false; }
+	})()`, quietMS)
+	for {
+		var quiet bool
+		if err := chromedp.Evaluate(expr, &quiet).Do(ctx); err == nil && quiet {
+			return nil
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil
+		}
+		delay := min(remaining, 100*time.Millisecond)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func domInteractionSettle() time.Duration { return interactionQuietPeriod }
 
 func brokeExecution(st domAgentState) bool { return st.HookErrors > 5 }
 
@@ -1366,9 +2028,10 @@ func confirmPayload(sinkContext, pid string) string {
 	marker := confirmMarker(pid)
 	switch sinkContext {
 	case "html":
-		// The marker rides along as the img source so the flow is still attributed;
-		// the error handler fires the hidden beacon when the markup is parsed.
-		return `<img src="` + marker + `" onerror="window.__jsmdomConfirm&&window.__jsmdomConfirm('` + pid + `')">`
+		// Keep the marker in a data attribute for attribution and use a malformed
+		// data URI to trigger onerror locally. A relative marker src would issue an
+		// unnecessary HTTP request to the target for every confirmation probe.
+		return `<img data-jsmdom="` + marker + `" src="data:image/png;base64,!" onerror="window.__jsmdomConfirm&&window.__jsmdomConfirm('` + pid + `')">`
 	case "js":
 		return `/*` + marker + `*/;try{window.__jsmdomConfirm&&window.__jsmdomConfirm('` + pid + `')}catch(e){};//`
 	default:

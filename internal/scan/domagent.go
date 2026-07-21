@@ -164,6 +164,20 @@ const domAgentScript = `
   };
   var NATIVE_ADD = window.addEventListener;
   var NATIVE_SET_TIMEOUT = window.setTimeout;
+  agent.lastActivity = performance.now();
+  (function watchDOMActivity() {
+    function start() {
+      try {
+        if (!document.documentElement || agent.activityObserver) return;
+        agent.activityObserver = new MutationObserver(function () { agent.lastActivity = performance.now(); });
+        agent.activityObserver.observe(document.documentElement, {
+          childList: true, subtree: true, attributes: true, characterData: true
+        });
+      } catch (e) {}
+    }
+    if (document.readyState === 'loading') NATIVE_ADD.call(document, 'DOMContentLoaded', start, { once: true });
+    else start();
+  })();
 
   function sinkEnabled(family) {
     if (!SINKS) return true;
@@ -244,7 +258,16 @@ const domAgentScript = `
     var out = [];
     if (!value) return out;
     var decoded = value;
-    try { decoded = decodeURIComponent(value); } catch (e) {}
+    // Every marker carries this fixed alphanumeric prefix. Almost every sink a
+    // normal application calls is unrelated to our probes, so reject those
+    // values before URL decoding and before walking as many as 100 canaries.
+    if (value.indexOf('jsmdom') === -1) {
+      if (value.indexOf('%') === -1) return out;
+      try { decoded = decodeURIComponent(value); } catch (e) {}
+      if (decoded.indexOf('jsmdom') === -1) return out;
+    } else {
+      try { decoded = decodeURIComponent(value); } catch (e) {}
+    }
     for (var i = 0; i < CANARIES.length; i++) {
       var c = CANARIES[i];
       if (!c || !c.token) continue;
@@ -323,8 +346,8 @@ const domAgentScript = `
     try {
       var value = toStr(rawValue);
       var matched = matchCanaries(value);
-      var stack = captureStack();
       if (matched.length) {
+        var stack = captureStack();
         for (var i = 0; i < matched.length; i++) {
           var mc = matched[i];
           emit({
@@ -357,6 +380,7 @@ const domAgentScript = `
           }
         }
       } else if (MODE === 'observe' && value) {
+        var stack = captureStack();
         emit({ kind: 'sink', sink: sink, argument: arg, context: ctx,
                value: preview(value, null), stack: stack });
       }
