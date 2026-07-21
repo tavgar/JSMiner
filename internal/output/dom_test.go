@@ -21,6 +21,7 @@ func sampleReport() Report {
 				Source:  &scan.DOMSource{Kind: scan.SourceURLQuery, Name: "q"},
 				Sink:    &scan.DOMSink{Name: "eval", Argument: 0},
 				ProbeID: "url_query:q", Context: "js", Severity: scan.SeverityHigh, Confidence: scan.ConfidenceHigh,
+				Triage:      &scan.DOMTriage{Verdict: scan.DOMTriageWorthReview, Reason: "controllable data reached a JavaScript execution context"},
 				Fingerprint: "abc123",
 			},
 			{
@@ -147,6 +148,9 @@ func TestPrettyWithDOMSection(t *testing.T) {
 	}
 	if !strings.Contains(out, "[dom]") {
 		t.Error("missing dom summary line")
+	}
+	if !strings.Contains(out, "triage=worth_reviewing") {
+		t.Errorf("missing plain-language triage hint:\n%s", out)
 	}
 }
 

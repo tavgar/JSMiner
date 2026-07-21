@@ -542,11 +542,13 @@ func (s *domScanner) clickExplore(ctx context.Context) bool {
 // a message-driven flow is exercised.
 func (s *domScanner) sendWebMessage(ctx context.Context, value string) {
 	js := `(function(v){try{
+	  if(window.__jsmdom)window.__jsmdom.sendingProbe=true;
 	  var payloads=[v,{data:v},{message:v},{cmd:'render',payload:v},{type:'html',html:v}];
 	  payloads.forEach(function(p){try{window.postMessage(p,'*');}catch(e){}});
 	  for(var i=0;i<window.frames.length&&i<8;i++){try{window.frames[i].postMessage(v,'*');}catch(e){}}
+	  if(window.__jsmdom)window.__jsmdom.sendingProbe=false;
 	  return 1;
-	}catch(e){return 0;}})(` + jsString(value) + `)`
+	}catch(e){try{if(window.__jsmdom)window.__jsmdom.sendingProbe=false;}catch(x){}return 0;}})(` + jsString(value) + `)`
 	_ = chromedp.Run(ctx, chromedp.Evaluate(js, nil), chromedp.Sleep(domInteractionSettle()))
 }
 
@@ -764,6 +766,17 @@ func (s *domScanner) mapFinding(target, pageURL string, rf domRawFinding, phase,
 		f.Sink = &DOMSink{Name: rf.Sink, Argument: rf.Argument}
 		f.Source = &DOMSource{Kind: rf.SourceKind, Name: rf.SourceName}
 		f.ProbeID = rf.ProbeID
+		if rf.URL != nil {
+			f.URL = &DOMURLEvidence{
+				Resolved:          rf.URL.Resolved,
+				Scheme:            rf.URL.Scheme,
+				DestinationOrigin: rf.URL.DestinationOrigin,
+				SameOrigin:        rf.URL.SameOrigin,
+				CanaryComponent:   rf.URL.CanaryComponent,
+				InputKind:         rf.URL.InputKind,
+				ExecutableScheme:  rf.URL.ExecutableScheme,
+			}
+		}
 		if interaction != "" && trigger != TriggerPageLoad {
 			f.Interaction = interaction
 		}
@@ -781,13 +794,17 @@ func (s *domScanner) mapFinding(target, pageURL string, rf domRawFinding, phase,
 		f.Confidence = ConfidenceMedium
 		if rf.Message != nil {
 			f.Message = &DOMMessageInfo{
-				ListenerCount: rf.Message.ListenerCount,
-				OriginChecked: rf.Message.OriginChecked,
-				SourceChecked: rf.Message.SourceChecked,
-				DataShape:     rf.Message.DataShape,
-				ReachesSink:   rf.Message.ReachesSink,
-				SentToOrigin:  rf.Message.SentToOrigin,
-				Identity:      rf.Message.Identity,
+				ListenerCount:          rf.Message.ListenerCount,
+				OriginChecked:          rf.Message.OriginChecked,
+				OriginCheckedListeners: rf.Message.OriginCheckedListeners,
+				SourceChecked:          rf.Message.SourceChecked,
+				SourceCheckedListeners: rf.Message.SourceCheckedListeners,
+				DataShape:              rf.Message.DataShape,
+				ReachesSink:            rf.Message.ReachesSink,
+				ProbeGenerated:         rf.Message.ProbeGenerated,
+				SentToOrigin:           rf.Message.SentToOrigin,
+				Identity:               rf.Message.Identity,
+				ListenerLocations:      toStackFrames(rf.Message.ListenerLocations),
 			}
 			if rf.Message.SentToOrigin != "" {
 				// A cross-origin send of URL-derived data is a low-severity leak, not
@@ -800,8 +817,57 @@ func (s *domScanner) mapFinding(target, pageURL string, rf domRawFinding, phase,
 		f.Severity = SeverityInfo
 		f.Confidence = ConfidenceLow
 	}
+	f.Triage = assessDOMFinding(f)
 	f.Fingerprint = f.computeFingerprint()
 	return f
+}
+
+// assessDOMFinding turns the evidence already gathered for a finding into a
+// conservative triage hint. It deliberately avoids claiming exploitability:
+// only controlled execution is labelled confirmed.
+func assessDOMFinding(f DOMFinding) *DOMTriage {
+	if f.Confirmed {
+		return &DOMTriage{Verdict: DOMTriageConfirmed, Reason: "controlled execution was confirmed"}
+	}
+	if f.Type == DOMTypeWebMessage && f.Message != nil {
+		switch {
+		case f.Message.ReachesSink:
+			return &DOMTriage{Verdict: DOMTriageWorthReview, Reason: "message data reached a security-sensitive sink"}
+		case f.Message.SentToOrigin != "":
+			return &DOMTriage{Verdict: DOMTriageWorthReview, Reason: "URL-derived data was sent to a cross-origin message target"}
+		case f.Message.ProbeGenerated:
+			return &DOMTriage{Verdict: DOMTriageLikelyBenign, Reason: "scanner probe was observed, but its data did not reach a security-sensitive sink"}
+		case f.Message.ListenerCount > 0 && !f.Message.OriginChecked:
+			return &DOMTriage{Verdict: DOMTriageLikelyBenign, Reason: "no origin inspection was visible, but no security-sensitive effect was observed"}
+		default:
+			return &DOMTriage{Verdict: DOMTriageInfo, Reason: "message activity was observed without a security-sensitive effect"}
+		}
+	}
+	if f.Type == DOMTypeFlow {
+		switch f.Context {
+		case "js", "script-url":
+			return &DOMTriage{Verdict: DOMTriageWorthReview, Reason: "controllable data reached a JavaScript execution context"}
+		case "html", "attribute":
+			return &DOMTriage{Verdict: DOMTriageWorthReview, Reason: "controllable data reached a markup-capable context; execution was not confirmed"}
+		case "url":
+			if f.URL == nil || !f.URL.Resolved {
+				return &DOMTriage{Verdict: DOMTriageWorthReview, Reason: "controllable data reached a navigation target whose destination could not be classified"}
+			}
+			if f.URL.ExecutableScheme {
+				return &DOMTriage{Verdict: DOMTriageWorthReview, Reason: "navigation resolved to an executable URL scheme; execution was not confirmed"}
+			}
+			if !f.URL.SameOrigin {
+				return &DOMTriage{Verdict: DOMTriageWorthReview, Reason: "controllable data reached a cross-origin navigation target"}
+			}
+			if f.URL.CanaryComponent == "query" || f.URL.CanaryComponent == "fragment" {
+				return &DOMTriage{Verdict: DOMTriageLikelyBenign, Reason: "direct destination stayed same-origin and the marker remained in the URL " + f.URL.CanaryComponent}
+			}
+			return &DOMTriage{Verdict: DOMTriageLikelyBenign, Reason: "direct destination stayed same-origin and no executable scheme was observed"}
+		default:
+			return &DOMTriage{Verdict: DOMTriageWorthReview, Reason: "controllable data reached a security-sensitive browser API"}
+		}
+	}
+	return &DOMTriage{Verdict: DOMTriageInfo, Reason: "sink activity was observed without evidence of attacker control"}
 }
 
 // classifyFlow maps a sink parse context (and whether execution was confirmed)
@@ -834,6 +900,7 @@ func (s *domScanner) confirmFlows(pid string) {
 			s.findings[i].Confirmed = true
 			s.findings[i].Severity = SeverityHigh
 			s.findings[i].Confidence = ConfidenceCertain
+			s.findings[i].Triage = assessDOMFinding(s.findings[i])
 		}
 	}
 }

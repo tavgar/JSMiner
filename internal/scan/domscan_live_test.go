@@ -105,6 +105,12 @@ func vulnServer() *httptest.Server {
   });
 </script>`))
 
+	// current URL -> anchor.href: ordinary same-origin URL propagation used to
+	// verify that URL evidence can separate a benign-looking link rewrite from a
+	// cross-origin or executable destination.
+	mux.HandleFunc("/href", page(`<a id=out>current</a>
+<script>document.getElementById('out').href = location.href;</script>`))
+
 	// localStorage -> innerHTML (sensitive source; only our marker is ever seeded)
 	mux.HandleFunc("/storage", page(`<div id=out></div>
 <script>document.getElementById('out').innerHTML = localStorage.getItem('jsmls') || '';</script>`))
@@ -281,9 +287,11 @@ func TestDOMPostMessageToSink(t *testing.T) {
 	// A web_message finding should record the listener without an origin check.
 	var msg *DOMMessageInfo
 	for i := range res.Findings {
-		if res.Findings[i].Type == DOMTypeWebMessage && res.Findings[i].Message != nil && res.Findings[i].Message.ListenerCount > 0 {
+		if res.Findings[i].Message != nil && res.Findings[i].Message.SentToOrigin != "" && res.Findings[i].Message.ProbeGenerated {
+			t.Errorf("scanner probe was misreported as an application data leak: %+v", res.Findings[i].Message)
+		}
+		if msg == nil && res.Findings[i].Type == DOMTypeWebMessage && res.Findings[i].Message != nil && res.Findings[i].Message.ListenerCount > 0 {
 			msg = res.Findings[i].Message
-			break
 		}
 	}
 	if msg == nil {
@@ -291,6 +299,36 @@ func TestDOMPostMessageToSink(t *testing.T) {
 	}
 	if msg.OriginChecked {
 		t.Error("listener that does not read event.origin reported as origin-checked")
+	}
+	if !msg.ReachesSink {
+		t.Error("message observation was not correlated with its source-to-sink flow")
+	}
+	if !msg.ProbeGenerated {
+		t.Error("scanner-generated message was not labelled as a probe")
+	}
+	if len(msg.ListenerLocations) == 0 {
+		t.Error("message listener registration location was not captured")
+	}
+}
+
+func TestDOMURLFlowIncludesTriageEvidence(t *testing.T) {
+	defer domTestSetup(t)()
+	srv := vulnServer()
+	defer srv.Close()
+
+	res := runDOM(t, srv.URL+"/href?next=/safe", nil)
+	f := findFlow(res, SourceURLQuery, "next", "HTMLAnchorElement.href")
+	if f == nil {
+		t.Fatalf("no query -> anchor.href flow; findings=%s", summarize(res))
+	}
+	if f.URL == nil || !f.URL.Resolved || !f.URL.SameOrigin {
+		t.Fatalf("missing same-origin URL evidence: %+v", f.URL)
+	}
+	if f.URL.Scheme != "http" || f.URL.CanaryComponent != "query" {
+		t.Errorf("unexpected URL classification: %+v", f.URL)
+	}
+	if f.Triage == nil || f.Triage.Verdict != DOMTriageLikelyBenign {
+		t.Errorf("same-origin query propagation triage = %+v, want likely_benign", f.Triage)
 	}
 }
 

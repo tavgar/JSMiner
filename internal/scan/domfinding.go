@@ -13,7 +13,7 @@ import (
 // structured output so downstream consumers can detect an incompatible change.
 // Bump the minor version when adding fields, the major version when changing or
 // removing an existing field's meaning.
-const DOMSchemaVersion = "dom.1.0"
+const DOMSchemaVersion = "dom.1.1"
 
 // DOM finding types. These strings are stable public identifiers: automated
 // triage keys off them, so their spellings must not change. New analyses
@@ -104,9 +104,18 @@ type DOMMessageInfo struct {
 	// origin validation is correct or that it was bypassed.
 	OriginChecked bool `json:"origin_checked"`
 
+	// OriginCheckedListeners is the number of observed listeners whose source
+	// appears to inspect event.origin. The aggregate OriginChecked boolean is
+	// retained for backwards compatibility.
+	OriginCheckedListeners int `json:"origin_checked_listeners,omitempty"`
+
 	// SourceChecked reports whether a listener's source appears to inspect
 	// event.source. As with OriginChecked, this is evidence, not proof.
 	SourceChecked bool `json:"source_checked"`
+
+	// SourceCheckedListeners is the number of observed listeners whose source
+	// appears to inspect event.source.
+	SourceCheckedListeners int `json:"source_checked_listeners,omitempty"`
 
 	// DataShape is the expected message-data shape when determinable (the property
 	// names a listener reads off event.data), e.g. "{cmd, payload}".
@@ -116,6 +125,10 @@ type DOMMessageInfo struct {
 	// sink.
 	ReachesSink bool `json:"reaches_sink"`
 
+	// ProbeGenerated distinguishes the scanner's deliberately injected message
+	// shapes from messages the application generated on its own.
+	ProbeGenerated bool `json:"probe_generated"`
+
 	// SentToOrigin, when set, records that the page sent URL-derived data to a
 	// different origin via postMessage — a potential cross-origin data leak.
 	SentToOrigin string `json:"sent_to_origin,omitempty"`
@@ -123,7 +136,38 @@ type DOMMessageInfo struct {
 	// Identity is a stable grouping key for duplicate messages (origin + shape),
 	// so a page that emits the same message repeatedly is reported once.
 	Identity string `json:"identity,omitempty"`
+
+	// ListenerLocations points to the application code that registered the
+	// observed message listeners, when a useful stack frame was available.
+	ListenerLocations []DOMStackFrame `json:"listener_locations,omitempty"`
 }
+
+// DOMURLEvidence explains what a URL/navigation sink would actually target.
+// It intentionally exposes only structural details, not a second copy of the
+// potentially sensitive full URL (ValuePreview remains bounded and redacted).
+type DOMURLEvidence struct {
+	Resolved          bool   `json:"resolved"`
+	Scheme            string `json:"scheme,omitempty"`
+	DestinationOrigin string `json:"destination_origin,omitempty"`
+	SameOrigin        bool   `json:"same_origin"`
+	CanaryComponent   string `json:"canary_component,omitempty"`
+	InputKind         string `json:"input_kind,omitempty"`
+	ExecutableScheme  bool   `json:"executable_scheme"`
+}
+
+// DOMTriage is a conservative, evidence-backed hint for deciding whether a
+// finding deserves manual investigation. It is not a vulnerability verdict.
+type DOMTriage struct {
+	Verdict string `json:"verdict"`
+	Reason  string `json:"reason"`
+}
+
+const (
+	DOMTriageConfirmed    = "confirmed"
+	DOMTriageWorthReview  = "worth_reviewing"
+	DOMTriageLikelyBenign = "likely_benign"
+	DOMTriageInfo         = "informational"
+)
 
 // DOMFinding is the richer, DOM-specific evidence model. It is intentionally not
 // compressed into the generic Match.Params string so automated triage has every
@@ -175,6 +219,13 @@ type DOMFinding struct {
 
 	// Message carries postMessage-specific evidence for web_message findings.
 	Message *DOMMessageInfo `json:"message,omitempty"`
+
+	// URL carries structural destination evidence for URL/navigation sinks.
+	URL *DOMURLEvidence `json:"url,omitempty"`
+
+	// Triage explains, in plain terms, how much attention the current evidence
+	// deserves. It never upgrades severity and does not replace manual review.
+	Triage *DOMTriage `json:"triage,omitempty"`
 
 	// Fingerprint is a deterministic dedup identity derived only from stable
 	// properties (never from random canaries, timestamps or transient ids).
@@ -330,6 +381,35 @@ func DedupDOMFindings(findings []DOMFinding) []DOMFinding {
 		}
 		if e.f.Message == nil {
 			e.f.Message = f.Message
+		} else if f.Message != nil {
+			// Message observations with the same origin/shape identity may be
+			// emitted once when observed and again when their data reaches a sink.
+			// Merge the stronger evidence rather than keeping the first snapshot.
+			e.f.Message.OriginChecked = e.f.Message.OriginChecked || f.Message.OriginChecked
+			e.f.Message.SourceChecked = e.f.Message.SourceChecked || f.Message.SourceChecked
+			e.f.Message.ReachesSink = e.f.Message.ReachesSink || f.Message.ReachesSink
+			e.f.Message.ProbeGenerated = e.f.Message.ProbeGenerated || f.Message.ProbeGenerated
+			if f.Message.ListenerCount > e.f.Message.ListenerCount {
+				e.f.Message.ListenerCount = f.Message.ListenerCount
+			}
+			if f.Message.OriginCheckedListeners > e.f.Message.OriginCheckedListeners {
+				e.f.Message.OriginCheckedListeners = f.Message.OriginCheckedListeners
+			}
+			if f.Message.SourceCheckedListeners > e.f.Message.SourceCheckedListeners {
+				e.f.Message.SourceCheckedListeners = f.Message.SourceCheckedListeners
+			}
+			if e.f.Message.DataShape == "" {
+				e.f.Message.DataShape = f.Message.DataShape
+			}
+			if e.f.Message.SentToOrigin == "" {
+				e.f.Message.SentToOrigin = f.Message.SentToOrigin
+			}
+			if len(e.f.Message.ListenerLocations) == 0 {
+				e.f.Message.ListenerLocations = f.Message.ListenerLocations
+			}
+		}
+		if e.f.URL == nil {
+			e.f.URL = f.URL
 		}
 	}
 
@@ -338,6 +418,9 @@ func DedupDOMFindings(findings []DOMFinding) []DOMFinding {
 		// The primary Trigger becomes the highest-priority category present so the
 		// single-valued field is stable regardless of discovery order.
 		e.f.Trigger = primaryTriggerOf(e.f.Triggers)
+		// Re-assess after evidence merging (especially reaches_sink and confirmed)
+		// so the plain-language verdict always describes the final record.
+		e.f.Triage = assessDOMFinding(e.f)
 		out = append(out, e.f)
 	}
 	sort.SliceStable(out, func(i, j int) bool {

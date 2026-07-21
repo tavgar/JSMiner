@@ -115,6 +115,38 @@ var baseJSRules = map[string]bool{
 	"huggingface_token": true,
 	"replicate_key":     true,
 	"langsmith_key":     true,
+	// SaaS/cloud credential formats that routinely leak from browser bundles and
+	// front-end config. Each has a distinctive vendor signature, so it is a
+	// JS-relevant secret that must also run in safe mode.
+	"google_oauth_secret":   true,
+	"shopify_token":         true,
+	"supabase_key":          true,
+	"telegram_bot_token":    true,
+	"discord_bot_token":     true,
+	"discord_webhook":       true,
+	"slack_app_token":       true,
+	"mapbox_secret":         true,
+	"stripe_webhook_secret": true,
+	"square_token":          true,
+	"mailchimp_key":         true,
+	"twilio_api_key":        true,
+	"twilio_account_sid":    true,
+	"fcm_server_key":        true,
+	"gcp_service_account":   true,
+	"azure_storage_key":     true,
+	"pypi_token":            true,
+	"postman_key":           true,
+	"digitalocean_token":    true,
+	"newrelic_key":          true,
+	"notion_token":          true,
+	"doppler_token":         true,
+	"databricks_token":      true,
+	"planetscale_token":     true,
+	"linear_key":            true,
+	"figma_token":           true,
+	"sentry_token":          true,
+	"docker_pat":            true,
+	"basic_auth_url":        true,
 }
 
 // default patterns (simplified)
@@ -163,6 +195,43 @@ var defaultPatterns = map[string]string{
 	"huggingface_token": `\bhf_[A-Za-z0-9]{34,}\b`,
 	"replicate_key":     `\br8_[A-Za-z0-9]{37}\b`,
 	"langsmith_key":     `\blsv2_(?:pt|sk)_[a-f0-9]{32}_[a-f0-9]{10}\b`,
+
+	// SaaS/cloud credentials matched by their vendor-assigned signature. Like the
+	// provider rules above, these survive minification (which strips the assigning
+	// keyword) and are specific enough that a hit is almost certainly a live
+	// secret, so they need no surrounding-keyword context and add negligible noise.
+	"google_oauth_secret":   `\bGOCSPX-[A-Za-z0-9_-]{28}\b`,
+	"shopify_token":         `\bshp(?:at|ca|pa|ss)_[a-fA-F0-9]{32}\b`,
+	"supabase_key":          `\bsbp_[a-f0-9]{40}\b`,
+	"telegram_bot_token":    `\b\d{8,10}:AA[A-Za-z0-9_-]{32,35}\b`,
+	"discord_bot_token":     `\b[MNTO][A-Za-z\d_-]{23,25}\.[A-Za-z\d_-]{6}\.[A-Za-z\d_-]{27,38}\b`,
+	"discord_webhook":       `https://(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/\d{17,20}/[A-Za-z0-9_-]{60,}`,
+	"slack_app_token":       `\bxapp-\d-[A-Z0-9]+-\d+-[a-f0-9]{40,}\b`,
+	"mapbox_secret":         `\bsk\.eyJ[A-Za-z0-9_-]{50,}\.[A-Za-z0-9_-]{20,}\b`,
+	"stripe_webhook_secret": `\bwhsec_[A-Za-z0-9]{32,}\b`,
+	"square_token":          `\bsq0(?:atp|csp)-[A-Za-z0-9_-]{22,43}\b`,
+	"mailchimp_key":         `\b[0-9a-f]{32}-us\d{1,2}\b`,
+	"twilio_api_key":        `\bSK[0-9a-f]{32}\b`,
+	"twilio_account_sid":    `\bAC[0-9a-f]{32}\b`,
+	"fcm_server_key":        `\bAAAA[A-Za-z0-9_-]{7}:APA91b[A-Za-z0-9_-]{130,}\b`,
+	"gcp_service_account":   `"type"\s*:\s*"service_account"`,
+	"azure_storage_key":     `AccountKey=[A-Za-z0-9+/]{86,88}={0,2}`,
+	"pypi_token":            `\bpypi-AgEIcHlwaS[A-Za-z0-9_-]{50,}\b`,
+	"postman_key":           `\bPMAK-[a-f0-9]{24}-[a-f0-9]{34}\b`,
+	"digitalocean_token":    `\bdo[opr]_v1_[a-f0-9]{64}\b`,
+	"newrelic_key":          `\bNRAK-[A-Z0-9]{27}\b`,
+	"notion_token":          `\b(?:secret_[A-Za-z0-9]{43}|ntn_[A-Za-z0-9]{46})\b`,
+	"doppler_token":         `\bdp\.(?:pt|st|ct|sa|scim|audit)\.[A-Za-z0-9]{40,44}\b`,
+	"databricks_token":      `\bdapi[0-9a-f]{32}(?:-\d)?\b`,
+	"planetscale_token":     `\bpscale_(?:tkn|pw|oauth)_[A-Za-z0-9_.-]{32,}\b`,
+	"linear_key":            `\blin_api_[A-Za-z0-9]{40}\b`,
+	"figma_token":           `\bfigd_[A-Za-z0-9_-]{40,}\b`,
+	"sentry_token":          `\bsntry[su]_[A-Za-z0-9_=]{60,}`,
+	"docker_pat":            `\bdckr_pat_[A-Za-z0-9_-]{27}\b`,
+
+	// Credentials embedded directly in a URL's userinfo (scheme://user:pass@host).
+	// A classic, high-value leak in hard-coded connection strings and API URLs.
+	"basic_auth_url": `[a-zA-Z][a-zA-Z0-9+.-]*://[^/\s:@"']+:[^/\s:@"']+@[^\s/:"']+`,
 }
 
 // defaultSeverities ranks the default rules. Distinctive provider/cloud
@@ -194,6 +263,39 @@ var defaultSeverities = map[string]string{
 	"huggingface_token": SeverityHigh,
 	"replicate_key":     SeverityHigh,
 	"langsmith_key":     SeverityHigh,
+
+	"google_oauth_secret":   SeverityHigh,
+	"shopify_token":         SeverityHigh,
+	"supabase_key":          SeverityHigh,
+	"telegram_bot_token":    SeverityHigh,
+	"discord_bot_token":     SeverityHigh,
+	"discord_webhook":       SeverityHigh,
+	"slack_app_token":       SeverityHigh,
+	"mapbox_secret":         SeverityHigh,
+	"stripe_webhook_secret": SeverityHigh,
+	"square_token":          SeverityHigh,
+	"mailchimp_key":         SeverityHigh,
+	"twilio_api_key":        SeverityHigh,
+	"fcm_server_key":        SeverityHigh,
+	"gcp_service_account":   SeverityHigh,
+	"azure_storage_key":     SeverityHigh,
+	"pypi_token":            SeverityHigh,
+	"postman_key":           SeverityHigh,
+	"digitalocean_token":    SeverityHigh,
+	"newrelic_key":          SeverityHigh,
+	"notion_token":          SeverityHigh,
+	"doppler_token":         SeverityHigh,
+	"databricks_token":      SeverityHigh,
+	"planetscale_token":     SeverityHigh,
+	"linear_key":            SeverityHigh,
+	"figma_token":           SeverityHigh,
+	"sentry_token":          SeverityHigh,
+	"docker_pat":            SeverityHigh,
+	"basic_auth_url":        SeverityHigh,
+
+	// A Twilio Account SID is a public identifier, not a secret on its own, but a
+	// hit is a strong indicator of Twilio credentials nearby — Medium, review-worthy.
+	"twilio_account_sid": SeverityMedium,
 
 	"bearer":   SeverityMedium,
 	"api_key":  SeverityMedium,

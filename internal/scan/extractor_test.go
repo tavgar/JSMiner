@@ -177,6 +177,76 @@ func TestAIProviderKeyPatterns(t *testing.T) {
 	}
 }
 
+// TestSaaSCredentialPatterns verifies the SaaS/cloud credential detectors fire
+// on each vendor's signature shape and rank High (Twilio Account SID is Medium,
+// an identifier rather than a secret). Values are placed unquoted and
+// space-delimited so the leading/trailing \b anchors are exercised directly.
+func TestSaaSCredentialPatterns(t *testing.T) {
+	e := NewExtractor(false, false)
+	hex32 := strings.Repeat("a1b2c3d4", 4)
+	hex64 := strings.Repeat("a1b2c3d4", 8)
+	cases := []struct {
+		rule, value, severity string
+	}{
+		{"google_oauth_secret", "GOCSPX-" + strings.Repeat("Ab3xY9z", 4), SeverityHigh},
+		{"shopify_token", "shpat_" + hex32, SeverityHigh},
+		{"supabase_key", "sbp_" + strings.Repeat("a1b2c3d4", 5), SeverityHigh},
+		{"telegram_bot_token", "1234567890:AA" + strings.Repeat("Ab3xY9zQ", 4), SeverityHigh},
+		{"discord_bot_token", "N" + strings.Repeat("Ab3", 8) + ".Ab3xY9." + strings.Repeat("Ab3xY9zQ", 4), SeverityHigh},
+		{"discord_webhook", "https://discord.com/api/webhooks/12345678901234567/" + strings.Repeat("Ab3xY9zQ", 9), SeverityHigh},
+		{"slack_app_token", "xapp-1-A0B1C2D3E4-1234567890-" + hex64, SeverityHigh},
+		{"mapbox_secret", "sk.eyJ" + strings.Repeat("Ab3xY9zQ", 8) + "." + strings.Repeat("Ab3xY9zQ", 3), SeverityHigh},
+		{"stripe_webhook_secret", "whsec_" + strings.Repeat("Ab3xY9zQ", 4), SeverityHigh},
+		{"square_token", "sq0atp-" + strings.Repeat("Ab3xY9zQ", 3), SeverityHigh},
+		{"mailchimp_key", hex32 + "-us21", SeverityHigh},
+		{"twilio_api_key", "SK" + hex32, SeverityHigh},
+		{"twilio_account_sid", "AC" + hex32, SeverityMedium},
+		{"fcm_server_key", "AAAAAb3xY9z:APA91b" + strings.Repeat("Ab3xY9zQ", 17), SeverityHigh},
+		{"gcp_service_account", `"type": "service_account"`, SeverityHigh},
+		{"azure_storage_key", "AccountKey=" + strings.Repeat("Ab3xY9zQ", 10) + "Ab3xY9==", SeverityHigh},
+		{"pypi_token", "pypi-AgEIcHlwaS" + strings.Repeat("Ab3xY9zQ", 7), SeverityHigh},
+		{"postman_key", "PMAK-" + strings.Repeat("a1b2c3", 4) + "-" + hex32 + "ab", SeverityHigh},
+		{"digitalocean_token", "dop_v1_" + hex64, SeverityHigh},
+		{"newrelic_key", "NRAK-" + strings.Repeat("A1B2C3D4E", 3), SeverityHigh},
+		{"notion_token", "secret_" + strings.Repeat("Ab3xY9zQ", 5) + "abc", SeverityHigh},
+		{"doppler_token", "dp.pt." + strings.Repeat("Ab3xY9zQ", 5), SeverityHigh},
+		{"databricks_token", "dapi" + hex32, SeverityHigh},
+		{"planetscale_token", "pscale_pw_" + strings.Repeat("Ab3xY9zQ", 4), SeverityHigh},
+		{"linear_key", "lin_api_" + strings.Repeat("Ab3xY9zQ", 5), SeverityHigh},
+		{"figma_token", "figd_" + strings.Repeat("Ab3xY9zQ", 5), SeverityHigh},
+		{"sentry_token", "sntrys_" + strings.Repeat("Ab3xY9zQ", 8), SeverityHigh},
+		{"docker_pat", "dckr_pat_" + strings.Repeat("Ab3xY9z", 3) + "abcdef", SeverityHigh},
+		{"basic_auth_url", "https://user:p4ssw0rd@internal.example.com", SeverityHigh},
+	}
+	var lines []string
+	for i, c := range cases {
+		lines = append(lines, fmt.Sprintf("x%d = %s", i, c.value))
+	}
+	matches, err := e.ScanReader("bundle.js", strings.NewReader(strings.Join(lines, "\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cases {
+		var got *Match
+		for i, m := range matches {
+			if m.Pattern == c.rule {
+				got = &matches[i]
+				break
+			}
+		}
+		if got == nil {
+			t.Errorf("expected a %s match for %q", c.rule, c.value)
+			continue
+		}
+		if got.Value != c.value {
+			t.Errorf("%s matched %q, want %q", c.rule, got.Value, c.value)
+		}
+		if got.Severity != c.severity {
+			t.Errorf("%s severity = %q, want %q", c.rule, got.Severity, c.severity)
+		}
+	}
+}
+
 // TestProviderTokenPatternsSafeMode confirms the provider detectors also run in
 // safe mode (they are registered as JS rules), since minified JS bundles are the
 // primary place these tokens leak.

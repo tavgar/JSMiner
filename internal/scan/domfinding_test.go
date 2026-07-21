@@ -114,6 +114,55 @@ func TestClassifyFlowSeparatesSeverityAndConfidence(t *testing.T) {
 	}
 }
 
+func TestAssessDOMFindingExplainsURLRisk(t *testing.T) {
+	base := mkFlow("next", "HTMLAnchorElement.href", "url", TriggerPageLoad, "jsmdomc")
+	base.URL = &DOMURLEvidence{
+		Resolved: true, Scheme: "https", DestinationOrigin: "https://app.test",
+		SameOrigin: true, CanaryComponent: "query", InputKind: "absolute",
+	}
+	if got := assessDOMFinding(base); got.Verdict != DOMTriageLikelyBenign {
+		t.Errorf("same-origin query verdict = %+v, want likely_benign", got)
+	}
+
+	cross := base
+	cross.URL = &DOMURLEvidence{
+		Resolved: true, Scheme: "https", DestinationOrigin: "https://elsewhere.test",
+		SameOrigin: false, CanaryComponent: "authority", InputKind: "absolute",
+	}
+	if got := assessDOMFinding(cross); got.Verdict != DOMTriageWorthReview {
+		t.Errorf("cross-origin URL verdict = %+v, want worth_reviewing", got)
+	}
+
+	exec := base
+	exec.URL = &DOMURLEvidence{
+		Resolved: true, Scheme: "javascript", CanaryComponent: "opaque",
+		InputKind: "absolute", ExecutableScheme: true,
+	}
+	if got := assessDOMFinding(exec); got.Verdict != DOMTriageWorthReview {
+		t.Errorf("executable URL verdict = %+v, want worth_reviewing", got)
+	}
+}
+
+func TestDedupMergesMessageSinkEvidence(t *testing.T) {
+	base := DOMFinding{
+		Type: DOMTypeWebMessage, Target: "https://app.test", PageURL: "https://app.test/",
+		FrameURL: "https://app.test/", Severity: SeverityInfo, Confidence: ConfidenceMedium,
+		Message: &DOMMessageInfo{Identity: "https://app.test|string", ListenerCount: 1, ProbeGenerated: true},
+	}
+	reached := base
+	reached.Message = &DOMMessageInfo{
+		Identity: "https://app.test|string", ListenerCount: 1,
+		ProbeGenerated: true, ReachesSink: true,
+	}
+	got := DedupDOMFindings([]DOMFinding{base, reached})
+	if len(got) != 1 || got[0].Message == nil || !got[0].Message.ReachesSink {
+		t.Fatalf("message sink evidence was not merged: %+v", got)
+	}
+	if got[0].Triage == nil || got[0].Triage.Verdict != DOMTriageWorthReview {
+		t.Errorf("merged message triage = %+v, want worth_reviewing", got[0].Triage)
+	}
+}
+
 // TestBoundPreviewCaps ensures previews cannot grow without limit.
 func TestBoundPreviewCaps(t *testing.T) {
 	long := make([]byte, 5000)

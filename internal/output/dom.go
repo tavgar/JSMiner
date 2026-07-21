@@ -275,6 +275,14 @@ func printDOMFinding(w io.Writer, f scan.DOMFinding) {
 	if f.Message != nil {
 		fmt.Fprintf(&b, " listeners=%d origin_checked=%t source_checked=%t reaches_sink=%t",
 			f.Message.ListenerCount, f.Message.OriginChecked, f.Message.SourceChecked, f.Message.ReachesSink)
+		if f.Message.ListenerCount > 0 {
+			fmt.Fprintf(&b, " checks(origin=%d/%d source=%d/%d)",
+				f.Message.OriginCheckedListeners, f.Message.ListenerCount,
+				f.Message.SourceCheckedListeners, f.Message.ListenerCount)
+		}
+		if f.Message.ProbeGenerated {
+			b.WriteString(" probe_generated=true")
+		}
 		if f.Message.SentToOrigin != "" {
 			fmt.Fprintf(&b, " sent_to=%s", f.Message.SentToOrigin)
 		}
@@ -295,8 +303,38 @@ func printDOMFinding(w io.Writer, f scan.DOMFinding) {
 	if f.ValuePreview != "" {
 		fmt.Fprintf(w, "\n    value=%s", f.ValuePreview)
 	}
+	if f.URL != nil {
+		fmt.Fprintf(w, "\n    url=resolved=%t", f.URL.Resolved)
+		if f.URL.Scheme != "" {
+			fmt.Fprintf(w, " scheme=%s", f.URL.Scheme)
+		}
+		if f.URL.DestinationOrigin != "" {
+			fmt.Fprintf(w, " destination=%s", f.URL.DestinationOrigin)
+		}
+		if f.URL.Resolved {
+			fmt.Fprintf(w, " same_origin=%t", f.URL.SameOrigin)
+		}
+		if f.URL.CanaryComponent != "" {
+			fmt.Fprintf(w, " marker=%s", f.URL.CanaryComponent)
+		}
+		if f.URL.InputKind != "" {
+			fmt.Fprintf(w, " input=%s", f.URL.InputKind)
+		}
+		if f.URL.ExecutableScheme {
+			fmt.Fprint(w, " executable_scheme=true")
+		}
+	}
 	if loc := firstScriptLocation(f.Stack); loc != "" {
 		fmt.Fprintf(w, "\n    at=%s", loc)
+	}
+	if f.Message != nil && len(f.Message.ListenerLocations) > 0 {
+		fmt.Fprintf(w, "\n    listener_at=%s", firstScriptLocation(f.Message.ListenerLocations))
+		if len(f.Message.ListenerLocations) > 1 {
+			fmt.Fprintf(w, " (+%d more)", len(f.Message.ListenerLocations)-1)
+		}
+	}
+	if f.Triage != nil {
+		fmt.Fprintf(w, "\n    triage=%s reason=%s", f.Triage.Verdict, f.Triage.Reason)
 	}
 	if f.Notes != "" {
 		fmt.Fprintf(w, "\n    note=%s", f.Notes)

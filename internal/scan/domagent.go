@@ -50,13 +50,28 @@ type domRawFrame struct {
 
 // domRawMessage carries the agent's postMessage evidence.
 type domRawMessage struct {
-	ListenerCount int    `json:"listenerCount"`
-	OriginChecked bool   `json:"originChecked"`
-	SourceChecked bool   `json:"sourceChecked"`
-	DataShape     string `json:"dataShape"`
-	ReachesSink   bool   `json:"reachesSink"`
-	SentToOrigin  string `json:"sentToOrigin"`
-	Identity      string `json:"identity"`
+	ListenerCount          int           `json:"listenerCount"`
+	OriginChecked          bool          `json:"originChecked"`
+	OriginCheckedListeners int           `json:"originCheckedListeners"`
+	SourceChecked          bool          `json:"sourceChecked"`
+	SourceCheckedListeners int           `json:"sourceCheckedListeners"`
+	DataShape              string        `json:"dataShape"`
+	ReachesSink            bool          `json:"reachesSink"`
+	ProbeGenerated         bool          `json:"probeGenerated"`
+	SentToOrigin           string        `json:"sentToOrigin"`
+	Identity               string        `json:"identity"`
+	ListenerLocations      []domRawFrame `json:"listenerLocations"`
+}
+
+// domRawURL mirrors the structural URL evidence produced in-page.
+type domRawURL struct {
+	Resolved          bool   `json:"resolved"`
+	Scheme            string `json:"scheme"`
+	DestinationOrigin string `json:"destinationOrigin"`
+	SameOrigin        bool   `json:"sameOrigin"`
+	CanaryComponent   string `json:"canaryComponent"`
+	InputKind         string `json:"inputKind"`
+	ExecutableScheme  bool   `json:"executableScheme"`
 }
 
 // domRawFinding is one record the in-page agent produced, decoded on the Go
@@ -76,6 +91,7 @@ type domRawFinding struct {
 	FrameURL   string         `json:"frameUrl"`
 	FramePath  string         `json:"framePath"`
 	Message    *domRawMessage `json:"message"`
+	URL        *domRawURL     `json:"url"`
 }
 
 // domAgentState is the whole in-page agent state Go reads back after a load or
@@ -145,6 +161,7 @@ const domAgentScript = `
     findings: [], confirmations: {}, hookErrors: 0, seenMessages: {}
   };
   var NATIVE_ADD = window.addEventListener;
+  var NATIVE_SET_TIMEOUT = window.setTimeout;
 
   function sinkEnabled(family) {
     if (!SINKS) return true;
@@ -177,6 +194,47 @@ const domAgentScript = `
     // Never let our own relay token leak into a preview.
     if (TOKEN) s = s.split(TOKEN).join('');
     return s;
+  }
+
+  // Return structural URL evidence without retaining the full destination.
+  // This lets the Go side distinguish ordinary same-origin query propagation
+  // from cross-origin or executable-scheme navigation.
+  function analyseURL(value, token) {
+    var out = {
+      resolved: false, scheme: '', destinationOrigin: '', sameOrigin: false,
+      canaryComponent: '', inputKind: '', executableScheme: false
+    };
+    try {
+      var trimmed = (value || '').trim();
+      if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(trimmed)) out.inputKind = 'absolute';
+      else if (trimmed.indexOf('//') === 0) out.inputKind = 'protocol_relative';
+      else if (trimmed.indexOf('/') === 0) out.inputKind = 'root_relative';
+      else if (trimmed.indexOf('?') === 0) out.inputKind = 'query_relative';
+      else if (trimmed.indexOf('#') === 0) out.inputKind = 'fragment_relative';
+      else out.inputKind = 'path_relative';
+
+      var u = new URL(trimmed, location.href);
+      out.resolved = true;
+      out.scheme = (u.protocol || '').replace(/:$/, '').toLowerCase();
+      out.executableScheme = out.scheme === 'javascript' || out.scheme === 'vbscript' ||
+        (out.scheme === 'data' && /^data\s*:\s*text\/(?:html|javascript)/i.test(trimmed));
+      if (u.origin && u.origin !== 'null') out.destinationOrigin = u.origin;
+      out.sameOrigin = !!out.destinationOrigin && out.destinationOrigin === location.origin;
+
+      function has(part) {
+        if (!part || !token) return false;
+        if (part.indexOf(token) !== -1) return true;
+        try { return decodeURIComponent(part).indexOf(token) !== -1; } catch (e) { return false; }
+      }
+      if (has(u.protocol)) out.canaryComponent = 'scheme';
+      else if (has(u.username) || has(u.password)) out.canaryComponent = 'credentials';
+      else if (has(u.hostname) || has(u.port)) out.canaryComponent = 'authority';
+      else if (has(u.pathname)) out.canaryComponent = 'path';
+      else if (has(u.search)) out.canaryComponent = 'query';
+      else if (has(u.hash)) out.canaryComponent = 'fragment';
+      else if (has(trimmed)) out.canaryComponent = 'opaque';
+    } catch (e) {}
+    return out;
   }
 
   // ---- canary correlation --------------------------------------------------
@@ -271,8 +329,29 @@ const domAgentScript = `
             kind: 'flow', sink: sink, argument: arg, context: ctx,
             value: preview(value, mc.token), probeId: mc.id,
             sourceKind: mc.kind, sourceName: mc.name, transform: mc.transform,
-            stack: stack
+            stack: stack, url: ctx === 'url' ? analyseURL(value, mc.token) : null
           });
+
+          // The capture-phase message observer records the active message just
+          // before application listeners run. Correlate a web-message flow back
+          // to that observation so reachesSink becomes real evidence rather than
+          // a permanently-false placeholder.
+          if (mc.kind === 'web_message' && agent.activeMessage) {
+            try {
+              var am = agent.activeMessage;
+              am.message.reachesSink = true;
+              emit({ kind: 'message', message: {
+                listenerCount: am.message.listenerCount,
+                originChecked: am.message.originChecked,
+                originCheckedListeners: am.message.originCheckedListeners,
+                sourceChecked: am.message.sourceChecked,
+                sourceCheckedListeners: am.message.sourceCheckedListeners,
+                dataShape: am.message.dataShape, identity: am.message.identity,
+                reachesSink: true, probeGenerated: am.message.probeGenerated,
+                sentToOrigin: '', listenerLocations: am.message.listenerLocations
+              }});
+            } catch (e) { noteErr(); }
+          }
         }
       } else if (MODE === 'observe' && value) {
         emit({ kind: 'sink', sink: sink, argument: arg, context: ctx,
@@ -424,10 +503,14 @@ const domAgentScript = `
       var originChecked = /\.origin\b/.test(src) || /\borigin\s*[=!]==?/.test(src);
       var sourceChecked = /\.source\b/.test(src);
       var shape = extractShape(src);
+      var stack = captureStack();
       var t = topAgent() || agent;
       try {
         t.__msgListeners = t.__msgListeners || [];
-        t.__msgListeners.push({ originChecked: originChecked, sourceChecked: sourceChecked, shape: shape });
+        t.__msgListeners.push({
+          originChecked: originChecked, sourceChecked: sourceChecked, shape: shape,
+          location: stack.length ? stack[0] : null
+        });
       } catch (e) {}
     }
     function extractShape(src) {
@@ -460,24 +543,40 @@ const domAgentScript = `
         else shape = typeof ev.data;
       } catch (e) {}
       var identity = origin + '|' + shape;
-      if (agent.seenMessages[identity]) return; // duplicate: grouped by stable identity
-      agent.seenMessages[identity] = true;
       var t = topAgent() || agent;
       var listeners = (t.__msgListeners || []);
       var originChecked = false, sourceChecked = false, dataShape = '';
+      var originCheckedListeners = 0, sourceCheckedListeners = 0, listenerLocations = [];
       for (var i = 0; i < listeners.length; i++) {
-        if (listeners[i].originChecked) originChecked = true;
-        if (listeners[i].sourceChecked) sourceChecked = true;
+        if (listeners[i].originChecked) { originChecked = true; originCheckedListeners++; }
+        if (listeners[i].sourceChecked) { sourceChecked = true; sourceCheckedListeners++; }
         if (!dataShape && listeners[i].shape) dataShape = listeners[i].shape;
+        if (listeners[i].location && listenerLocations.length < 8) listenerLocations.push(listeners[i].location);
       }
-      emit({
+      var probeGenerated = matchCanaries(toStr(ev.data)).length > 0;
+      var finding = {
         kind: 'message',
         message: {
           listenerCount: listeners.length,
           originChecked: originChecked, sourceChecked: sourceChecked,
-          dataShape: dataShape || shape, identity: identity, reachesSink: false, sentToOrigin: ''
+          originCheckedListeners: originCheckedListeners,
+          sourceCheckedListeners: sourceCheckedListeners,
+          dataShape: dataShape || shape, identity: identity, reachesSink: false,
+          probeGenerated: probeGenerated, sentToOrigin: '', listenerLocations: listenerLocations
         }
-      });
+      };
+      agent.activeMessage = finding;
+      // Keep the correlation through listener-created promise microtasks, then
+      // clear it before unrelated later activity can be misattributed.
+      try {
+        NATIVE_SET_TIMEOUT.call(window, function () {
+          if (agent.activeMessage === finding) agent.activeMessage = null;
+        }, 0);
+      } catch (e) {}
+      if (!agent.seenMessages[identity]) {
+        agent.seenMessages[identity] = true; // duplicates are grouped by stable identity
+        emit(finding);
+      }
     }
 
     // Detect cross-origin sends of URL-derived data.
@@ -491,11 +590,11 @@ const domAgentScript = `
             var str = toStr(message);
             var carries = matchCanaries(str).length > 0 || (location.host && str.indexOf(location.host) !== -1);
             var crossOrigin = to === '*' || (to && to.indexOf('/') !== -1 && to.indexOf(location.origin) !== 0);
-            if (carries && crossOrigin) {
+            if (carries && crossOrigin && !agent.sendingProbe) {
               emit({ kind: 'message',
                      message: { sentToOrigin: to, reachesSink: false, listenerCount: 0,
                                 originChecked: false, sourceChecked: false,
-                                dataShape: '', identity: 'leak|' + to } });
+                                dataShape: '', identity: 'leak|' + to, probeGenerated: false } });
             }
           } catch (e) { noteErr(); }
           return origPost.apply(this, arguments);
