@@ -145,6 +145,10 @@ type DOMScanSummary struct {
 	ProbesLimit        int            `json:"probes_limit"`
 	MaxPages           int            `json:"max_pages"`
 	Findings           int            `json:"findings"`
+	// SuppressedMessages counts web_message observations dropped as chatter: a
+	// message with no listener to receive it and no security-sensitive effect
+	// (framework, analytics and third-party-iframe traffic).
+	SuppressedMessages int            `json:"suppressed_messages"`
 	FindingsBySeverity map[string]int `json:"findings_by_severity"`
 	Partial            bool           `json:"partial"`
 	TimedOut           bool           `json:"timed_out"`
@@ -462,13 +466,15 @@ func (e *Extractor) ScanDOM(ctx context.Context, targets []string, cfg DOMScanCo
 		s.scanSeed(ctx, u)
 	}
 
-	result := DOMScanResult{Findings: DedupDOMFindings(s.snapshotFindings())}
+	kept, suppressedMessages := suppressUninterestingMessages(DedupDOMFindings(s.snapshotFindings()))
+	result := DOMScanResult{Findings: kept}
 	if cfg.CollectRenderedArtifacts {
 		matches, hints := e.scanDOMRenderedPages(s.snapshotRendered(), cfg)
 		result.Matches = UniqueMatches(matches)
 		result.SourceHints = hints
 	}
 	result.Summary = s.buildSummary(cfg, len(result.Findings), result.Findings, time.Since(start))
+	result.Summary.SuppressedMessages = suppressedMessages
 	if ctx.Err() != nil {
 		result.Summary.Partial = true
 		if ctx.Err() == context.DeadlineExceeded {
@@ -1628,9 +1634,18 @@ func (s *domScanner) mapFinding(target, pageURL string, rf domRawFinding, phase,
 				Identity:               rf.Message.Identity,
 				ListenerLocations:      toStackFrames(rf.Message.ListenerLocations),
 			}
-			if rf.Message.SentToOrigin != "" {
+			switch {
+			case rf.Message.ReachesSink:
+				// Message data reached a sink: a low-severity corroboration of the
+				// separately reported source-to-sink flow.
+				f.Severity = SeverityLow
+			case rf.Message.SentToOrigin != "":
 				// A cross-origin send of URL-derived data is a low-severity leak, not
 				// merely informational.
+				f.Severity = SeverityLow
+			case rf.Message.ListenerCount > 0 && !rf.Message.OriginChecked:
+				// A listener that consumes data without inspecting origin is the classic
+				// postMessage-XSS precondition — a lead, not mere chatter.
 				f.Severity = SeverityLow
 			}
 		}
@@ -1657,10 +1672,10 @@ func assessDOMFinding(f DOMFinding) *DOMTriage {
 			return &DOMTriage{Verdict: DOMTriageWorthReview, Reason: "message data reached a security-sensitive sink"}
 		case f.Message.SentToOrigin != "":
 			return &DOMTriage{Verdict: DOMTriageWorthReview, Reason: "URL-derived data was sent to a cross-origin message target"}
+		case f.Message.ListenerCount > 0 && !f.Message.OriginChecked:
+			return &DOMTriage{Verdict: DOMTriageWorthReview, Reason: "a message listener consumed data without visible origin validation; review where the data flows"}
 		case f.Message.ProbeGenerated:
 			return &DOMTriage{Verdict: DOMTriageLikelyBenign, Reason: "scanner probe was observed, but its data did not reach a security-sensitive sink"}
-		case f.Message.ListenerCount > 0 && !f.Message.OriginChecked:
-			return &DOMTriage{Verdict: DOMTriageLikelyBenign, Reason: "no origin inspection was visible, but no security-sensitive effect was observed"}
 		default:
 			return &DOMTriage{Verdict: DOMTriageInfo, Reason: "message activity was observed without a security-sensitive effect"}
 		}
@@ -1690,6 +1705,37 @@ func assessDOMFinding(f DOMFinding) *DOMTriage {
 		}
 	}
 	return &DOMTriage{Verdict: DOMTriageInfo, Reason: "sink activity was observed without evidence of attacker control"}
+}
+
+// suppressUninterestingMessages drops web_message findings that carry no security
+// signal: a message observed with no listener to receive it and no
+// security-sensitive effect (no sink reached, no cross-origin leak). Those are
+// framework, analytics and third-party-iframe chatter, not findings. Flows,
+// cross-origin leaks, sink-reaching messages and documented listeners are kept.
+// It runs after dedup, so the many messages a busy page receives have already
+// collapsed onto the listener(s) that handle them. The kept slice preserves the
+// input order; the count of dropped findings is returned for the scan summary.
+func suppressUninterestingMessages(findings []DOMFinding) ([]DOMFinding, int) {
+	kept := findings[:0]
+	suppressed := 0
+	for _, f := range findings {
+		if f.Type == DOMTypeWebMessage && !messageIsInteresting(f.Message) {
+			suppressed++
+			continue
+		}
+		kept = append(kept, f)
+	}
+	return kept, suppressed
+}
+
+// messageIsInteresting reports whether a web_message finding is worth surfacing:
+// it documents a real receiver (a listener), its data reached a sink, or it
+// leaked data cross-origin. A bare message with none of these is chatter.
+func messageIsInteresting(m *DOMMessageInfo) bool {
+	if m == nil {
+		return false
+	}
+	return m.ListenerCount > 0 || m.ReachesSink || m.SentToOrigin != ""
 }
 
 // classifyFlow maps a sink parse context (and whether execution was confirmed)

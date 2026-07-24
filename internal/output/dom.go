@@ -272,6 +272,10 @@ func (p *Printer) printPrettyReport(w io.Writer, r Report) error {
 			}
 			fmt.Fprintf(w, "\n[dom] %s: %d finding(s) across %d page(s), %d probe(s) sent (limit %d); mode=%s\n",
 				status, s.Findings, s.PagesScanned, s.ProbesSent, s.ProbesLimit, s.Mode)
+			if s.SuppressedMessages > 0 {
+				fmt.Fprintf(w, "[dom] %d web-message chatter finding(s) suppressed (no listener and no security-sensitive effect)\n",
+					s.SuppressedMessages)
+			}
 			if s.SourceHints > 0 {
 				fmt.Fprintf(w, "[dom] source intelligence: %d hint(s), %d hint probe(s) applied\n",
 					s.SourceHints, s.HintProbesSent)

@@ -26,6 +26,10 @@ func printReflectionSection(w io.Writer, r Report) {
 		}
 		fmt.Fprintf(w, "\n[reflection] %s: %d finding(s) across %d url(s), %d probe(s) sent (limit %d), %d param(s) tested\n",
 			status, s.Findings, s.URLsScanned, s.ProbesSent, s.ProbesLimit, s.ParamsTested)
+		if s.SuppressedEchoes > 0 {
+			fmt.Fprintf(w, "[reflection] %d whole-query echo(es) suppressed (parameter not distinctly processed)\n",
+				s.SuppressedEchoes)
+		}
 	}
 }
 

@@ -246,6 +246,110 @@ func TestScanReflectionsProbeBudget(t *testing.T) {
 	}
 }
 
+// TestScanReflectionsSuppressesWholeQueryEcho proves that a route which echoes
+// the entire query string back (here URL-encoded into a canonical link) does not
+// produce one "reflection" per parameter name. Because an arbitrary control name
+// reflects the same way, none of the tested names is distinctly processed, so all
+// are suppressed rather than reported.
+func TestScanReflectionsSuppressesWholeQueryEcho(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte(`<html><head><link rel="canonical" href="/s?` +
+			html.EscapeString(r.URL.RawQuery) + `"></head><body>ok</body></html>`))
+	}))
+	defer srv.Close()
+
+	cfg := DefaultReflectionScanConfig()
+	cfg.ParamHints = []DOMSourceHint{
+		{Kind: SourceURLQuery, Name: "next", ScopeHost: hostOfURL(t, srv.URL)},
+		{Kind: SourceURLQuery, Name: "redirect", ScopeHost: hostOfURL(t, srv.URL)},
+	}
+	res := runReflection(t, srv.URL+"/s?q=test", cfg)
+	if len(res.Findings) != 0 {
+		t.Fatalf("whole-query echo should yield no real-parameter findings, got %d: %+v", len(res.Findings), res.Findings)
+	}
+	if res.Summary.SuppressedEchoes == 0 {
+		t.Error("expected suppressed-echo count to be recorded")
+	}
+}
+
+// TestScanReflectionsDangerousWholeQueryEchoReportedOnce keeps a genuinely
+// dangerous whole-query reflection (raw breakout characters in HTML text)
+// visible, but reports it a single time against the synthetic "(any)" parameter
+// instead of once per candidate name.
+func TestScanReflectionsDangerousWholeQueryEchoReportedOnce(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		var b strings.Builder
+		b.WriteString("<html><body>")
+		for _, vs := range r.URL.Query() {
+			for _, v := range vs {
+				b.WriteString(v) // reflected raw, unencoded, into HTML text
+				b.WriteString(" ")
+			}
+		}
+		b.WriteString("</body></html>")
+		w.Write([]byte(b.String()))
+	}))
+	defer srv.Close()
+
+	cfg := DefaultReflectionScanConfig()
+	cfg.ParamHints = []DOMSourceHint{
+		{Kind: SourceURLQuery, Name: "next", ScopeHost: hostOfURL(t, srv.URL)},
+		{Kind: SourceURLQuery, Name: "redirect", ScopeHost: hostOfURL(t, srv.URL)},
+	}
+	res := runReflection(t, srv.URL+"/s?q=test", cfg)
+	if len(res.Findings) != 1 {
+		t.Fatalf("dangerous whole-query echo should be reported exactly once, got %d: %+v", len(res.Findings), res.Findings)
+	}
+	f := res.Findings[0]
+	if f.Parameter != reflectionAnyParam {
+		t.Errorf("parameter = %q, want %q", f.Parameter, reflectionAnyParam)
+	}
+	if f.Context != ReflectionContextHTMLText || f.Severity != SeverityMedium {
+		t.Errorf("finding = (%s/%s), want (html_text/medium)", f.Context, f.Severity)
+	}
+	if res.Summary.SuppressedEchoes == 0 {
+		t.Error("per-name echoes should still be counted as suppressed")
+	}
+}
+
+// TestScanReflectionsRealParamDistinguishedFromEcho keeps a parameter that is
+// distinctly processed (reflected raw into the page body) while suppressing a
+// sibling name that only rides along in the benign whole-query echo.
+func TestScanReflectionsRealParamDistinguishedFromEcho(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		q := r.URL.Query()
+		body := `<html><head><link rel="canonical" href="/s?` + html.EscapeString(r.URL.RawQuery) + `"></head><body>`
+		body += "Results for: " + q.Get("q") + " end</body></html>"
+		w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	cfg := DefaultReflectionScanConfig()
+	cfg.ParamHints = []DOMSourceHint{
+		{Kind: SourceURLQuery, Name: "next", ScopeHost: hostOfURL(t, srv.URL)},
+	}
+	res := runReflection(t, srv.URL+"/s?q=test", cfg)
+	q := findReflection(res, "q")
+	if q == nil {
+		t.Fatalf("the distinctly-processed parameter q was lost; findings=%+v", res.Findings)
+	}
+	if q.Context != ReflectionContextHTMLText {
+		t.Errorf("q context = %q, want html_text (its distinguishing reflection)", q.Context)
+	}
+	if !hasLabel(q.Unfiltered, "<") || !hasLabel(q.Unfiltered, ">") {
+		t.Errorf("q should carry the raw angle brackets from its body reflection: %v", q.Unfiltered)
+	}
+	if findReflection(res, "next") != nil {
+		t.Error("the echo-only sibling parameter next should have been suppressed")
+	}
+	if findReflection(res, reflectionAnyParam) != nil {
+		t.Error("a benign encoded echo must not raise an (any) finding")
+	}
+}
+
 // TestClassifyReflectionContext exercises the structural context classifier
 // directly on crafted bodies.
 func TestClassifyReflectionContext(t *testing.T) {

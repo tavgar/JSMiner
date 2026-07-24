@@ -295,10 +295,50 @@ func (f *DOMFinding) computeFingerprint() string {
 	}
 	write("ctx", f.Context, "loc", f.scriptLocation())
 	if f.Message != nil {
-		write("msg", f.Message.Identity)
+		write("msg", messageIdentityKey(f.Message))
 	}
 	sum := sha256.Sum256([]byte(b.String()))
 	return fmt.Sprintf("%x", sum[:16])
+}
+
+// messageIdentityKey is the dedup identity of a web_message finding. It is
+// listener-centric on purpose: the security-relevant artefact is the *receiver*
+// (does its listener validate origin, does its data reach a sink), not each
+// individual message that arrives. Keying on the listener location(s) collapses
+// the many distinct messages a busy page receives (analytics, HMR, third-party
+// iframes) into one finding about the listener that handles them. Findings
+// without a captured listener fall back to the cross-origin leak target, then to
+// the origin+shape identity, so pre-listener behaviour is unchanged.
+func messageIdentityKey(m *DOMMessageInfo) string {
+	if m == nil {
+		return ""
+	}
+	if locs := messageListenerKey(m.ListenerLocations); locs != "" {
+		return "listeners:" + locs
+	}
+	if m.SentToOrigin != "" {
+		return "leak:" + m.SentToOrigin
+	}
+	return m.Identity
+}
+
+// messageListenerKey renders the sorted, unique set of listener registration
+// locations as a stable string, or "" when none were captured.
+func messageListenerKey(locs []DOMStackFrame) string {
+	if len(locs) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(locs))
+	for _, fr := range locs {
+		if fr.URL == "" {
+			continue
+		}
+		parts = append(parts, fr.URL+":"+strconv.Itoa(fr.Line)+":"+strconv.Itoa(fr.Column))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(uniqueSortedStrings(parts), "|")
 }
 
 // severityAtLeast reports whether sev ranks at or above threshold. Both are

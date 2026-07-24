@@ -145,6 +145,10 @@ type ReflectionScanSummary struct {
 	ProbesLimit        int            `json:"probes_limit"`
 	ParamsTested       int            `json:"params_tested"`
 	Findings           int            `json:"findings"`
+	// SuppressedEchoes counts candidates dropped because their reflection was
+	// indistinguishable from an arbitrary-name (whole-query) echo — i.e. the
+	// parameter was not distinctly processed by the application.
+	SuppressedEchoes   int            `json:"suppressed_echoes"`
 	FindingsBySeverity map[string]int `json:"findings_by_severity"`
 	Partial            bool           `json:"partial"`
 	DurationMS         int64          `json:"duration_ms"`
@@ -167,6 +171,7 @@ type reflectionScanner struct {
 	urlsScanned  int
 	urlsFailed   int
 	paramsTested int
+	suppressed   int
 	errs         []string
 	partial      bool
 }
@@ -258,7 +263,15 @@ func (s *reflectionScanner) scanRoute(ctx context.Context, route string, hintInd
 		if !s.reserveProbe() {
 			return
 		}
-		reqURL, ok := reflectionRequestURL(u, batch)
+		// A control probe carries a parameter name the application has no reason to
+		// know. Riding in the same request as the real candidates (no extra round
+		// trip), it reveals whether the route echoes *arbitrary* parameters — a
+		// whole-query or whole-URL echo (canonical link, og:url, form action, hidden
+		// field, analytics beacon). A candidate that reflects only the way this junk
+		// name does is not distinctly processed by the app, so it is not a real
+		// parameter and is suppressed rather than reported as one reflection-per-name.
+		control := newReflectionControlProbe()
+		reqURL, ok := reflectionRequestURL(u, appendReflectionProbe(batch, control))
 		if !ok {
 			continue
 		}
@@ -269,12 +282,52 @@ func (s *reflectionScanner) scanRoute(ctx context.Context, route string, hintInd
 		}
 		s.urlDone()
 		lowered := bytes.ToLower(body)
+		echo := reflectionControlEcho(body, lowered, control)
+		// If arbitrary names reflect *dangerously* (raw breakout characters in an
+		// executable context), the route itself is worth one finding — but reported
+		// once against a synthetic "(any)" parameter, never once per candidate name.
+		if cf, ok := reflectionControlFinding(u, control, body, lowered, echo); ok {
+			s.addFinding(cf)
+		}
 		for _, p := range batch {
-			if f, ok := analyzeReflection(u, p, body, lowered); ok {
-				s.addFinding(f)
+			f, found, real := analyzeReflection(u, p, body, lowered, echo)
+			if !found {
+				continue
 			}
+			if !real {
+				s.addSuppressed()
+				continue
+			}
+			s.addFinding(f)
 		}
 	}
+}
+
+// reflectionAnyParam labels a route-level finding that reflects arbitrary
+// parameter names, so a whole-query echo is reported once rather than once per
+// candidate name.
+const reflectionAnyParam = "(any)"
+
+// newReflectionControlProbe builds a probe whose parameter name is random, so the
+// application has no reason to process it specially. Its marker pair is distinct
+// from every candidate's, so its reflection is never confused with theirs.
+func newReflectionControlProbe() reflectionProbe {
+	pre := "jsmrp" + randomToken()
+	suf := "jsmrs" + randomToken()
+	return reflectionProbe{
+		param: "jsmctl" + randomToken(),
+		pre:   pre,
+		suf:   suf,
+		value: pre + reflectionCharset + suf,
+	}
+}
+
+// appendReflectionProbe returns batch with extra appended, without mutating the
+// caller's backing array.
+func appendReflectionProbe(batch []reflectionProbe, extra reflectionProbe) []reflectionProbe {
+	out := make([]reflectionProbe, 0, len(batch)+1)
+	out = append(out, batch...)
+	return append(out, extra)
 }
 
 // buildProbes assembles the ordered candidate parameter set for a route: its own
@@ -385,20 +438,29 @@ func (s *reflectionScanner) fetchBody(reqURL, baseHost string) ([]byte, error) {
 	return readCappedBody(resp.Body)
 }
 
-// analyzeReflection looks for probe p's marker in the response. When found it
-// classifies the context, determines which breakout characters survived
-// unencoded, and builds a finding. body is the raw response; lowered is its
-// lowercase form, shared across the batch for the structural context search.
-func analyzeReflection(u *url.URL, p reflectionProbe, body, lowered []byte) (ReflectionFinding, bool) {
-	first := bytes.Index(body, []byte(p.pre))
-	if first < 0 {
-		return ReflectionFinding{}, false
+// analyzeReflection looks for probe p's marker in the response and decides
+// whether the parameter is *distinctly* processed by the application rather than
+// merely echoed the way any arbitrary name would be. body is the raw response;
+// lowered is its lowercase form. echo is the control probe's reflection profile.
+//
+// It returns (finding, found, real): found reports whether the marker appeared at
+// all; real reports whether the reflection is parameter-specific. A found-but-not-
+// real reflection is a whole-query echo and should be suppressed, not reported.
+func analyzeReflection(u *url.URL, p reflectionProbe, body, lowered []byte, echo reflectionEcho) (ReflectionFinding, bool, bool) {
+	occ := reflectionOccurrences(body, lowered, p)
+	if len(occ) == 0 {
+		return ReflectionFinding{}, false, false
 	}
-	occurrences := bytes.Count(body, []byte(p.pre))
-	context := classifyReflectionContext(lowered, first)
+	chosen, real := chooseReflectionOccurrence(occ, echo)
+	if !real {
+		// The parameter reflects only in the same context(s), with no stronger
+		// breakout characters, than a name the application has never seen: it rides
+		// along in a whole-query/URL echo and is not distinctly processed.
+		return ReflectionFinding{}, true, false
+	}
 
-	unfiltered, notes := reflectionUnfiltered(body, p, first)
-	severity, confidence, triage := classifyReflection(context, unfiltered)
+	occurrences := bytes.Count(body, []byte(p.pre))
+	severity, confidence, triage := classifyReflection(chosen.context, chosen.unfiltered)
 
 	f := ReflectionFinding{
 		Type:         ReflectionType,
@@ -406,15 +468,173 @@ func analyzeReflection(u *url.URL, p reflectionProbe, body, lowered []byte) (Ref
 		PageURL:      reflectionRouteLabel(u, p.param),
 		Parameter:    p.param,
 		Method:       "GET",
-		Context:      context,
+		Context:      chosen.context,
 		Occurrences:  occurrences,
-		Unfiltered:   unfiltered,
-		ValuePreview: reflectionPreview(body, first),
+		Unfiltered:   chosen.unfiltered,
+		ValuePreview: reflectionPreview(body, chosen.at),
 		DiscoveredBy: p.discoveredBy,
 		Severity:     severity,
 		Confidence:   confidence,
 		Triage:       triage,
-		Notes:        notes,
+		Notes:        chosen.notes,
+	}
+	f.Fingerprint = f.computeFingerprint()
+	return f, true, true
+}
+
+// reflectionOccurrence is one place probe p's marker landed in the response,
+// with the context it landed in and the breakout characters that survived there.
+type reflectionOccurrence struct {
+	at         int
+	context    string
+	unfiltered []string
+	notes      string
+}
+
+// maxReflectionOccurrences bounds how many reflections of one marker are examined
+// so a response that echoes a value many times cannot cause pathological work.
+const maxReflectionOccurrences = 16
+
+// reflectionOccurrences finds every place (bounded) probe p's marker landed and
+// classifies each independently, so a value both echoed benignly (e.g. a
+// canonical link) and processed distinctly (e.g. reflected raw in the body) is
+// judged on its most telling occurrence rather than just its first.
+func reflectionOccurrences(body, lowered []byte, p reflectionProbe) []reflectionOccurrence {
+	var out []reflectionOccurrence
+	needle := []byte(p.pre)
+	for idx := 0; len(out) < maxReflectionOccurrences; {
+		rel := bytes.Index(body[idx:], needle)
+		if rel < 0 {
+			break
+		}
+		at := idx + rel
+		chars, notes := reflectionUnfiltered(body, p, at)
+		out = append(out, reflectionOccurrence{
+			at:         at,
+			context:    classifyReflectionContext(lowered, at),
+			unfiltered: chars,
+			notes:      notes,
+		})
+		idx = at + len(needle)
+	}
+	return out
+}
+
+// reflectionEcho records the contexts an arbitrary-name (control) probe reflected
+// in and which breakout characters survived in each, so a candidate reflection
+// can be judged parameter-specific or a mere whole-query echo.
+type reflectionEcho struct {
+	reflected bool
+	ctxChars  map[string]map[string]bool
+}
+
+// covers reports whether the control reflected in ctx and every one of chars
+// survived there too — i.e. this candidate reflection is fully accounted for by
+// the arbitrary-name echo and reveals nothing parameter-specific.
+func (e reflectionEcho) covers(ctx string, chars []string) bool {
+	set, ok := e.ctxChars[ctx]
+	if !ok {
+		return false
+	}
+	for _, c := range chars {
+		if !set[c] {
+			return false
+		}
+	}
+	return true
+}
+
+// reflectionControlEcho builds the control probe's reflection profile.
+func reflectionControlEcho(body, lowered []byte, control reflectionProbe) reflectionEcho {
+	echo := reflectionEcho{ctxChars: make(map[string]map[string]bool)}
+	for _, occ := range reflectionOccurrences(body, lowered, control) {
+		echo.reflected = true
+		set := echo.ctxChars[occ.context]
+		if set == nil {
+			set = make(map[string]bool)
+			echo.ctxChars[occ.context] = set
+		}
+		for _, c := range occ.unfiltered {
+			set[c] = true
+		}
+	}
+	return echo
+}
+
+// chooseReflectionOccurrence selects the reflection that best represents the
+// parameter and reports whether the parameter is distinctly processed. When the
+// control did not reflect, every reflection is parameter-specific, so the
+// strongest occurrence is chosen. When the control did reflect, only an
+// occurrence it cannot account for — a context it never reached, or a breakout
+// character it did not survive there — proves the parameter is real; if none
+// exists the reflection is a whole-query echo and is suppressed.
+func chooseReflectionOccurrence(occ []reflectionOccurrence, echo reflectionEcho) (reflectionOccurrence, bool) {
+	if !echo.reflected {
+		return strongestReflection(occ), true
+	}
+	var distinguishing []reflectionOccurrence
+	for _, o := range occ {
+		if !echo.covers(o.context, o.unfiltered) {
+			distinguishing = append(distinguishing, o)
+		}
+	}
+	if len(distinguishing) == 0 {
+		return reflectionOccurrence{}, false
+	}
+	return strongestReflection(distinguishing), true
+}
+
+// strongestReflection returns the occurrence whose context and surviving
+// characters carry the most weight, so a finding leads with its best evidence.
+func strongestReflection(occ []reflectionOccurrence) reflectionOccurrence {
+	best := occ[0]
+	bestRank := reflectionOccurrenceRank(best)
+	for _, o := range occ[1:] {
+		if r := reflectionOccurrenceRank(o); r > bestRank {
+			best, bestRank = o, r
+		}
+	}
+	return best
+}
+
+func reflectionOccurrenceRank(o reflectionOccurrence) int {
+	sev, _, _ := classifyReflection(o.context, o.unfiltered)
+	return severityRank(sev)*100 + len(o.unfiltered)
+}
+
+// reflectionControlFinding reports a route that reflects arbitrary parameter
+// names *dangerously* (raw breakout characters in an executable context) as a
+// single "(any)" finding. A benign whole-query echo (everything encoded, e.g. a
+// canonical link) produces no finding at all — that is pure noise. This keeps a
+// genuine whole-query reflection visible without emitting it once per candidate.
+func reflectionControlFinding(u *url.URL, control reflectionProbe, body, lowered []byte, echo reflectionEcho) (ReflectionFinding, bool) {
+	if !echo.reflected {
+		return ReflectionFinding{}, false
+	}
+	occ := reflectionOccurrences(body, lowered, control)
+	if len(occ) == 0 {
+		return ReflectionFinding{}, false
+	}
+	best := strongestReflection(occ)
+	severity, confidence, triage := classifyReflection(best.context, best.unfiltered)
+	if severityRank(severity) < severityRank(SeverityMedium) {
+		return ReflectionFinding{}, false
+	}
+	f := ReflectionFinding{
+		Type:         ReflectionType,
+		Target:       (&url.URL{Scheme: u.Scheme, Host: u.Host}).String(),
+		PageURL:      reflectionRouteLabel(u, reflectionAnyParam),
+		Parameter:    reflectionAnyParam,
+		Method:       "GET",
+		Context:      best.context,
+		Occurrences:  bytes.Count(body, []byte(control.pre)),
+		Unfiltered:   best.unfiltered,
+		ValuePreview: reflectionPreview(body, best.at),
+		DiscoveredBy: []string{"control_probe"},
+		Severity:     severity,
+		Confidence:   confidence,
+		Triage:       triage,
+		Notes:        "route reflects arbitrary parameter names (whole-query or whole-URL echo); not attributable to a specific parameter",
 	}
 	f.Fingerprint = f.computeFingerprint()
 	return f, true
@@ -765,6 +985,14 @@ func (s *reflectionScanner) addParamsTested(n int) {
 	s.mu.Unlock()
 }
 
+// addSuppressed records one candidate whose reflection was indistinguishable from
+// an arbitrary-name echo, so it was not reported as a real parameter.
+func (s *reflectionScanner) addSuppressed() {
+	s.mu.Lock()
+	s.suppressed++
+	s.mu.Unlock()
+}
+
 func (s *reflectionScanner) urlDone() {
 	s.mu.Lock()
 	s.urlsScanned++
@@ -807,6 +1035,7 @@ func (s *reflectionScanner) buildSummary(cfg ReflectionScanConfig, findings []Re
 		ProbesLimit:        cfg.MaxProbes,
 		ParamsTested:       s.paramsTested,
 		Findings:           len(findings),
+		SuppressedEchoes:   s.suppressed,
 		FindingsBySeverity: bySev,
 		Partial:            s.partial || s.urlsFailed > 0,
 		DurationMS:         dur.Milliseconds(),
