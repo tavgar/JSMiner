@@ -668,6 +668,12 @@ func main() {
 		ranReflection = true
 	}
 
+	// Global value-level dedup, applied once all sources (static, crawl, passive,
+	// rendered) have been merged: when the same value is flagged by several signals
+	// at different severities, keep only its highest-severity finding(s) so a real
+	// secret is never buried under lower-signal echoes of the same string.
+	allMatches = scan.DedupMatchesByValueKeepSeverity(allMatches)
+
 	var out *os.File = os.Stdout
 	if *outFile != "" {
 		f, err := os.Create(*outFile)

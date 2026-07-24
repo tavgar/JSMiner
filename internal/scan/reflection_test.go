@@ -393,6 +393,46 @@ func TestReflectionRoutesDedup(t *testing.T) {
 	}
 }
 
+// TestDedupReflectionCollapsesAcrossRoutes proves the same parameter reflected in
+// the same context on several crawled routes collapses to one finding, with the
+// breadth preserved as SeenOnRoutes and a deterministic representative route.
+func TestDedupReflectionCollapsesAcrossRoutes(t *testing.T) {
+	mk := func(route string) ReflectionFinding {
+		return ReflectionFinding{
+			Type: ReflectionType, Target: "https://x.test", PageURL: route,
+			Parameter: "q", Context: ReflectionContextHTMLText,
+			Severity: SeverityMedium, Confidence: ConfidenceHigh, Unfiltered: []string{"<", ">"},
+		}
+	}
+	out := DedupReflectionFindings([]ReflectionFinding{
+		mk("https://x.test/search?q="),
+		mk("https://x.test/browse?q="),
+		mk("https://x.test/search?q="), // same route again -> not double counted
+	})
+	if len(out) != 1 {
+		t.Fatalf("same parameter across routes should collapse to 1, got %d", len(out))
+	}
+	if out[0].SeenOnRoutes != 2 {
+		t.Errorf("SeenOnRoutes = %d, want 2 distinct routes", out[0].SeenOnRoutes)
+	}
+	if out[0].PageURL != "https://x.test/browse?q=" {
+		t.Errorf("representative route = %q, want the lexicographically smallest", out[0].PageURL)
+	}
+}
+
+// TestDedupReflectionKeepsContextsSeparate proves reflections of the same
+// parameter in genuinely different contexts stay distinct findings.
+func TestDedupReflectionKeepsContextsSeparate(t *testing.T) {
+	base := ReflectionFinding{Type: ReflectionType, Target: "https://x.test", Parameter: "q", Severity: SeverityLow}
+	a := base
+	a.PageURL, a.Context = "https://x.test/a?q=", ReflectionContextHTMLText
+	b := base
+	b.PageURL, b.Context = "https://x.test/b?q=", ReflectionContextScript
+	if out := DedupReflectionFindings([]ReflectionFinding{a, b}); len(out) != 2 {
+		t.Fatalf("distinct contexts should stay separate, got %d", len(out))
+	}
+}
+
 // TestReflectionFingerprintDedup collapses two observations of the same
 // route/param/context into one finding, keeping the stronger severity.
 func TestReflectionFingerprintDedup(t *testing.T) {

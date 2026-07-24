@@ -39,6 +39,9 @@ func printReflectionFinding(w io.Writer, f scan.ReflectionFinding) {
 	fmt.Fprintf(w, "[%s] (%s/%s) %s[%s] -> %s\n",
 		f.Type, f.Severity, f.Confidence, f.Method, f.Parameter, f.Context)
 	fmt.Fprintf(w, "    url=%s", f.PageURL)
+	if f.SeenOnRoutes > 1 {
+		fmt.Fprintf(w, " (+%d more route(s))", f.SeenOnRoutes-1)
+	}
 	if f.Occurrences > 0 {
 		fmt.Fprintf(w, " occurrences=%d", f.Occurrences)
 	}

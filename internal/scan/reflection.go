@@ -99,9 +99,15 @@ func DefaultReflectionScanConfig() ReflectionScanConfig {
 type ReflectionFinding struct {
 	Type      string `json:"type"`
 	Target    string `json:"target"`   // scheme://host
-	PageURL   string `json:"page_url"` // route probed (path + query name), marker redacted
+	PageURL   string `json:"page_url"` // representative route probed (path + query name), marker redacted
 	Parameter string `json:"parameter"`
 	Method    string `json:"method"`
+
+	// SeenOnRoutes is how many distinct routes reflected this same parameter in the
+	// same context. It is set only when a finding was collapsed across routes (>1),
+	// so the same reflected parameter is reported once with PageURL holding one
+	// representative (lexicographically smallest) route.
+	SeenOnRoutes int `json:"seen_on_routes,omitempty"`
 
 	// Context classifies where the marker landed: html_text, html_attribute,
 	// html_comment, script or unknown.
@@ -774,11 +780,13 @@ func classifyReflection(context string, unfiltered []string) (severity, confiden
 // ---- identity, dedup & ordering --------------------------------------------
 
 // computeFingerprint derives a deterministic identity from stable properties
-// only: type, target origin, route, parameter and context. The random marker,
-// occurrence count and surviving-character set never enter it.
+// only: type, target origin, parameter and context. The route is deliberately
+// excluded so the same parameter reflected in the same context across many
+// crawled routes collapses to one finding (the routes are counted as breadth).
+// The random marker, occurrence count and surviving-character set never enter it.
 func (f *ReflectionFinding) computeFingerprint() string {
 	var b strings.Builder
-	for _, p := range []string{f.Type, originOf(f.Target), routeOf(f.PageURL), f.Parameter, f.Context} {
+	for _, p := range []string{f.Type, originOf(f.Target), f.Parameter, f.Context} {
 		b.WriteString(p)
 		b.WriteByte('\x1f')
 	}
@@ -792,8 +800,9 @@ func (f *ReflectionFinding) computeFingerprint() string {
 // (severity desc, then fingerprint asc).
 func DedupReflectionFindings(findings []ReflectionFinding) []ReflectionFinding {
 	type entry struct {
-		f     ReflectionFinding
-		order int
+		f      ReflectionFinding
+		order  int
+		routes map[string]struct{}
 	}
 	byFP := make(map[string]*entry)
 	var order int
@@ -802,9 +811,15 @@ func DedupReflectionFindings(findings []ReflectionFinding) []ReflectionFinding {
 		f.Fingerprint = f.computeFingerprint()
 		e, ok := byFP[f.Fingerprint]
 		if !ok {
-			byFP[f.Fingerprint] = &entry{f: f, order: order}
+			byFP[f.Fingerprint] = &entry{f: f, order: order, routes: map[string]struct{}{routeOf(f.PageURL): {}}}
 			order++
 			continue
+		}
+		// Track every distinct route this parameter reflected on and keep a
+		// deterministic representative (the lexicographically smallest route).
+		e.routes[routeOf(f.PageURL)] = struct{}{}
+		if f.PageURL < e.f.PageURL {
+			e.f.PageURL = f.PageURL
 		}
 		if severityRank(f.Severity) > severityRank(e.f.Severity) {
 			e.f.Severity = f.Severity
@@ -827,6 +842,9 @@ func DedupReflectionFindings(findings []ReflectionFinding) []ReflectionFinding {
 
 	out := make([]ReflectionFinding, 0, len(byFP))
 	for _, e := range byFP {
+		if len(e.routes) > 1 {
+			e.f.SeenOnRoutes = len(e.routes)
+		}
 		e.f.Triage = reflectionTriageFor(e.f)
 		out = append(out, e.f)
 	}
