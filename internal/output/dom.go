@@ -327,6 +327,9 @@ func printDOMFinding(w io.Writer, f scan.DOMFinding) {
 	}
 	fmt.Fprint(w, b.String())
 	fmt.Fprintf(w, "\n    page=%s", f.PageURL)
+	if f.SeenOnPages > 1 {
+		fmt.Fprintf(w, " (+%d more page(s))", f.SeenOnPages-1)
+	}
 	if f.FrameURL != "" && f.FrameURL != f.PageURL {
 		fmt.Fprintf(w, " frame=%s", f.FrameURL)
 	}

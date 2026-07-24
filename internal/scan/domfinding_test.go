@@ -88,6 +88,68 @@ func TestFingerprintIgnoresPreview(t *testing.T) {
 	}
 }
 
+// TestDedupCollapsesSharedBundleAcrossPages proves a bug living in a shared
+// external script, reported on many crawled pages, collapses to one finding —
+// with its breadth preserved as SeenOnPages and a deterministic representative
+// page — instead of one duplicate per page.
+func TestDedupCollapsesSharedBundleAcrossPages(t *testing.T) {
+	mk := func(page string) DOMFinding {
+		f := mkFlow("q", "Element.innerHTML", "html", TriggerPageLoad, "x")
+		f.PageURL, f.FrameURL = page, page
+		f.Stack = []DOMStackFrame{{Function: "render", URL: "https://app.test/vendor.js", Line: 5, Column: 1}}
+		return f
+	}
+	out := DedupDOMFindings([]DOMFinding{
+		mk("https://app.test/products"),
+		mk("https://app.test/about"),
+		mk("https://app.test/products"), // same route again -> not double counted
+	})
+	if len(out) != 1 {
+		t.Fatalf("shared-bundle flow should collapse to 1 finding, got %d", len(out))
+	}
+	if out[0].SeenOnPages != 2 {
+		t.Errorf("SeenOnPages = %d, want 2 distinct routes", out[0].SeenOnPages)
+	}
+	if out[0].PageURL != "https://app.test/about" {
+		t.Errorf("representative page = %q, want the lexicographically smallest route", out[0].PageURL)
+	}
+}
+
+// TestDedupKeepsInlinePerPageBugsSeparate proves an inline-script bug — whose
+// code location IS the document URL — stays one finding per page, because those
+// are genuinely different code rather than a shared bundle.
+func TestDedupKeepsInlinePerPageBugsSeparate(t *testing.T) {
+	mk := func(page string) DOMFinding {
+		f := mkFlow("q", "Element.innerHTML", "html", TriggerPageLoad, "x")
+		f.PageURL, f.FrameURL = page, page
+		f.Stack = []DOMStackFrame{{URL: page, Line: 12, Column: 3}} // inline: location == document URL
+		return f
+	}
+	if out := DedupDOMFindings([]DOMFinding{mk("https://app.test/a"), mk("https://app.test/b")}); len(out) != 2 {
+		t.Fatalf("distinct inline-script bugs should stay separate, got %d", len(out))
+	}
+}
+
+// TestDedupCollapsesSharedListenerAcrossPages proves a message listener living in
+// a shared bundle, observed on many pages, collapses to one finding about that
+// listener rather than one per page.
+func TestDedupCollapsesSharedListenerAcrossPages(t *testing.T) {
+	loc := []DOMStackFrame{{URL: "https://app.test/vendor.js", Line: 9, Column: 2}}
+	mk := func(page string) DOMFinding {
+		return DOMFinding{
+			Type: DOMTypeWebMessage, Target: "https://app.test", PageURL: page, FrameURL: page,
+			Message: &DOMMessageInfo{ListenerCount: 1, ListenerLocations: loc, Identity: page + "|{cmd}"},
+		}
+	}
+	out := DedupDOMFindings([]DOMFinding{mk("https://app.test/x"), mk("https://app.test/y")})
+	if len(out) != 1 {
+		t.Fatalf("shared listener should collapse across pages, got %d findings", len(out))
+	}
+	if out[0].SeenOnPages != 2 {
+		t.Errorf("SeenOnPages = %d, want 2", out[0].SeenOnPages)
+	}
+}
+
 // TestClassifyFlowSeparatesSeverityAndConfidence checks the severity/confidence
 // ladder and that the two axes are independent.
 func TestClassifyFlowSeparatesSeverityAndConfidence(t *testing.T) {

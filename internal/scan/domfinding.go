@@ -181,6 +181,13 @@ type DOMFinding struct {
 	FrameURL  string `json:"frame_url,omitempty"`
 	FramePath string `json:"frame_path,omitempty"`
 
+	// SeenOnPages is how many distinct page routes this same finding — same code
+	// location, source and sink — was observed on. It is set only when a finding
+	// was collapsed across pages (>1), so a shared-bundle bug reported once still
+	// conveys how broadly it is reachable. PageURL then holds one representative
+	// (lexicographically smallest) route.
+	SeenOnPages int `json:"seen_on_pages,omitempty"`
+
 	Source *DOMSource `json:"source,omitempty"`
 	Sink   *DOMSink   `json:"sink,omitempty"`
 
@@ -272,12 +279,33 @@ func (f *DOMFinding) scriptLocation() string {
 	return ""
 }
 
+// codeIdentity returns a stable identifier for the actual code a finding is
+// about — the script location for a flow/sink, or the listener location(s) for a
+// web_message. When it is known it, not the page URL, anchors identity, so the
+// same shared script reached from many crawled pages or frames collapses to one
+// finding instead of one duplicate per page. It is empty when no code location
+// was captured (an inline handler with no stack, a message with no listener),
+// and then the page route stays in identity so unrelated per-page activity is
+// not merged. Note that inline scripts carry the document URL in their location,
+// so a genuinely per-page inline bug keeps a page-specific identity naturally.
+func (f *DOMFinding) codeIdentity() string {
+	if f.Message != nil {
+		if k := messageListenerKey(f.Message.ListenerLocations); k != "" {
+			return "listeners:" + k
+		}
+		return ""
+	}
+	return f.scriptLocation()
+}
+
 // computeFingerprint derives a deterministic identity from stable properties
-// only: type, target origin, page route, frame, source kind+name, sink name and
-// argument, sink context, and the relevant script location. The specific trigger
-// is deliberately excluded so the same flow reached through several triggers or
-// interactions collapses to one finding (its triggers are then combined). Random
-// canary values, timestamps and transient browser identifiers never enter it.
+// only: type, target origin, source kind+name, sink name and argument, sink
+// context, and the relevant code location — plus the page route only when no code
+// location is available. The specific trigger and page URL are deliberately
+// excluded once the code is identifiable so the same flow reached through several
+// triggers, or the same shared script loaded on many pages, collapses to one
+// finding. Random canary values, timestamps and transient browser identifiers
+// never enter it.
 func (f *DOMFinding) computeFingerprint() string {
 	var b strings.Builder
 	write := func(parts ...string) {
@@ -286,7 +314,10 @@ func (f *DOMFinding) computeFingerprint() string {
 			b.WriteByte('\x1f') // unit separator keeps fields unambiguous
 		}
 	}
-	write(f.Type, originOf(f.Target), routeOf(f.PageURL), f.FrameURL)
+	write(f.Type, originOf(f.Target))
+	if f.codeIdentity() == "" {
+		write("page", routeOf(f.PageURL), f.FrameURL)
+	}
 	if f.Source != nil {
 		write("src", f.Source.Kind, f.Source.Name)
 	}
@@ -373,8 +404,9 @@ func confidenceRank(c string) int {
 // output. Each returned finding carries its computed fingerprint.
 func DedupDOMFindings(findings []DOMFinding) []DOMFinding {
 	type entry struct {
-		f     DOMFinding
-		order int
+		f      DOMFinding
+		order  int
+		routes map[string]struct{}
 	}
 	byFP := make(map[string]*entry)
 	var order int
@@ -389,9 +421,17 @@ func DedupDOMFindings(findings []DOMFinding) []DOMFinding {
 			if primaryTrigger != "" {
 				f.Triggers = mergeTriggers(f.Triggers, primaryTrigger)
 			}
-			byFP[fp] = &entry{f: f, order: order}
+			byFP[fp] = &entry{f: f, order: order, routes: map[string]struct{}{routeOf(f.PageURL): {}}}
 			order++
 			continue
+		}
+
+		// Track every distinct page route this shared finding appeared on, and keep
+		// a deterministic representative (the lexicographically smallest page URL) so
+		// output does not depend on crawl order.
+		e.routes[routeOf(f.PageURL)] = struct{}{}
+		if f.PageURL < e.f.PageURL {
+			e.f.PageURL, e.f.FrameURL, e.f.FramePath = f.PageURL, f.FrameURL, f.FramePath
 		}
 
 		// Merge into the existing record: union triggers, keep the strongest
@@ -459,6 +499,11 @@ func DedupDOMFindings(findings []DOMFinding) []DOMFinding {
 		// The primary Trigger becomes the highest-priority category present so the
 		// single-valued field is stable regardless of discovery order.
 		e.f.Trigger = primaryTriggerOf(e.f.Triggers)
+		// Record how broadly a collapsed finding was reachable (only when >1, so a
+		// per-page finding stays clean).
+		if len(e.routes) > 1 {
+			e.f.SeenOnPages = len(e.routes)
+		}
 		// Re-assess after evidence merging (especially reaches_sink and confirmed)
 		// so the plain-language verdict always describes the final record.
 		e.f.Triage = assessDOMFinding(e.f)
